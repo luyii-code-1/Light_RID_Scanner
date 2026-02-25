@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+.venv/
+venv/
+
+rid_config.json
+rid_history_cache.json
+oui.txt
+
+*.tmp

@@ -1714,17 +1714,26 @@ th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
 /* ── 下方两栏：地图 + 日志 ── */
 .bottom{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) minmax(0,.95fr);gap:12px;
         margin:0 12px;min-height:0}
+.bottom.map-collapsed{grid-template-columns:max-content minmax(0,1fr) minmax(0,1.35fr)}
+.bottom.log-collapsed{grid-template-columns:minmax(0,1.15fr) max-content minmax(0,1.35fr)}
+.bottom.map-collapsed.log-collapsed{grid-template-columns:max-content max-content minmax(0,1fr)}
 @media(max-width:960px){
   header{grid-template-columns:1fr}
   header .head-stats{justify-content:flex-start}
 }
 @media(max-width:1180px){
   .bottom{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .bottom.map-collapsed,.bottom.log-collapsed,.bottom.map-collapsed.log-collapsed{
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr)
+  }
   .bottom .panel.ap-panel{grid-column:1/-1;min-height:220px}
 }
 @media(max-width:800px){
   body{grid-template-rows:auto minmax(0,1fr) minmax(220px,42vh) auto}
   .bottom{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
+  .bottom.map-collapsed,.bottom.log-collapsed,.bottom.map-collapsed.log-collapsed{
+    grid-template-columns:1fr
+  }
   .bottom .panel.ap-panel{grid-column:auto;min-height:220px}
   .adv-input{min-width:0;flex-basis:100%}
   th:nth-child(2),td:nth-child(2){width:220px}
@@ -1739,6 +1748,10 @@ th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
 .panel-hdr span.sub{color:#8b949e;font-size:12px;font-weight:400}
 .panel-hdr .hdr-actions{display:flex;align-items:center;gap:8px}
 .panel.collapsible.collapsed{align-self:start;min-height:0}
+.panel.collapsible.collapsed .panel-hdr{padding:8px 10px;gap:8px}
+.panel.collapsible.collapsed .panel-hdr .sub{display:none}
+.panel.collapsible.collapsed .panel-hdr label{display:none}
+.panel.collapsible.collapsed .panel-hdr .hdr-actions{gap:6px}
 .panel.log-panel.collapsed .logbox{display:none}
 .panel.log-panel.collapsed .panel-hdr{border-bottom:none}
 .panel.map-panel.collapsed #map{display:none}
@@ -1868,6 +1881,7 @@ function setLogPanelCollapsed(collapsed){
   else panel.classList.remove('collapsed');
   var btn = qs('log-panel-toggle');
   if(btn) btn.textContent = collapsed ? '\u5c55\u5f00' : '\u6536\u8d77';
+  syncBottomPanelLayout();
 }
 
 function toggleLogPanel(){
@@ -1883,6 +1897,7 @@ function setMapPanelCollapsed(collapsed){
   else panel.classList.remove('collapsed');
   var btn = qs('map-panel-toggle');
   if(btn) btn.textContent = collapsed ? '\u5c55\u5f00' : '\u6536\u8d77';
+  syncBottomPanelLayout();
   if(!collapsed && map){
     setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 0);
   }
@@ -1892,6 +1907,20 @@ function toggleMapPanel(){
   var panel = qs('map-panel');
   if(!panel) return;
   setMapPanelCollapsed(!panel.classList.contains('collapsed'));
+}
+
+function syncBottomPanelLayout(){
+  var bottom = document.querySelector('.bottom');
+  if(!bottom) return;
+  var mapPanel = qs('map-panel');
+  var logPanel = qs('log-panel');
+  var mapCollapsed = !!(mapPanel && mapPanel.classList.contains('collapsed'));
+  var logCollapsed = !!(logPanel && logPanel.classList.contains('collapsed'));
+  bottom.classList.toggle('map-collapsed', mapCollapsed);
+  bottom.classList.toggle('log-collapsed', logCollapsed);
+  if(map && !mapCollapsed){
+    setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 0);
+  }
 }
 
 function buildExtraUi(){

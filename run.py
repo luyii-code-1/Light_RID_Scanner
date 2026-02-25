@@ -1738,8 +1738,11 @@ th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
            display:flex;justify-content:space-between;align-items:center}
 .panel-hdr span.sub{color:#8b949e;font-size:12px;font-weight:400}
 .panel-hdr .hdr-actions{display:flex;align-items:center;gap:8px}
+.panel.collapsible.collapsed{align-self:start;min-height:0}
 .panel.log-panel.collapsed .logbox{display:none}
 .panel.log-panel.collapsed .panel-hdr{border-bottom:none}
+.panel.map-panel.collapsed #map{display:none}
+.panel.map-panel.collapsed .panel-hdr{border-bottom:none}
 
 /* ── Leaflet 地图 ── */
 #map{flex:1;width:100%;min-height:0}
@@ -1873,6 +1876,24 @@ function toggleLogPanel(){
   setLogPanelCollapsed(!panel.classList.contains('collapsed'));
 }
 
+function setMapPanelCollapsed(collapsed){
+  var panel = qs('map-panel');
+  if(!panel) return;
+  if(collapsed) panel.classList.add('collapsed');
+  else panel.classList.remove('collapsed');
+  var btn = qs('map-panel-toggle');
+  if(btn) btn.textContent = collapsed ? '\u5c55\u5f00' : '\u6536\u8d77';
+  if(!collapsed && map){
+    setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 0);
+  }
+}
+
+function toggleMapPanel(){
+  var panel = qs('map-panel');
+  if(!panel) return;
+  setMapPanelCollapsed(!panel.classList.contains('collapsed'));
+}
+
 function buildExtraUi(){
   if(window.__ridExtraUiReady) return;
   window.__ridExtraUiReady = true;
@@ -1920,12 +1941,42 @@ function buildExtraUi(){
     bottom.appendChild(panel);
   }
 
+  var mapEl = qs('map');
+  if(mapEl){
+    var mapPanel = mapEl.closest ? mapEl.closest('.panel') : null;
+    if(mapPanel){
+      mapPanel.id = 'map-panel';
+      mapPanel.classList.add('map-panel', 'collapsible');
+      var mapHdr = mapPanel.querySelector('.panel-hdr');
+      if(mapHdr && !qs('map-panel-toggle')){
+        var mapActions = document.createElement('div');
+        mapActions.className = 'hdr-actions';
+        var hint = mapHdr.querySelector('#map-hint');
+        if(hint) mapActions.appendChild(hint);
+        var mapBtn = document.createElement('button');
+        mapBtn.className = 'btn-mini';
+        mapBtn.id = 'map-panel-toggle';
+        mapBtn.type = 'button';
+        mapBtn.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); toggleMapPanel(); });
+        mapActions.appendChild(mapBtn);
+        mapHdr.appendChild(mapActions);
+        mapHdr.style.cursor = 'pointer';
+        mapHdr.addEventListener('click', function(ev){
+          var t = ev.target;
+          if(t && t.closest && t.closest('button')) return;
+          toggleMapPanel();
+        });
+      }
+      setMapPanelCollapsed(false);
+    }
+  }
+
   var logBox = qs('logbox');
   if(logBox){
     var logPanel = logBox.closest ? logBox.closest('.panel') : null;
     if(logPanel){
       logPanel.id = 'log-panel';
-      logPanel.classList.add('log-panel');
+      logPanel.classList.add('log-panel', 'collapsible');
       var hdr = logPanel.querySelector('.panel-hdr');
       if(hdr && !qs('log-panel-toggle')){
         var actions = document.createElement('div');

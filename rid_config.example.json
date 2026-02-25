@@ -1,0 +1,41 @@
+{
+  "basic": {
+    "iface": null,
+    "channel": null,
+    "hop": false,
+    "hop_5g": false,
+    "dwell_2g": 250,
+    "dwell_5g": 800,
+    "settle": 30,
+    "dwell_on_hit": 2500,
+    "hit_cap": 6000,
+    "time": 2.0,
+    "min_gap": 1.0,
+    "rssi_delta": 3,
+    "change_on_rssi": false,
+    "change_on_payload": false,
+    "model_map": "rid_models.json",
+    "history_file": "rid_history_cache.json",
+    "no_tui": false,
+    "debug": false
+  },
+  "notify": {
+    "enabled": true,
+    "only_online": true,
+    "notify_reonline": true,
+    "reonline_cooldown_sec": 300,
+    "skip_mac_only": true,
+    "send_timeout_sec": 8,
+    "wecom_webhook_key": ""
+  },
+  "web": {
+    "dji_lookup_url": "https://repair.dji.com/device/search?re=cn&lang=zh-CN",
+    "allow_restart": true,
+    "last_restart_args": "--no-tui"
+  },
+  "ap": {
+    "list_max": 80,
+    "vendor_db_file": "oui.txt",
+    "vendor_auto_download": true
+  }
+}

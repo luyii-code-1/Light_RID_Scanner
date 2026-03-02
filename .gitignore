@@ -8,5 +8,12 @@ venv/
 rid_config.json
 rid_history_cache.json
 oui.txt
+*_history_cache.json
+*.secrets.json
+rid_config.local.json
 
 *.tmp
+run.py.bak_*
+_remote_*.sh
+_page_extracted.*
+memory.txt

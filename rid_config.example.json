@@ -4,6 +4,7 @@
     "channel": null,
     "hop": false,
     "hop_5g": false,
+    "scan_wifi_fast": false,
     "dwell_2g": 250,
     "dwell_5g": 800,
     "settle": 30,
@@ -31,7 +32,11 @@
   "web": {
     "dji_lookup_url": "https://repair.dji.com/device/search?re=cn&lang=zh-CN",
     "allow_restart": true,
-    "last_restart_args": "--no-tui"
+    "last_restart_args": "--no-tui",
+    "scan_type_rid": "RID报送",
+    "scan_type_phone": "手机快传",
+    "sn_source_rid": "RID包",
+    "sn_source_ssid": "SSID"
   },
   "ap": {
     "list_max": 80,

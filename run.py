@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-"""run.py — OpenDroneID (Remote ID) WiFi 监听解析器（WLAN-only）
+﻿#!/usr/bin/env python3
+"""run.py 鈥?OpenDroneID (Remote ID) WiFi 鐩戝惉瑙ｆ瀽鍣紙WLAN-only锛?
 
-修复：
-1) 检测稳定性：更宽松的 BasicID 验证、更完整的 IE/NAN 搜索
-2) 列对齐：支持中文双宽字符（无需第三方库）
-3) --debug 日志写入 TUI 缓冲区而非 stderr（不被吞掉）
-4) 按 d 查看完整扫描日志（含原始帧 debug 信息）
-5) 表格每 0.5s 强制刷新
+淇锛?
+1) 妫€娴嬬ǔ瀹氭€э細鏇村鏉剧殑 BasicID 楠岃瘉銆佹洿瀹屾暣鐨?IE/NAN 鎼滅储
+2) 鍒楀榻愶細鏀寔涓枃鍙屽瀛楃锛堟棤闇€绗笁鏂瑰簱锛?
+3) --debug 鏃ュ織鍐欏叆 TUI 缂撳啿鍖鸿€岄潪 stderr锛堜笉琚悶鎺夛級
+4) 鎸?d 鏌ョ湅瀹屾暣鎵弿鏃ュ織锛堝惈鍘熷甯?debug 淇℃伅锛?
+5) 琛ㄦ牸姣?0.5s 寮哄埗鍒锋柊
 
-用法：
+鐢ㄦ硶锛?
   sudo python3 run.py --channel 6 --time 2
   sudo python3 run.py --hop --time 2
   sudo python3 run.py --no-tui --debug
@@ -40,16 +40,18 @@ try:
     from scapy.all import Dot11, Dot11Elt, Dot11Beacon, RadioTap, sniff, conf
     conf.verb = 0
 except ImportError:
-    sys.exit("[FATAL] scapy 未安装: pip3 install scapy")
+    sys.exit("[FATAL] scapy 鏈畨瑁? pip3 install scapy")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 常量
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 甯搁噺
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 ODID_OUI             = bytes([0xFA, 0x0B, 0xBC])
 MSG_TYPE_BASIC_ID    = 0x0
 MSG_TYPE_LOCATION    = 0x1
+MSG_TYPE_SYSTEM      = 0x4
 MSG_TYPE_PACK        = 0xF
 ODID_MSG_SIZE        = 25
+ODID_PROTOCOL_MAX    = 2
 
 UA_ID_TYPE = {0:"None", 1:"Serial", 2:"CAA", 3:"UTM", 4:"Session"}
 
@@ -66,6 +68,10 @@ PURGE_TIMEOUT          = 300.0
 
 CHANNELS_2G         = [1, 6, 11]
 CHANNELS_5G         = [36, 40, 44, 48, 149, 153, 157, 161]
+# Common 5GHz channels for WiFi fast-transfer scan.
+CHANNELS_5G_COMMON  = [36, 40, 44, 48, 52, 56, 60, 64,
+                       100, 104, 108, 112, 116, 120, 124, 128,
+                       132, 136, 140, 149, 153, 157, 161, 165]
 DWELL_2G_DEFAULT    = 250
 DWELL_5G_DEFAULT    = 800
 SETTLE_DEFAULT      = 30
@@ -74,8 +80,8 @@ ODID_MSG_TYPES_OK   = {0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0xF}
 HEADING_MIN_MOVE_M  = 2.0
 SSID_SN_RE          = re.compile(r"\bRID-([A-Za-z0-9]{4,64})\b")
 
-LOG_BUF_SIZE = 4000   # 日志环形缓冲
-TUI_REFRESH  = 0.5    # 表格强制刷新间隔（秒）
+LOG_BUF_SIZE = 4000   # 鏃ュ織鐜舰缂撳啿
+TUI_REFRESH  = 0.5    # 琛ㄦ牸寮哄埗鍒锋柊闂撮殧锛堢锛?
 CONFIG_FILE_DEFAULT = "rid_config.json"
 HISTORY_STORE_DEFAULT = "rid_history_cache.json"
 HISTORY_SAVE_INTERVAL = 5.0
@@ -85,18 +91,25 @@ AP_LIST_MAX_DEFAULT = 80
 AP_STALE_TIMEOUT = 900.0
 NOTIFY_REONLINE_COOLDOWN_DEFAULT = 300.0
 DJI_LOOKUP_URL_DEFAULT = "https://repair.dji.com/device/search?re=cn&lang=zh-CN"
+SNIFF_POLL_TIMEOUT = 20.0
+SNIFF_STALL_RECOVER_SEC = 180.0
+SNIFF_RECOVER_COOLDOWN_SEC = 45.0
+SNIFF_RESTART_AFTER_FAILS = 5
+WIFI_FAST_OUI_PREFIX = "0c:9a:e6"
+TRACK_MAX_POINTS = 12000
+TRACK_MIN_INTERVAL_SEC = 0.8
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 全局状态（main() 赋值后使用）
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 鍏ㄥ眬鐘舵€侊紙main() 璧嬪€煎悗浣跨敤锛?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 state_table: dict[str, dict] = {}
 # Web side history cache: keep all seen drones after live-state purge.
 history_table: dict[str, dict] = {}
 state_lock = Lock()
 
-log_buf:  deque[str] = deque(maxlen=LOG_BUF_SIZE)   # 普通日志（★/↻/LOST/INFO）
-scan_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)   # 完整扫描日志（含 debug 帧信息）
-ap_buf:   deque[str] = deque(maxlen=500)             # AP 扫描日志（HTTP 用）
+log_buf:  deque[str] = deque(maxlen=LOG_BUF_SIZE)   # 鏅€氭棩蹇楋紙鈽?鈫?LOST/INFO锛?
+scan_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)   # 瀹屾暣鎵弿鏃ュ織锛堝惈 debug 甯т俊鎭級
+ap_buf:   deque[str] = deque(maxlen=500)             # AP 鎵弿鏃ュ織锛圚TTP 鐢級
 ap_seq:   int = 0
 ap_table: dict[str, dict] = {}
 ap_list_seq: int = 0
@@ -116,6 +129,10 @@ WEB_CFG: dict = {
     "dji_lookup_url": DJI_LOOKUP_URL_DEFAULT,
     "allow_restart": True,
     "last_restart_args": "",
+    "scan_type_rid": "RID报送",
+    "scan_type_phone": "手机快传",
+    "sn_source_rid": "RID包",
+    "sn_source_ssid": "SSID",
 }
 AP_CFG: dict = {
     "list_max": AP_LIST_MAX_DEFAULT,
@@ -150,7 +167,15 @@ oui_last_attempt_wall = 0.0
 restart_lock = Lock()
 restart_pending = False
 
-# 运行时参数（main 赋值）
+sniff_health_lock = Lock()
+sniff_last_pkt_mono: float = 0.0
+sniff_last_pkt_wall: float = 0.0
+sniff_last_recover_wall: float = 0.0
+sniff_last_error: str = ""
+sniff_last_error_wall: float = 0.0
+sniff_iface_name: str = ""
+
+# 杩愯鏃跺弬鏁帮紙main 璧嬪€硷級
 PRINT_INTERVAL: float = DEFAULT_PRINT_INTERVAL
 MIN_GAP:        float = DEFAULT_MIN_GAP
 CHANGE_ON_RSSI: bool  = False
@@ -159,12 +184,15 @@ RSSI_DELTA:     int   = 3
 MODEL_MAP:      dict[str, str] = {}
 NO_TUI:         bool  = False
 DEBUG_MODE:     bool  = False
+SCAN_WIFI_FAST: bool  = False
+WIFI_FAST_SUPPORTED: bool | None = None
+WIFI_FAST_SUPPORT_MSG: str = ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 中文对齐辅助（无需 wcwidth 库）
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 涓枃瀵归綈杈呭姪锛堟棤闇€ wcwidth 搴擄級
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def _cw(c: str) -> int:
-    """返回字符的显示宽度（CJK=2，其余=1）"""
+    """Return display width for one char (CJK=2, others=1)."""
     cp = ord(c)
     if ((0x1100 <= cp <= 0x115F) or (0x2E80 <= cp <= 0x303E) or
         (0x3040 <= cp <= 0x33FF) or (0x3400 <= cp <= 0x4DBF) or
@@ -176,11 +204,11 @@ def _cw(c: str) -> int:
     return 1
 
 def _sw(s: str) -> int:
-    """字符串显示宽度"""
+    """Return display width for a string."""
     return sum(_cw(c) for c in s)
 
 def _pad(s: str, w: int) -> str:
-    """将字符串填充/截断到显示宽度 w（中文安全）"""
+    """灏嗗瓧绗︿覆濉厖/鎴柇鍒版樉绀哄搴?w锛堜腑鏂囧畨鍏級"""
     out, cur = "", 0
     for c in s:
         cw = _cw(c)
@@ -190,20 +218,20 @@ def _pad(s: str, w: int) -> str:
         cur += cw
     return out + " " * (w - cur)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 日志
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 鏃ュ織
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def _log(msg: str) -> None:
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     with log_lock:
         log_buf.append(line)
-        scan_buf.append(line)   # 普通日志也进扫描流
+        scan_buf.append(line)   # 鏅€氭棩蹇椾篃杩涙壂鎻忔祦
     if NO_TUI:
         print(line, flush=True)
 
 def _scan(msg: str) -> None:
-    """仅写入扫描日志流（不写普通日志，不 print）"""
+    """Write only to scan log buffer (without normal log/print)."""
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     with log_lock:
@@ -212,6 +240,81 @@ def _scan(msg: str) -> None:
 def _history_mark_dirty() -> None:
     global history_persist_dirty
     history_persist_dirty = True
+
+def _fmt_age_compact(sec: float | int | None) -> str:
+    if sec is None:
+        return "-"
+    try:
+        s = int(max(0, float(sec)))
+    except Exception:
+        return "-"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s <= 216000:  # 60h
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+def _sanitize_track(raw) -> list[dict]:
+    out: list[dict] = []
+    if not isinstance(raw, list):
+        return out
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        try:
+            lat = float(it.get("lat"))
+            lon = float(it.get("lon"))
+            ts = float(it.get("ts"))
+        except Exception:
+            continue
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            continue
+        if ts <= 0:
+            continue
+        out.append({
+            "lat": round(lat, 7),
+            "lon": round(lon, 7),
+            "ts": ts,
+        })
+    out.sort(key=lambda x: (x.get("ts") or 0.0))
+    if len(out) > TRACK_MAX_POINTS:
+        out = out[-TRACK_MAX_POINTS:]
+    return out
+
+def _track_append_point(entry: dict, lat: float, lon: float, wall_ts: float) -> bool:
+    if entry is None:
+        return False
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return False
+    tr = _sanitize_track(entry.get("track") or [])
+    if tr:
+        last = tr[-1]
+        try:
+            dt = float(wall_ts) - float(last.get("ts") or 0.0)
+        except Exception:
+            dt = TRACK_MIN_INTERVAL_SEC
+        if (abs(float(last.get("lat", 0.0)) - lat) < 1e-7 and
+            abs(float(last.get("lon", 0.0)) - lon) < 1e-7):
+            if wall_ts > float(last.get("ts") or 0.0):
+                last["ts"] = float(wall_ts)
+                entry["track"] = tr
+                entry["track_updated_wall_ts"] = float(wall_ts)
+                return True
+            return False
+        if dt < TRACK_MIN_INTERVAL_SEC:
+            return False
+    tr.append({
+        "lat": round(float(lat), 7),
+        "lon": round(float(lon), 7),
+        "ts": float(wall_ts),
+    })
+    if len(tr) > TRACK_MAX_POINTS:
+        tr = tr[-TRACK_MAX_POINTS:]
+    entry["track"] = tr
+    entry["track_updated_wall_ts"] = float(wall_ts)
+    return True
 
 def _history_disk_items_locked() -> list[dict]:
     items: list[dict] = []
@@ -230,13 +333,25 @@ def _history_disk_items_locked() -> list[dict]:
             "alt": e.get("alt"),
             "speed": e.get("speed"),
             "vspeed": e.get("vspeed"),
+            "pilot_lat": e.get("pilot_lat"),
+            "pilot_lon": e.get("pilot_lon"),
+            "pilot_loc_type": e.get("pilot_loc_type"),
+            "pilot_loc_type_text": e.get("pilot_loc_type_text"),
             "rssi": e.get("rssi"),
             "move_dir": e.get("move_dir"),
+            "ssid": e.get("ssid"),
+            "capture_type": e.get("capture_type"),
+            "last_capture_wall_ts": e.get("last_capture_wall_ts"),
+            "raw_packets": list(e.get("raw_packets") or [])[-3:],
+            "scan_type": _scan_type_key(e.get("scan_type")),
+            "track": _sanitize_track(e.get("track") or []),
+            "track_updated_wall_ts": e.get("track_updated_wall_ts"),
             "first_seen_wall_ts": e.get("first_seen_wall_ts"),
             "last_seen_wall_ts": e.get("last_seen_wall_ts"),
             "pkt_count_total": int(e.get("pkt_count_total") or 0),
             "notify_first_online_sent": bool(e.get("notify_first_online_sent")),
             "notify_last_wall_ts": e.get("notify_last_wall_ts"),
+            "last_online_duration_sec": e.get("last_online_duration_sec"),
         })
     items.sort(key=lambda x: (-(x.get("last_seen_wall_ts") or 0.0), x.get("sn") or ""))
     return items
@@ -252,7 +367,7 @@ def load_history_store(path: str | None) -> None:
             obj = json.load(f)
         items = obj.get("items") if isinstance(obj, dict) else obj
         if not isinstance(items, list):
-            _log(f"[WARN] 历史缓存格式错误: {path}")
+            _log(f"[WARN] history cache format invalid: {path}")
             return
         loaded = 0
         with state_lock:
@@ -265,11 +380,17 @@ def load_history_store(path: str | None) -> None:
                 h = history_table.get(sn) or {"sn": sn}
                 h["sn"] = sn
                 for k in ("src_mac","id_type","model","last_ch","ch_assumed","lat","lon",
-                          "alt","speed","vspeed","rssi","move_dir",
+                          "alt","speed","vspeed","pilot_lat","pilot_lon","pilot_loc_type","pilot_loc_type_text",
+                          "rssi","move_dir","ssid",
+                          "capture_type","last_capture_wall_ts","raw_packets",
+                          "scan_type","track","track_updated_wall_ts",
                           "first_seen_wall_ts","last_seen_wall_ts",
-                          "notify_first_online_sent","notify_last_wall_ts"):
+                          "notify_first_online_sent","notify_last_wall_ts",
+                          "last_online_duration_sec"):
                     if k in raw:
                         h[k] = raw.get(k)
+                h["scan_type"] = _scan_type_key(h.get("scan_type"))
+                h["track"] = _sanitize_track(h.get("track") or [])
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
                 # Monotonic timestamps are process-local; keep them unset until new packets arrive.
                 h.setdefault("first_seen_ts", None)
@@ -278,9 +399,9 @@ def load_history_store(path: str | None) -> None:
                 loaded += 1
             history_persist_dirty = False
             history_persist_last_save_wall = time.time()
-        _log(f"[INFO] 历史缓存已加载: {path} ({loaded} 架)")
+        _log(f"[INFO] history cache loaded: {path} ({loaded} items)")
     except Exception as e:
-        _log(f"[WARN] 历史缓存加载失败: {e}")
+        _log(f"[WARN] history cache load failed: {e}")
 
 def save_history_store(force: bool = False) -> bool:
     global history_persist_dirty, history_persist_last_save_wall
@@ -296,7 +417,7 @@ def save_history_store(force: bool = False) -> bool:
             if not force and (not history_persist_dirty or (now_wall - history_persist_last_save_wall) < HISTORY_SAVE_INTERVAL):
                 return False
             payload = {
-                "version": 1,
+                "version": 2,
                 "saved_at": now_wall,
                 "items": _history_disk_items_locked(),
             }
@@ -320,7 +441,7 @@ def save_history_store(force: bool = False) -> bool:
             except Exception:
                 pass
             if force:
-                _log(f"[WARN] 历史缓存保存失败: {path}")
+                _log(f"[WARN] history cache save failed: {path}")
             return False
 
 def history_persist_loop() -> None:
@@ -347,15 +468,60 @@ def clear_history_store(delete_file: bool = True) -> tuple[int, bool]:
                     os.remove(path)
                     removed_file = True
             except Exception as e:
-                _log(f"[WARN] 历史缓存文件删除失败: {e}")
+                _log(f"[WARN] history cache file delete failed: {e}")
             try:
                 tmp_path = path + ".tmp"
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
             except Exception:
                 pass
-    _log(f"[INFO] 历史缓存已清空: {cleared} 架" + (f" (删除文件 {path})" if removed_file else ""))
+    _log(f"[INFO] history cache cleared: {cleared}" + (f" (deleted file {path})" if removed_file else ""))
     return cleared, removed_file
+
+def delete_history_item(sn: str) -> bool:
+    sn = str(sn or "").strip()
+    if not sn:
+        return False
+    removed = False
+    with state_lock:
+        if sn in history_table:
+            history_table.pop(sn, None)
+            removed = True
+            _history_mark_dirty()
+        if sn in state_table:
+            state_table.pop(sn, None)
+            removed = True
+    return removed
+
+def clear_track_store(sn: str | None = None) -> int:
+    """Clear stored trajectory points. Returns affected drone count."""
+    affected = 0
+    target = str(sn or "").strip()
+    with state_lock:
+        if target:
+            h = history_table.get(target)
+            if h is not None and h.get("track"):
+                h["track"] = []
+                h["track_updated_wall_ts"] = time.time()
+                affected += 1
+            e = state_table.get(target)
+            if e is not None:
+                e["track"] = []
+                e["track_updated_wall_ts"] = time.time()
+            if affected:
+                _history_mark_dirty()
+            return affected
+        for h in history_table.values():
+            if h.get("track"):
+                h["track"] = []
+                h["track_updated_wall_ts"] = time.time()
+                affected += 1
+        for e in state_table.values():
+            e["track"] = []
+            e["track_updated_wall_ts"] = time.time()
+        if affected:
+            _history_mark_dirty()
+    return affected
 
 def _deep_merge_dict(base: dict, override: dict) -> dict:
     out = dict(base)
@@ -373,6 +539,7 @@ def default_app_config() -> dict:
             "channel": None,
             "hop": False,
             "hop_5g": False,
+            "scan_wifi_fast": False,
             "dwell_2g": DWELL_2G_DEFAULT,
             "dwell_5g": DWELL_5G_DEFAULT,
             "settle": SETTLE_DEFAULT,
@@ -401,6 +568,10 @@ def default_app_config() -> dict:
             "dji_lookup_url": DJI_LOOKUP_URL_DEFAULT,
             "allow_restart": True,
             "last_restart_args": "",
+            "scan_type_rid": "RID报送",
+            "scan_type_phone": "手机快传",
+            "sn_source_rid": "RID包",
+            "sn_source_ssid": "SSID",
         },
         "ap": {
             "list_max": AP_LIST_MAX_DEFAULT,
@@ -420,7 +591,7 @@ def ensure_config_file(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
-    _log(f"[INFO] 已创建配置文件: {path}")
+    _log(f"[INFO] config file created: {path}")
 
 def load_app_config(path: str | None) -> dict:
     if not path:
@@ -432,11 +603,23 @@ def load_app_config(path: str | None) -> dict:
         if not isinstance(raw, dict):
             raise ValueError("root must be object")
         cfg = _deep_merge_dict(default_app_config(), raw)
-        _log(f"[INFO] 配置已加载: {path}")
+        _log(f"[INFO] config loaded: {path}")
         return cfg
     except Exception as e:
-        _log(f"[WARN] 配置加载失败，使用默认配置: {e}")
-        return default_app_config()
+        _log(f"[WARN] 閰嶇疆鍔犺浇澶辫触锛屼娇鐢ㄩ粯璁ら厤缃? {e}")
+        cfg = default_app_config()
+        try:
+            if path and os.path.exists(path):
+                broken = f"{path}.broken.{time.strftime('%Y%m%d%H%M%S')}"
+                os.replace(path, broken)
+                _log(f"[WARN] 配置文件已隔离为: {broken}")
+            if path:
+                ok, msg = save_app_config(path, cfg)
+                if ok:
+                    _log(f"[INFO] 已写入默认配置: {msg}")
+        except Exception as e2:
+            _log(f"[WARN] 配置守护写回失败: {e2}")
+        return cfg
 
 def save_app_config(path: str | None, cfg: dict) -> tuple[bool, str]:
     if not path:
@@ -476,13 +659,27 @@ def _parser_explicit_dests(parser: argparse.ArgumentParser, argv: list[str]) -> 
             explicit.add(dest)
     return explicit
 
+def _to_bool(v, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "y", "on", "t"):
+        return True
+    if s in ("0", "false", "no", "n", "off", "f", ""):
+        return False
+    return default
+
 def apply_config_to_args(parser: argparse.ArgumentParser, args, cfg: dict) -> None:
     basic = cfg.get("basic") if isinstance(cfg, dict) else {}
     if not isinstance(basic, dict):
         return
     explicit = _parser_explicit_dests(parser, sys.argv[1:])
     for dest in (
-        "iface", "channel", "hop", "hop_5g",
+        "iface", "channel", "hop", "hop_5g", "scan_wifi_fast",
         "dwell_2g", "dwell_5g", "settle", "dwell_on_hit", "hit_cap",
         "time", "min_gap", "rssi_delta",
         "change_on_rssi", "change_on_payload",
@@ -492,7 +689,23 @@ def apply_config_to_args(parser: argparse.ArgumentParser, args, cfg: dict) -> No
         if dest in explicit:
             continue
         if dest in basic:
-            setattr(args, dest, basic.get(dest))
+            raw_v = basic.get(dest)
+            cur_v = getattr(args, dest, None)
+            try:
+                if isinstance(cur_v, bool):
+                    v = _to_bool(raw_v, cur_v)
+                elif isinstance(cur_v, int) and not isinstance(cur_v, bool):
+                    v = int(raw_v)
+                elif isinstance(cur_v, float):
+                    v = float(raw_v)
+                elif raw_v is None:
+                    v = None
+                else:
+                    v = str(raw_v)
+                setattr(args, dest, v)
+            except Exception:
+                # Guard mode: ignore invalid config value and keep parser default.
+                continue
 
 def _normalize_notify_cfg(cfg: dict | None) -> dict:
     base = dict(NOTIFY_CFG)
@@ -528,6 +741,10 @@ def _normalize_web_cfg(cfg: dict | None) -> dict:
     base["dji_lookup_url"] = str(base.get("dji_lookup_url") or DJI_LOOKUP_URL_DEFAULT).strip()
     base["allow_restart"] = bool(base.get("allow_restart", True))
     base["last_restart_args"] = str(base.get("last_restart_args") or "")
+    base["scan_type_rid"] = str(base.get("scan_type_rid") or "RID报送").strip() or "RID报送"
+    base["scan_type_phone"] = str(base.get("scan_type_phone") or "手机快传").strip() or "手机快传"
+    base["sn_source_rid"] = str(base.get("sn_source_rid") or "RID包").strip() or "RID包"
+    base["sn_source_ssid"] = str(base.get("sn_source_ssid") or "SSID").strip() or "SSID"
     return base
 
 def _normalize_ap_cfg(cfg: dict | None) -> dict:
@@ -551,6 +768,34 @@ def init_web_from_config(cfg: dict | None) -> None:
     global WEB_CFG
     WEB_CFG = _normalize_web_cfg(cfg)
 
+def _scan_type_key(v: str | None) -> str:
+    s = str(v or "").strip()
+    low = s.lower()
+    if not s:
+        return "rid"
+    if low in ("rid", "rid_report", "rid_reporting", "rid_reporting_type"):
+        return "rid"
+    if low in ("phone", "phone_fast", "mobile", "mobile_fast"):
+        return "phone"
+    if "RID" in s or "rid" in low or "报送" in s:
+        return "rid"
+    if "手机" in s or "快传" in s:
+        return "phone"
+    return s
+
+def _scan_type_display(v: str | None) -> str:
+    key = _scan_type_key(v)
+    if key == "phone":
+        return str(WEB_CFG.get("scan_type_phone") or "手机快传")
+    if key == "rid":
+        return str(WEB_CFG.get("scan_type_rid") or "RID报送")
+    return key
+
+def _sn_source_display(id_type: str | None) -> str:
+    if str(id_type or "").strip().upper() == "SSID":
+        return str(WEB_CFG.get("sn_source_ssid") or "SSID")
+    return str(WEB_CFG.get("sn_source_rid") or "RID包")
+
 def init_ap_from_config(cfg: dict | None) -> None:
     global AP_CFG
     AP_CFG = _normalize_ap_cfg(cfg)
@@ -560,9 +805,43 @@ def init_notify_from_config(cfg: dict | None) -> None:
     NOTIFY_CFG = _normalize_notify_cfg(cfg)
     key = NOTIFY_CFG.get("wecom_webhook_key") or ""
     if NOTIFY_CFG.get("enabled") and key:
-        _log("[INFO] 企业微信机器人通知已启用（仅上线）")
+        _log("[INFO] WeCom robot notification enabled (online-only)")
     else:
-        _log("[INFO] 企业微信机器人通知未启用（缺少 key 或 disabled）")
+        _log("[INFO] notify disabled (missing key or disabled)")
+
+def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
+    global APP_CONFIG, PRINT_INTERVAL, MIN_GAP, CHANGE_ON_RSSI, CHANGE_ON_PL, RSSI_DELTA, DEBUG_MODE
+    if not isinstance(cfg, dict):
+        return False, "invalid config root"
+    APP_CONFIG = _deep_merge_dict(default_app_config(), cfg)
+    init_web_from_config(APP_CONFIG)
+    init_ap_from_config(APP_CONFIG)
+    init_notify_from_config(APP_CONFIG)
+
+    basic = APP_CONFIG.get("basic")
+    if not isinstance(basic, dict):
+        basic = {}
+    try:
+        PRINT_INTERVAL = max(0.2, float(basic.get("time", PRINT_INTERVAL)))
+    except Exception:
+        pass
+    try:
+        MIN_GAP = max(0.0, float(basic.get("min_gap", MIN_GAP)))
+    except Exception:
+        pass
+    try:
+        RSSI_DELTA = max(1, int(basic.get("rssi_delta", RSSI_DELTA)))
+    except Exception:
+        pass
+    CHANGE_ON_RSSI = bool(basic.get("change_on_rssi", CHANGE_ON_RSSI))
+    CHANGE_ON_PL = bool(basic.get("change_on_payload", CHANGE_ON_PL))
+    DEBUG_MODE = bool(basic.get("debug", DEBUG_MODE))
+    try:
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.WARNING)
+    except Exception:
+        pass
+    return True, "runtime config reloaded"
 
 def _wecom_webhook_url(key: str) -> str:
     return f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"
@@ -597,7 +876,7 @@ def _notify_queue_put(item: dict) -> None:
     try:
         notify_queue.put_nowait(item)
     except queue.Full:
-        _log("[WARN] 通知队列已满，丢弃一条通知")
+        _log("[WARN] 閫氱煡闃熷垪宸叉弧锛屼涪寮冧竴鏉￠€氱煡")
 
 def _notify_online_text(e: dict, event_title: str, now_wall: float) -> str:
     def _f(v, fmt_str: str, unit: str = "N/A") -> str:
@@ -625,10 +904,10 @@ def _notify_online_text(e: dict, event_title: str, now_wall: float) -> str:
     return (
         f"[RID{event_title}] {ts_s}\n"
         f"SN: {sn}\n"
-        f"机型/ID: {model} / {it}\n"
-        f"MAC/信道/信号: {mac} / {ch_s} / {rssi}\n"
-        f"位置: {loc_s}  高程: {alt_s}\n"
-        f"速度: {spd_s}  垂速: {vsp_s}  包数: {pkts}"
+        f"鏈哄瀷/ID: {model} / {it}\n"
+        f"MAC/淇￠亾/淇″彿: {mac} / {ch_s} / {rssi}\n"
+        f"浣嶇疆: {loc_s}  楂樼▼: {alt_s}\n"
+        f"閫熷害: {spd_s}  鍨傞€? {vsp_s}  鍖呮暟: {pkts}"
     )
 
 def _notify_worker_loop() -> None:
@@ -645,9 +924,9 @@ def _notify_worker_loop() -> None:
                 continue
             ok, resp = _wecom_send_text(key, content, timeout_sec=int(item.get("timeout_sec") or 8))
             if not ok:
-                _log(f"[WARN] 企业微信通知发送失败: {resp}")
+                _log(f"[WARN] WeCom notification send failed: {resp}")
         except Exception as e:
-            _log(f"[WARN] 通知线程异常: {e}")
+            _log(f"[WARN] 閫氱煡绾跨▼寮傚父: {e}")
         finally:
             try:
                 notify_queue.task_done()
@@ -702,7 +981,7 @@ def send_test_notification_from_config() -> tuple[bool, str]:
     }
     return _wecom_send_text(
         key,
-        _notify_online_text(test_e, "上线(测试)", now_wall),
+        _notify_online_text(test_e, "涓婄嚎(娴嬭瘯)", now_wall),
         timeout_sec=int(NOTIFY_CFG.get("send_timeout_sec") or 8),
     )
 
@@ -714,17 +993,43 @@ def _mac_oui_key(mac: str | None) -> str:
         return ""
     return h[:6].upper()
 
+def _mac_hex12(mac: str | None) -> str:
+    if not mac:
+        return ""
+    h = "".join(ch for ch in str(mac) if ch in "0123456789abcdefABCDEF").lower()
+    if len(h) < 12:
+        return ""
+    return h[:12]
+
+def _is_wifi_fast_mac(mac: str | None) -> bool:
+    return _mac_oui_key(mac).lower() == WIFI_FAST_OUI_PREFIX.replace(":", "").lower()
+
+def _wifi_fast_sn(mac: str | None) -> str:
+    h12 = _mac_hex12(mac).upper()
+    if not h12:
+        return "WIFIFAST000000000000"
+    return f"WIFIFAST{h12}"
+
+def _hex_preview(data: bytes | None, max_bytes: int = 220) -> str:
+    if not data:
+        return ""
+    b = bytes(data)
+    if len(b) <= max_bytes:
+        return b.hex(" ")
+    head = b[:max_bytes].hex(" ")
+    return f"{head} ...( +{len(b) - max_bytes}B )"
+
 def _ap_vendor_type(vendor: str, ssid: str | None) -> str:
     v = (vendor or "").lower()
     s = (ssid or "").strip()
     if s.startswith("RID-") or "dji" in v:
         return "DJI/RID"
     if any(k in v for k in ("apple", "samsung", "huawei", "honor", "xiaomi", "oppo", "vivo", "google")):
-        return "手机/热点"
+        return "\u624b\u673a/\u70ed\u70b9"
     if any(k in v for k in ("tp-link", "h3c", "ruijie", "ubiquiti", "mikrotik", "netgear", "asus", "cisco", "tenda", "meraki")):
-        return "路由/AP"
+        return "\u8def\u7531/AP"
     if s.startswith("DIRECT-"):
-        return "直连/Wi-Fi"
+        return "\u76f4\u8fde/Wi-Fi"
     return "AP"
 
 def _parse_oui_text(raw: str) -> dict[str, str]:
@@ -787,10 +1092,10 @@ def _oui_load_worker() -> None:
         if not loaded_map and bool(AP_CFG.get("vendor_auto_download", True)) and path:
             ok, info = _download_oui_db(path)
             if ok:
-                _log(f"[INFO] OUI 数据库已下载: {info}")
+                _log(f"[INFO] OUI 鏁版嵁搴撳凡涓嬭浇: {info}")
                 loaded_map = _load_oui_map_from_file(path)
             else:
-                _log(f"[WARN] OUI 数据库下载失败: {info}")
+                _log(f"[WARN] OUI 鏁版嵁搴撲笅杞藉け璐? {info}")
         if loaded_map:
             with oui_db_lock:
                 oui_map = loaded_map
@@ -798,15 +1103,15 @@ def _oui_load_worker() -> None:
                 oui_vendor_cache.clear()
             with ap_lock:
                 ap_list_seq += 1
-            _log(f"[INFO] OUI 数据库已加载: {len(loaded_map)} 条")
+            _log(f"[INFO] OUI database loaded: {len(loaded_map)} entries")
         else:
             with oui_db_lock:
                 oui_map = {}
-                oui_loaded = True  # Stop returning "加载中" forever when DB is unavailable.
+                oui_loaded = True  # Stop returning "鍔犺浇涓? forever when DB is unavailable.
                 oui_vendor_cache.clear()
             with ap_lock:
                 ap_list_seq += 1
-            _log("[WARN] OUI 数据库未加载（AP 厂商将显示未知）")
+            _log("[WARN] OUI 鏁版嵁搴撴湭鍔犺浇锛圓P 鍘傚晢灏嗘樉绀烘湭鐭ワ級")
     except Exception as e:
         with oui_db_lock:
             oui_map = {}
@@ -814,7 +1119,7 @@ def _oui_load_worker() -> None:
             oui_vendor_cache.clear()
         with ap_lock:
             ap_list_seq += 1
-        _log(f"[WARN] OUI 数据库加载异常: {e}")
+        _log(f"[WARN] OUI 鏁版嵁搴撳姞杞藉紓甯? {e}")
     finally:
         with oui_db_lock:
             oui_loading_started = False
@@ -843,10 +1148,10 @@ def _lookup_oui_vendor(mac: str | None) -> str:
         return vendor
     if not loaded:
         start_oui_loader()
-        return "加载中"
+        return "\u52a0\u8f7d\u4e2d"
     with oui_db_lock:
-        oui_vendor_cache[key] = "未知"
-    return "未知"
+        oui_vendor_cache[key] = "\u672a\u77e5"
+    return "\u672a\u77e5"
 
 def _ap_trim_locked(now_wall: float | None = None) -> None:
     now_wall = float(now_wall or time.time())
@@ -896,14 +1201,17 @@ def _ap_touch(mac: str, ssid: str | None, rssi: int | None, ch: int | None, subt
         e["last_seen_wall_ts"] = now_wall
         e["last_seen_ts"] = now_mono
         e["hits"] = int(e.get("hits") or 0) + 1
-        if vendor and (e.get("vendor") in ("", "加载中", "未知") or vendor not in ("加载中", "未知")):
+        if vendor and ((not e.get("vendor")) or (e.get("vendor") in ("加载中", "未知")) or (vendor not in ("加载中", "未知"))):
             e["vendor"] = vendor
         vname = str(e.get("vendor") or vendor or "")
-        e["vendor_type"] = _ap_vendor_type(vname, e.get("ssid"))
+        if _is_wifi_fast_mac(mac):
+            e["vendor_type"] = "WiFi快传"
+        else:
+            e["vendor_type"] = _ap_vendor_type(vname, e.get("ssid"))
         _ap_trim_locked(now_wall)
         ap_list_seq += 1
 
-def _ap_snapshot() -> tuple[list[dict], int]:
+def _ap_snapshot() -> tuple[list[dict], int, int]:
     now_wall = time.time()
     with ap_lock:
         _ap_trim_locked(now_wall)
@@ -922,18 +1230,26 @@ def _ap_snapshot() -> tuple[list[dict], int]:
             "ch": e.get("ch"),
             "hits": int(e.get("hits") or 0),
             "subtype": str(e.get("subtype") or "AP"),
-            "vendor": vendor or str(e.get("vendor") or "未知"),
-            "vendor_type": _ap_vendor_type(vendor or str(e.get("vendor") or ""), e.get("ssid")),
+            "vendor": vendor or str(e.get("vendor") or "\u672a\u77e5"),
+            "vendor_type": ("WiFi快传" if _is_wifi_fast_mac(mac) else _ap_vendor_type(vendor or str(e.get("vendor") or ""), e.get("ssid"))),
             "age": age,
             "last_seen": _fmt_wall_ts(last_seen_wall),
         })
-    rows.sort(key=lambda x: (x["age"], -(x.get("hits") or 0), x.get("mac") or ""))
+    # realtime list sorted by signal strength (higher RSSI first)
+    rows.sort(
+        key=lambda x: (
+            -float(x.get("rssi")) if x.get("rssi") is not None else float("inf"),
+            x["age"],
+            x.get("mac") or "",
+        )
+    )
     limit = int(AP_CFG.get("list_max") or AP_LIST_MAX_DEFAULT)
-    return rows[:limit], seq
+    total = len(rows)
+    return rows[:limit], seq, total
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 机型映射
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 鏈哄瀷鏄犲皠
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def _model_from_sn(sn: str) -> str:
     if not sn or sn.startswith("MAC:"):
         return "N/A"
@@ -950,23 +1266,23 @@ def load_model_map(path: str) -> None:
             obj = json.load(f)
         if isinstance(obj, dict):
             MODEL_MAP = {str(k): str(v) for k, v in obj.items()}
-            _log(f"[INFO] 机型映射: {path} ({len(MODEL_MAP)} 条)")
+            _log(f"[INFO] model map loaded: {path} ({len(MODEL_MAP)} entries)")
         else:
-            _log(f"[WARN] 机型映射格式错误: {path}")
+            _log(f"[WARN] model map format invalid: {path}")
     except FileNotFoundError:
-        _log(f"[WARN] 机型映射不存在: {path}")
+        _log(f"[WARN] model map not found: {path}")
     except Exception as e:
-        _log(f"[WARN] 机型映射加载失败: {e}")
+        _log(f"[WARN] model map load failed: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 格式化
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 鏍煎紡鍖?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def _fmt(v, fmt=".6f", unit="", na="N/A") -> str:
     return f"{v:{fmt}}{unit}" if v is not None else na
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 地理
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 鍦扮悊
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def _haversine(lat1, lon1, lat2, lon2) -> float:
     R  = 6371000.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -988,15 +1304,163 @@ def _bearing(lat1, lon1, lat2, lon2) -> float | None:
 def _bearing8(deg: float) -> str:
     return ["N","NE","E","SE","S","SW","W","NW"][int((deg+22.5)//45)%8]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 系统命令 / 接口
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 绯荤粺鍛戒护 / 鎺ュ彛
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def run_cmd(cmd: str, timeout: int = 5) -> str:
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         return (r.stdout or "").strip()
     except Exception:
         return ""
+
+def _sniff_note_packet() -> None:
+    global sniff_last_pkt_mono, sniff_last_pkt_wall, sniff_last_error, sniff_last_error_wall
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    with sniff_health_lock:
+        sniff_last_pkt_mono = now_mono
+        sniff_last_pkt_wall = now_wall
+        sniff_last_error = ""
+        sniff_last_error_wall = 0.0
+
+def _sniff_idle_sec(now_mono: float | None = None) -> float | None:
+    now_mono = float(now_mono or time.monotonic())
+    with sniff_health_lock:
+        last = sniff_last_pkt_mono
+    if not last:
+        return None
+    return max(0.0, now_mono - float(last))
+
+def _sniff_note_error(msg: str) -> None:
+    global sniff_last_error, sniff_last_error_wall
+    text = str(msg or "").strip()
+    if len(text) > 220:
+        text = text[:220]
+    with sniff_health_lock:
+        sniff_last_error = text
+        sniff_last_error_wall = time.time()
+
+def _sniff_health_meta(now_mono: float, now_wall: float) -> dict:
+    with sniff_health_lock:
+        last_pkt_mono = float(sniff_last_pkt_mono or 0.0)
+        last_pkt_wall = float(sniff_last_pkt_wall or 0.0)
+        last_err = str(sniff_last_error or "")
+        last_err_wall = float(sniff_last_error_wall or 0.0)
+        iface = str(sniff_iface_name or "")
+    idle_sec = None
+    if last_pkt_mono > 0.0:
+        idle_sec = max(0.0, now_mono - last_pkt_mono)
+    state = "ok"
+    msg = ""
+    if last_err:
+        state = "error"
+        msg = last_err
+    elif idle_sec is None:
+        state = "warn"
+        msg = "尚未收到无线管理帧"
+    elif idle_sec >= SNIFF_STALL_RECOVER_SEC:
+        state = "warn"
+        msg = f"{int(idle_sec)}s no wireless management frame"
+    return {
+        "state": state,
+        "msg": msg,
+        "iface": iface,
+        "idle_sec": (None if idle_sec is None else int(round(idle_sec))),
+        "last_pkt": _fmt_wall_ts(last_pkt_wall if last_pkt_wall > 0 else None),
+        "last_err_at": _fmt_wall_ts(last_err_wall if last_err_wall > 0 else None),
+    }
+
+def _sniff_recover_iface(iface: str, reason: str, force: bool = False) -> bool:
+    global sniff_last_recover_wall, sniff_iface_name
+    iface = str(iface or "").strip()
+    if not iface:
+        _sniff_note_error(f"iface empty: {reason}")
+        return False
+    now_wall = time.time()
+    with sniff_health_lock:
+        if (not force) and sniff_last_recover_wall and (now_wall - sniff_last_recover_wall) < SNIFF_RECOVER_COOLDOWN_SEC:
+            return False
+        sniff_last_recover_wall = now_wall
+        sniff_iface_name = iface
+    _sniff_note_error(reason)
+    _log(f"[WARN] sniff recover: {reason}, reset iface {iface}")
+    for c in (
+        f"ip link set {iface} down",
+        f"iw dev {iface} set type monitor",
+        f"ip link set {iface} up",
+        f"iw dev {iface} set power_save off",
+    ):
+        run_cmd(c, timeout=6)
+    if current_channel:
+        run_cmd(f"iw dev {iface} set channel {current_channel}", timeout=6)
+    info_raw = run_cmd(f"iw dev {iface} info")
+    if not info_raw or ("Interface" not in info_raw):
+        _sniff_note_error(f"iface unavailable: {iface}")
+        return False
+    info_lines = []
+    for ln in info_raw.splitlines():
+        t = ln.strip()
+        if re.search(r"\b(type|channel)\b", t):
+            info_lines.append(t)
+    if info_lines:
+        _log(f"[INFO] sniff recover result: {' | '.join(info_lines)}")
+    with sniff_health_lock:
+        sniff_iface_name = iface
+    return True
+def _sniff_iface_candidates() -> dict[str, str]:
+    iw = run_cmd("iw dev")
+    iftypes: dict[str, str] = {}
+    cur = None
+    for line in (iw or "").splitlines():
+        m = re.match(r"\s*Interface\s+(\S+)", line)
+        if m:
+            cur = m.group(1)
+            continue
+        m2 = re.match(r"\s*type\s+(\S+)", line)
+        if m2 and cur:
+            iftypes[cur] = m2.group(1)
+    return iftypes
+
+def _iface_options_snapshot() -> list[dict]:
+    out: list[dict] = []
+    iftypes = _sniff_iface_candidates()
+    for name, mode in iftypes.items():
+        try:
+            supports_5g = bool(detect_5g(name))
+        except Exception:
+            supports_5g = False
+        out.append({
+            "name": str(name),
+            "mode": str(mode or ""),
+            "is_monitor": (str(mode or "") == "monitor"),
+            "supports_5g": supports_5g,
+        })
+    out.sort(key=lambda x: (0 if x.get("is_monitor") else 1, x.get("name") or ""))
+    return out
+
+def _sniff_pick_iface(prefer: str | None = None) -> str | None:
+    iftypes = _sniff_iface_candidates()
+    if not iftypes:
+        return None
+    if prefer and prefer in iftypes and iftypes.get(prefer) == "monitor":
+        return prefer
+    mon = [i for i, t in iftypes.items() if t == "monitor"]
+    if mon:
+        return mon[0]
+    if prefer and prefer in iftypes:
+        return prefer
+    for k in iftypes.keys():
+        return k
+    return None
+def _sniff_is_no_device_error(ex: Exception) -> bool:
+    s = str(ex or "")
+    return (
+        ("No such device" in s) or
+        ("Errno 19" in s) or
+        ("Network is down" in s) or
+        ("Errno 100" in s)
+    )
 
 def _freq_to_ch(freq) -> int | None:
     try:
@@ -1042,17 +1506,18 @@ def interface_detect(prefer: str | None = None) -> str:
         sys.exit("[FATAL] 未找到无线接口")
 
     mode = iftypes.get(iface, "unknown")
-    _log(f"[INFO] 接口={iface} 当前模式={mode}")
+    _log(f"[INFO] iface={iface} mode={mode}")
     if mode != "monitor":
-        _log(f"[INFO] 切换到 monitor 模式...")
+        _log("[INFO] switching to monitor mode...")
         for c in (f"ip link set {iface} down",
                   f"iw dev {iface} set type monitor",
                   f"ip link set {iface} up"):
             run_cmd(c)
         new = run_cmd(f"iw dev {iface} info | grep type").strip()
-        _log(f"[INFO] 切换结果: {new}")
+        _log(f"[INFO] monitor switch result: {new}")
+    run_cmd(f"iw dev {iface} set power_save off")
     ch_info = run_cmd(f"iw dev {iface} info | grep channel").strip()
-    _log(f"[INFO] 当前信道: {ch_info or 'unknown'}")
+    _log(f"[INFO] current channel: {ch_info or 'unknown'}")
     return iface
 
 def detect_5g(iface: str) -> bool:
@@ -1063,9 +1528,9 @@ def detect_5g(iface: str) -> bool:
     if "Band 2:" in phy: return True
     return any(5000<=int(x)<=5999 for x in re.findall(r"\b(5\d{3})\s+MHz\b", phy))
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # Channel hopper
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def channel_hopper(iface, ch2g, ch5g, dw2, dw5, settle_ms, hit_ms, cap_ms):
     global current_channel
     dw2, dw5, settle = dw2/1000, dw5/1000, settle_ms/1000
@@ -1108,9 +1573,9 @@ def _notify_hit(ch: int):
     except Exception:
         pass
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ODID 解码
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ODID 瑙ｇ爜
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def decode_basic_id(msg25: bytes) -> dict | None:
     if len(msg25) < ODID_MSG_SIZE: return None
     try:
@@ -1118,14 +1583,14 @@ def decode_basic_id(msg25: bytes) -> dict | None:
         id_type = msg25[1] & 0x0F
         raw = msg25[2:22].rstrip(b"\x00")
         if not raw: return None
-        # 宽松：允许 >= 4 字节，允许部分非 ascii 字节被替换
+        # 瀹芥澗锛氬厑璁?>= 4 瀛楄妭锛屽厑璁搁儴鍒嗛潪 ascii 瀛楄妭琚浛鎹?
         try:
             s = raw.decode("ascii", errors="replace").strip()
         except Exception:
             return None
-        # 过滤全替换字符
+        # 杩囨护鍏ㄦ浛鎹㈠瓧绗?
         if not s or s.count("?") > len(s)//2: return None
-        # 去掉不可打印字符
+        # 鍘绘帀涓嶅彲鎵撳嵃瀛楃
         s = "".join(c if 32<=ord(c)<=126 else "" for c in s)
         if len(s) < 4: return None
         return {"uas_id": s, "id_type": UA_ID_TYPE.get(id_type, f"Unk{id_type}")}
@@ -1135,100 +1600,240 @@ def decode_basic_id(msg25: bytes) -> dict | None:
 def decode_location(msg25: bytes) -> dict | None:
     if len(msg25) < ODID_MSG_SIZE: return None
     try:
-        if ((msg25[0]>>4)&0xF) != MSG_TYPE_LOCATION: return None
-        sm = msg25[1] & 0x1
+        # Follow opendroneid-core-c ODID_Location_encoded layout exactly.
+        if ((msg25[0] >> 4) & 0xF) != MSG_TYPE_LOCATION:
+            return None
 
-        def _try_layout(endian: str, lat_off: int, lon_off: int, alt_off: int,
-                        spd_off: int = 3, vsp_off: int = 4) -> dict | None:
-            try:
-                sr = msg25[spd_off]
-                vr = struct.unpack_from("b", msg25, vsp_off)[0]
-                lat_raw = struct.unpack_from(f"{endian}i", msg25, lat_off)[0]
-                lon_raw = struct.unpack_from(f"{endian}i", msg25, lon_off)[0]
-                alt_raw = struct.unpack_from(f"{endian}H", msg25, alt_off)[0]
-            except Exception:
-                return None
-            lat = lat_raw * LOC_LAT_LON_MULT
-            lon = lon_raw * LOC_LAT_LON_MULT
-            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-                return None
-            alt = None if alt_raw == 0xFFFF else (alt_raw * LOC_ALT_MULT + LOC_ALT_OFFSET)
-            spd = None if sr == 255 else sr * (0.75 if sm else 0.25)
-            vsp = None if vr in (-128, 127) else vr * 0.5
-            return {"lat": lat, "lon": lon, "alt_geodetic": alt,
-                    "speed_ms": spd, "vspeed_ms": vsp}
+        b1 = msg25[1]
+        speed_mult = b1 & 0x01
+        ew_direction = (b1 >> 1) & 0x01
 
-        # Prefer current layout (byte5/9/15), but fall back for vendor/implementation
-        # differences (endianness or legacy off-by-one layout) to avoid all-N/A positions.
-        opp = "<" if LOC_ENDIAN == ">" else ">"
-        for endian, lat_off, lon_off, alt_off in (
-            (LOC_ENDIAN, 5, 9, 15),
-            (opp,       5, 9, 15),
-            (LOC_ENDIAN, 4, 8, 14),
-            (opp,       4, 8, 14),
-        ):
-            out = _try_layout(endian, lat_off, lon_off, alt_off)
-            if out is not None:
-                return out
-        return None
+        dir_enc = int(msg25[2])
+        direction = float(dir_enc + (180 if ew_direction else 0))
+        if direction >= 360.0:
+            direction -= 360.0
+
+        spd_enc = int(msg25[3])
+        if speed_mult:
+            speed = float(spd_enc) * 0.75 + (255.0 * 0.25)
+        else:
+            speed = float(spd_enc) * 0.25
+        if speed >= 255.0:
+            speed = None
+
+        vs_enc = struct.unpack_from("<b", msg25, 4)[0]
+        vspeed = float(vs_enc) * 0.5
+        if abs(vspeed - 63.0) < 1e-6:
+            vspeed = None
+
+        lat_raw = struct.unpack_from("<i", msg25, 5)[0]
+        lon_raw = struct.unpack_from("<i", msg25, 9)[0]
+        lat = float(lat_raw) * 1e-7
+        lon = float(lon_raw) * 1e-7
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+
+        alt_baro_raw = struct.unpack_from("<H", msg25, 13)[0]
+        alt_geo_raw = struct.unpack_from("<H", msg25, 15)[0]
+        alt_baro = float(alt_baro_raw) * 0.5 - 1000.0
+        alt_geo = float(alt_geo_raw) * 0.5 - 1000.0
+        if abs(alt_baro + 1000.0) < 1e-6:
+            alt_baro = None
+        if abs(alt_geo + 1000.0) < 1e-6:
+            alt_geo = None
+
+        return {
+            "lat": lat,
+            "lon": lon,
+            "alt_geodetic": (alt_geo if alt_geo is not None else alt_baro),
+            "speed_ms": speed,
+            "vspeed_ms": vspeed,
+            "direction_deg": direction,
+        }
     except Exception:
         return None
 
+def _pilot_loc_type_text(v: int | None) -> str:
+    m = {
+        0: "unknown",
+        1: "live_gnss",
+        2: "takeoff",
+        3: "fixed",
+    }
+    try:
+        return m.get(int(v), "unknown")
+    except Exception:
+        return "unknown"
+
+def decode_system(msg25: bytes) -> dict | None:
+    if len(msg25) < ODID_MSG_SIZE:
+        return None
+    try:
+        if ((msg25[0] >> 4) & 0xF) != MSG_TYPE_SYSTEM:
+            return None
+        # OpenDroneID System encoded layout (opendroneid-core-c):
+        # byte1: [reserved:3][classification:3][operator_location_type:2]
+        lat_raw = struct.unpack_from("<i", msg25, 2)[0]
+        lon_raw = struct.unpack_from("<i", msg25, 6)[0]
+        lat = float(lat_raw) * 1e-7
+        lon = float(lon_raw) * 1e-7
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+            return None
+        b1 = int(msg25[1])
+        loc_type = int(b1 & 0x03)
+        cls_type = int((b1 >> 2) & 0x07)
+        area_count = struct.unpack_from("<H", msg25, 10)[0]
+        area_radius = int(msg25[12])
+        return {
+            "pilot_lat": lat,
+            "pilot_lon": lon,
+            "pilot_loc_type": loc_type,
+            "pilot_loc_type_text": _pilot_loc_type_text(loc_type),
+            "system_classification_type": cls_type,
+            "system_area_count": int(area_count),
+            "system_area_radius_m": area_radius,
+        }
+    except Exception:
+        return None
+
+def _decode_odid_pack_layout(p: bytes) -> tuple[int, int, int] | None:
+    """Return (base, msg_size, qty) for packed ODID payload.
+    Supports both:
+      - New layout: [Fv][msg_size=25][qty][msgs...]
+      - Legacy layout used in older parser: [Fv][qty][msgs...]
+    """
+    if not p or len(p) < 2:
+        return None
+    # Preferred / spec-like layout.
+    if len(p) >= 3 and int(p[1]) == ODID_MSG_SIZE:
+        qty = int(p[2])
+        if 1 <= qty <= 15 and 3 + qty * ODID_MSG_SIZE <= len(p):
+            return (3, ODID_MSG_SIZE, qty)
+    # Legacy fallback.
+    qty = int(p[1])
+    if 1 <= qty <= 15 and 2 + qty * ODID_MSG_SIZE <= len(p):
+        return (2, ODID_MSG_SIZE, qty)
+    return None
+
+def _valid_msg_header_byte(b: int) -> bool:
+    mt = (int(b) >> 4) & 0xF
+    pv = int(b) & 0xF
+    return (mt in ODID_MSG_TYPES_OK) and (0 <= pv <= ODID_PROTOCOL_MAX)
+
 def _valid_payload(p: bytes) -> bool:
     if not p or len(p) < 1: return False
+    if not _valid_msg_header_byte(p[0]):
+        return False
     mt = (p[0]>>4)&0xF
-    if mt not in ODID_MSG_TYPES_OK: return False
     if mt == MSG_TYPE_PACK:
-        if len(p) < 2: return False
-        qty = p[1]
-        if not (1 <= qty <= 9): return False
-        if 2+qty*ODID_MSG_SIZE > len(p): return False
+        layout = _decode_odid_pack_layout(p)
+        if not layout:
+            return False
+        base, msg_size, qty = layout
         for i in range(qty):
-            if (p[2+i*ODID_MSG_SIZE]>>4)&0xF not in ODID_MSG_TYPES_OK: return False
+            if not _valid_msg_header_byte(p[base + i * msg_size]):
+                return False
         return True
     return len(p) >= ODID_MSG_SIZE
 
 def decode_odid(payload: bytes) -> dict:
-    res: dict = {"basic_id": None, "location": None}
+    res: dict = {"basic_id": None, "location": None, "system": None}
     if not payload: return res
     mt = (payload[0]>>4)&0xF
     if mt == MSG_TYPE_PACK:
-        if len(payload) < 2: return res
-        for i in range(payload[1]):
-            s, e = 2+i*ODID_MSG_SIZE, 2+(i+1)*ODID_MSG_SIZE
+        layout = _decode_odid_pack_layout(payload)
+        if not layout:
+            return res
+        base, msg_size, qty = layout
+        for i in range(qty):
+            s, e = base + i * msg_size, base + (i + 1) * msg_size
             if e > len(payload): break
             sub = payload[s:e]
             st  = (sub[0]>>4)&0xF
             if st==MSG_TYPE_BASIC_ID  and not res["basic_id"]:  res["basic_id"]  = decode_basic_id(sub)
             elif st==MSG_TYPE_LOCATION and not res["location"]: res["location"]  = decode_location(sub)
+            elif st==MSG_TYPE_SYSTEM and not res["system"]:     res["system"]    = decode_system(sub)
         return res
     if len(payload) >= ODID_MSG_SIZE:
         m = payload[:ODID_MSG_SIZE]
         if mt==MSG_TYPE_BASIC_ID:   res["basic_id"]  = decode_basic_id(m)
         elif mt==MSG_TYPE_LOCATION: res["location"]  = decode_location(m)
+        elif mt==MSG_TYPE_SYSTEM:   res["system"]    = decode_system(m)
     return res
 
-# ─────────────────────────────────────────────────────────────────────────────
-# IE / NAN 提取（更健壮）
-# ─────────────────────────────────────────────────────────────────────────────
+def _payload_quality(payload: bytes) -> int:
+    """Score payload quality; higher means more likely a real ODID payload."""
+    if not _valid_payload(payload):
+        return -1
+    score = 1
+    try:
+        mt = (payload[0] >> 4) & 0xF
+        if mt == MSG_TYPE_PACK:
+            score += 1
+        dec = decode_odid(payload)
+        if dec.get("basic_id"):
+            score += 2
+        loc = dec.get("location")
+        if isinstance(loc, dict) and loc.get("lat") is not None and loc.get("lon") is not None:
+            score += 3
+        sys_loc = dec.get("system")
+        if isinstance(sys_loc, dict) and sys_loc.get("pilot_lat") is not None and sys_loc.get("pilot_lon") is not None:
+            score += 2
+    except Exception:
+        pass
+    return score
+
+def _pick_payload_candidate(buf: bytes) -> bytes | None:
+    """Pick best payload from bytes after OUI+type.
+    Some frames include a 1-byte ODID service-info counter before payload.
+    """
+    if not buf:
+        return None
+    cands: list[tuple[int, int, bytes]] = []
+    for off in (1, 0):  # Prefer skipping service-info counter first.
+        if off >= len(buf):
+            continue
+        p = buf[off:]
+        q = _payload_quality(p)
+        if q >= 0:
+            cands.append((q, off, p))
+    if not cands:
+        return None
+    cands.sort(reverse=True)
+    return cands[0][2]
+
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# IE / NAN 鎻愬彇锛堟洿鍋ュ．锛?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def extract_from_ies(pkt) -> list[bytes]:
     results: list[bytes] = []
+    dedup: set[int] = set()
     elt = pkt.getlayer(Dot11Elt)
     while elt and isinstance(elt, Dot11Elt):
         if elt.ID == 221:
             info = bytes(elt.info) if elt.info else b""
-            # 标准 OUI 前缀（4字节：OUI + subtype）
+            # 鏍囧噯 OUI 鍓嶇紑锛?瀛楄妭锛歄UI + subtype锛?
             if len(info) >= 4 and info[:3] == ODID_OUI:
-                p = info[4:]
-                if _valid_payload(p): results.append(p)
+                p = _pick_payload_candidate(info[4:])
+                if p:
+                    sig = zlib.crc32(p) & 0xFFFFFFFF
+                    if sig not in dedup:
+                        dedup.add(sig)
+                        results.append(p)
             else:
-                # 在 IE 内搜索 OUI（处理偏移/包装变体）
+                # 鍦?IE 鍐呮悳绱?OUI锛堝鐞嗗亸绉?鍖呰鍙樹綋锛?
                 idx = 0
                 while True:
                     pos = info.find(ODID_OUI, idx)
                     if pos < 0: break
-                    p = info[pos+4:]
-                    if p and _valid_payload(p): results.append(p)
+                    p = _pick_payload_candidate(info[pos+4:])
+                    if p:
+                        sig = zlib.crc32(p) & 0xFFFFFFFF
+                        if sig not in dedup:
+                            dedup.add(sig)
+                            results.append(p)
                     idx = pos + 1
         try:
             nxt = elt.payload
@@ -1239,22 +1844,27 @@ def extract_from_ies(pkt) -> list[bytes]:
     return results
 
 def extract_from_raw(pkt) -> list[bytes]:
-    """在原始帧字节流中搜索 ODID OUI（用于 NAN / Action 帧）"""
+    """鍦ㄥ師濮嬪抚瀛楄妭娴佷腑鎼滅储 ODID OUI锛堢敤浜?NAN / Action 甯э級"""
     try: raw = bytes(pkt)
     except Exception: return []
     results: list[bytes] = []
+    dedup: set[int] = set()
     idx = 0
     while True:
         pos = raw.find(ODID_OUI, idx)
         if pos < 0: break
-        p = raw[pos+4 : pos+4+2+9*ODID_MSG_SIZE]
-        if p and _valid_payload(p): results.append(p)
+        p = _pick_payload_candidate(raw[pos+4 : pos+4+2+9*ODID_MSG_SIZE+2])
+        if p:
+            sig = zlib.crc32(p) & 0xFFFFFFFF
+            if sig not in dedup:
+                dedup.add(sig)
+                results.append(p)
         idx = pos + 1
     return results
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 状态更新
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 鐘舵€佹洿鏂?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 mac_to_basic:   dict[str, dict] = {}
 mac_to_ssid_sn: dict[str, dict] = {}
 
@@ -1286,6 +1896,40 @@ def _history_merge(dst: dict, src: dict) -> None:
     dst_nt = dst.get("notify_last_wall_ts")
     if src_nt is not None and (dst_nt is None or float(src_nt) > float(dst_nt)):
         dst["notify_last_wall_ts"] = src_nt
+    src_lod = src.get("last_online_duration_sec")
+    if src_lod is not None:
+        src_last_wall = float(src.get("last_seen_wall_ts") or 0.0)
+        dst_last_wall = float(dst.get("last_seen_wall_ts") or 0.0)
+        if dst.get("last_online_duration_sec") is None or src_last_wall >= dst_last_wall:
+            dst["last_online_duration_sec"] = src_lod
+    if src.get("ssid"):
+        dst["ssid"] = src.get("ssid")
+    if src.get("capture_type"):
+        dst["capture_type"] = src.get("capture_type")
+    if src.get("pilot_lat") is not None and src.get("pilot_lon") is not None:
+        dst["pilot_lat"] = src.get("pilot_lat")
+        dst["pilot_lon"] = src.get("pilot_lon")
+        dst["pilot_loc_type"] = src.get("pilot_loc_type")
+        dst["pilot_loc_type_text"] = src.get("pilot_loc_type_text")
+    src_cap_ts = src.get("last_capture_wall_ts")
+    dst_cap_ts = dst.get("last_capture_wall_ts")
+    if src_cap_ts is not None and (dst_cap_ts is None or float(src_cap_ts) > float(dst_cap_ts)):
+        dst["last_capture_wall_ts"] = src_cap_ts
+    src_rp = list(src.get("raw_packets") or [])
+    if src_rp:
+        dst_rp = list(dst.get("raw_packets") or [])
+        merged = (dst_rp + src_rp)[-6:]
+        dst["raw_packets"] = merged
+    src_track = _sanitize_track(src.get("track") or [])
+    if src_track:
+        dst_track = _sanitize_track(dst.get("track") or [])
+        merged_track = _sanitize_track(dst_track + src_track)
+        dst["track"] = merged_track
+        if merged_track:
+            dst["track_updated_wall_ts"] = float(merged_track[-1].get("ts") or time.time())
+    src_st = _scan_type_key(src.get("scan_type"))
+    if src_st and (not dst.get("scan_type")):
+        dst["scan_type"] = src_st
     dst["pkt_count_total"] = dst.get("pkt_count_total", 0) + src.get("pkt_count_total", 0)
 
 def _history_touch(e: dict, now: float, now_wall: float) -> None:
@@ -1303,6 +1947,18 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
             "pkt_count_total": 0,
             "notify_first_online_sent": False,
             "notify_last_wall_ts": 0.0,
+            "last_online_duration_sec": e.get("last_online_duration_sec"),
+            "ssid": e.get("ssid"),
+            "capture_type": e.get("capture_type"),
+            "pilot_lat": e.get("pilot_lat"),
+            "pilot_lon": e.get("pilot_lon"),
+            "pilot_loc_type": e.get("pilot_loc_type"),
+            "pilot_loc_type_text": e.get("pilot_loc_type_text"),
+            "last_capture_wall_ts": e.get("last_capture_wall_ts"),
+            "raw_packets": list(e.get("raw_packets") or [])[-3:],
+            "scan_type": _scan_type_key(e.get("scan_type")),
+            "track": _sanitize_track(e.get("track") or []),
+            "track_updated_wall_ts": e.get("track_updated_wall_ts"),
         }
         history_table[sn] = h
     h["sn"] = sn
@@ -1316,19 +1972,43 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h["alt"] = e.get("alt")
     h["speed"] = e.get("speed")
     h["vspeed"] = e.get("vspeed")
+    h["pilot_lat"] = e.get("pilot_lat")
+    h["pilot_lon"] = e.get("pilot_lon")
+    h["pilot_loc_type"] = e.get("pilot_loc_type")
+    h["pilot_loc_type_text"] = e.get("pilot_loc_type_text")
     h["rssi"] = e.get("rssi")
     h["move_dir"] = e.get("move_dir")
+    h["ssid"] = e.get("ssid")
+    h["capture_type"] = e.get("capture_type")
+    h["last_capture_wall_ts"] = e.get("last_capture_wall_ts")
+    h["raw_packets"] = list(e.get("raw_packets") or [])[-3:]
+    h["scan_type"] = _scan_type_key(e.get("scan_type"))
+    h["track"] = _sanitize_track(h.get("track") or [])
+    if e.get("lat") is not None and e.get("lon") is not None:
+        _track_append_point(h, float(e.get("lat")), float(e.get("lon")), float(now_wall))
     h["last_seen_ts"] = now
     h["last_seen_wall_ts"] = now_wall
     h["pkt_count_total"] = h.get("pkt_count_total", 0) + 1
     h.setdefault("notify_first_online_sent", False)
     h.setdefault("notify_last_wall_ts", 0.0)
+    h.setdefault("last_online_duration_sec", e.get("last_online_duration_sec"))
+    h.setdefault("pilot_lat", e.get("pilot_lat"))
+    h.setdefault("pilot_lon", e.get("pilot_lon"))
+    h.setdefault("pilot_loc_type", e.get("pilot_loc_type"))
+    h.setdefault("pilot_loc_type_text", e.get("pilot_loc_type_text"))
+    h.setdefault("raw_packets", list(e.get("raw_packets") or [])[-3:])
+    h.setdefault("scan_type", _scan_type_key(e.get("scan_type")))
+    h.setdefault("track", _sanitize_track(e.get("track") or []))
+    h.setdefault("track_updated_wall_ts", e.get("track_updated_wall_ts"))
     _history_mark_dirty()
 
 def state_update(src_mac: str, decoded: dict, rssi: int | None,
-                 ch: int, ch_assumed: bool, pl_sig: int) -> None:
+                 ch: int, ch_assumed: bool, pl_sig: int,
+                 *, scan_type: str = "rid", ssid: str | None = None,
+                 capture_type: str | None = None, raw_pkt_hex: str | None = None) -> None:
     basic = decoded.get("basic_id")
     loc   = decoded.get("location")
+    sys_loc = decoded.get("system")
 
     if basic and basic.get("uas_id"):
         mac_to_basic[src_mac] = {"basic": basic, "ts": time.monotonic()}
@@ -1350,12 +2030,13 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
     else:
         sn, it = mac_key, "unknown"
 
-    model = _model_from_sn(sn)
+    scan_type_key = _scan_type_key(scan_type)
+    model = ("WiFi快传" if scan_type_key == "phone" else _model_from_sn(sn))
     now   = time.monotonic()
     now_wall = time.time()
 
     with state_lock:
-        # MAC → SN 迁移
+        # MAC 鈫?SN 杩佺Щ
         if sn != mac_key and mac_key in state_table and sn not in state_table:
             state_table[sn] = state_table.pop(mac_key)
             state_table[sn].update({"sn":sn, "id_type":it, "_first_printed":False})
@@ -1373,9 +2054,20 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 "sn":sn, "src_mac":src_mac, "id_type":it, "model":model,
                 "first_seen_ts":now, "last_seen_ts":now,
                 "first_seen_wall_ts":now_wall, "last_seen_wall_ts":now_wall,
+                "session_start_ts":now, "session_start_wall_ts":now_wall,
+                "last_online_duration_sec":None,
                 "last_print_ts":0.0,
                 "pl_sig":None, "rssi":None, "last_ch":None, "ch_assumed":False,
                 "lat":None, "lon":None, "alt":None, "speed":None, "vspeed":None,
+                "pilot_lat":None, "pilot_lon":None,
+                "pilot_loc_type":None, "pilot_loc_type_text":"",
+                "scan_type":scan_type_key,
+                "ssid":(ssid or ""),
+                "capture_type":(capture_type or ""),
+                "last_capture_wall_ts":now_wall,
+                "raw_packets":[],
+                "track":[],
+                "track_updated_wall_ts":None,
                 "pkt_count":0, "rx_avg":None, "last_pkt_ts":now,
                 "reported_lost":False, "_last_shown":None, "_first_printed":False,
                 "_prev_lat":None, "_prev_lon":None, "move_dir":None, "move_dist":None,
@@ -1389,6 +2081,10 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         e["last_seen_ts"]  = now
         e["last_seen_wall_ts"] = now_wall
         e["reported_lost"] = False
+        if created or was_lost:
+            e["session_start_ts"] = now
+            e["session_start_wall_ts"] = now_wall
+            e["last_online_duration_sec"] = None
         e["pkt_count"]    += 1
         if e["pkt_count"] > 1:
             iv = now - e["last_pkt_ts"]
@@ -1396,6 +2092,22 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         e["last_pkt_ts"] = now
         e["id_type"] = it or e.get("id_type")
         e["model"]   = model
+        e["scan_type"] = scan_type_key
+        if ssid is not None:
+            e["ssid"] = str(ssid)
+        e["capture_type"] = str(capture_type or e.get("capture_type") or "")
+        e["last_capture_wall_ts"] = now_wall
+        if raw_pkt_hex:
+            rp = list(e.get("raw_packets") or [])
+            if (not rp) or (str(rp[-1].get("hex") or "") != str(raw_pkt_hex)):
+                rp.append({
+                    "ts": _fmt_wall_ts(now_wall),
+                    "capture_type": str(capture_type or ""),
+                    "hex": str(raw_pkt_hex),
+                })
+                if len(rp) > 6:
+                    rp = rp[-6:]
+                e["raw_packets"] = rp
 
         if CHANGE_ON_PL:   e["pl_sig"] = pl_sig
         if rssi is not None:
@@ -1407,6 +2119,31 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             e["ch_assumed"] = bool(ch_assumed)
 
         if loc:
+            cands = loc.get("_cands") if isinstance(loc, dict) else None
+            if cands and e.get("lat") is not None and e.get("lon") is not None:
+                prev_lat = float(e.get("lat"))
+                prev_lon = float(e.get("lon"))
+                best_c = None
+                best_d = None
+                cur_d = None
+                try:
+                    if loc.get("lat") is not None and loc.get("lon") is not None:
+                        cur_d = _haversine(prev_lat, prev_lon, float(loc["lat"]), float(loc["lon"]))
+                except Exception:
+                    cur_d = None
+                for c in cands:
+                    try:
+                        lat_c = float(c.get("lat"))
+                        lon_c = float(c.get("lon"))
+                    except Exception:
+                        continue
+                    d_c = _haversine(prev_lat, prev_lon, lat_c, lon_c)
+                    if best_d is None or d_c < best_d:
+                        best_d = d_c
+                        best_c = c
+                if best_c is not None and (cur_d is None or (best_d is not None and best_d + 50.0 < cur_d)):
+                    loc = best_c
+
             nlat, nlon = loc.get("lat"), loc.get("lon")
             if nlat is not None and nlon is not None and (abs(nlat)>0.001 or abs(nlon)>0.001):
                 if e["lat"] is not None:
@@ -1422,6 +2159,20 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             e["alt"]    = loc.get("alt_geodetic")
             e["speed"]  = loc.get("speed_ms")
             e["vspeed"] = loc.get("vspeed_ms")
+            if e.get("lat") is not None and e.get("lon") is not None:
+                _track_append_point(e, float(e.get("lat")), float(e.get("lon")), float(now_wall))
+
+        if sys_loc and (sys_loc.get("pilot_lat") is not None) and (sys_loc.get("pilot_lon") is not None):
+            try:
+                plat = float(sys_loc.get("pilot_lat"))
+                plon = float(sys_loc.get("pilot_lon"))
+                if (-90.0 <= plat <= 90.0) and (-180.0 <= plon <= 180.0):
+                    e["pilot_lat"] = plat
+                    e["pilot_lon"] = plon
+                    e["pilot_loc_type"] = sys_loc.get("pilot_loc_type")
+                    e["pilot_loc_type_text"] = str(sys_loc.get("pilot_loc_type_text") or "")
+            except Exception:
+                pass
 
         _history_touch(e, now, now_wall)
         h_notify = history_table.get(sn) or {}
@@ -1431,7 +2182,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         skip_mac_only = bool(NOTIFY_CFG.get("skip_mac_only", True))
         if not (skip_mac_only and sn_now.startswith("MAC:")):
             if not bool(h_notify.get("notify_first_online_sent")):
-                notify_event_title = "上线"
+                notify_event_title = "涓婄嚎"
                 h_notify["notify_first_online_sent"] = True
                 h_notify["notify_last_wall_ts"] = now_wall
                 _history_mark_dirty()
@@ -1439,7 +2190,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 last_nt = float(h_notify.get("notify_last_wall_ts") or 0.0)
                 cd_sec = float(NOTIFY_CFG.get("reonline_cooldown_sec") or NOTIFY_REONLINE_COOLDOWN_DEFAULT)
                 if (now_wall - last_nt) >= max(0.0, cd_sec):
-                    notify_event_title = "重新上线"
+                    notify_event_title = "閲嶆柊涓婄嚎"
                     h_notify["notify_last_wall_ts"] = now_wall
                     _history_mark_dirty()
         notify_payload = dict(e) if notify_event_title else None
@@ -1497,15 +2248,15 @@ def _emit_log(e: dict, changed_keys: set, reason: str) -> None:
     avg_s = f"{avg:.1f}s" if avg else "N/A"
     mv    = e.get("move_dir")
     md    = e.get("move_dist")
-    mv_s  = f" 向={mv} Δ≈{md:.1f}m" if mv and md else ""
-    pfx   = "★" if reason=="first" else "↻"
-    _log(f"{pfx} SN={sn} 机型={model} 类型={it} MAC={mac} "
-         f"经纬={lat},{lon} 高={alt} 速={spd} 垂={vsp} 信号={rssi} {ch_s} "
-         f"包={pkts} ≈{avg_s}{mv_s}")
+    mv_s  = f" dir={mv} d={md:.1f}m" if mv and md else ""
+    pfx   = "★" if reason=="first" else "→"
+    _log(f"{pfx} SN={sn} model={model} id={it} MAC={mac} "
+         f"loc={lat},{lon} alt={alt} spd={spd} vspd={vsp} rssi={rssi} {ch_s} "
+         f"pkts={pkts} avg={avg_s}{mv_s}")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # Lost checker
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def lost_checker() -> None:
     while True:
         time.sleep(1.0)
@@ -1514,22 +2265,44 @@ def lost_checker() -> None:
             for sn, e in list(state_table.items()):
                 age = now - e["last_seen_ts"]
                 if age > LOST_TIMEOUT and not e["reported_lost"]:
-                    _log(f"[LOST] SN={sn!r} {age:.0f}s未见 MAC={e.get('src_mac')}")
+                    dur = None
+                    try:
+                        st = e.get("session_start_ts")
+                        ls = e.get("last_seen_ts")
+                        if st is not None and ls is not None:
+                            dur = max(0.0, float(ls) - float(st))
+                    except Exception:
+                        dur = None
+                    if dur is None:
+                        try:
+                            stw = e.get("session_start_wall_ts")
+                            lsw = e.get("last_seen_wall_ts")
+                            if stw is not None and lsw is not None:
+                                dur = max(0.0, float(lsw) - float(stw))
+                        except Exception:
+                            dur = None
+                    if dur is not None:
+                        e["last_online_duration_sec"] = dur
+                        h = history_table.get(sn)
+                        if h is not None:
+                            h["last_online_duration_sec"] = dur
+                            _history_mark_dirty()
+                    _log(f"[LOST] SN={sn!r} {age:.0f}s鏈 MAC={e.get('src_mac')}")
                     e["reported_lost"] = True
                 if e["reported_lost"] and age > PURGE_TIMEOUT:
                     del state_table[sn]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP + WebSocket 服务（端口 4600）
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# HTTP + WebSocket 鏈嶅姟锛堢鍙?4600锛?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 HTTP_PORT = 4600
 
-# 已连接的 WebSocket 客户端 socket 列表
+# 宸茶繛鎺ョ殑 WebSocket 瀹㈡埛绔?socket 鍒楄〃
 _ws_clients: list = []
 _ws_lock = Lock()
 
 def _ws_push_loop() -> None:
-    """每秒向所有 WS 客户端推送最新状态 JSON"""
+    """Push latest state JSON to all websocket clients every second."""
     import json as _json
     while True:
         time.sleep(1.0)
@@ -1551,7 +2324,7 @@ def _ws_push_loop() -> None:
                     if s in _ws_clients: _ws_clients.remove(s)
 
 def _ws_frame(data: bytes) -> bytes:
-    """封装一个 WebSocket text frame（RFC 6455，服务端无掩码）"""
+    """Build a server-side websocket text frame (RFC 6455, no masking)."""
     n = len(data)
     if n <= 125:
         return bytes([0x81, n]) + data
@@ -1570,15 +2343,19 @@ def _fmt_wall_ts(ts: float | None) -> str:
         return "-"
 
 def _state_snapshot() -> dict:
-    """返回可 JSON 序列化的当前状态快照"""
+    """Return a JSON-serializable snapshot of current runtime state."""
     now = time.monotonic()
     now_wall = time.time()
     with state_lock:
         live_by_sn = {str(e.get("sn","")): e for e in state_table.values() if e.get("sn")}
         drones = []
         for sn in (set(history_table.keys()) | set(live_by_sn.keys())):
+            sn = str(sn or "")
             cur = live_by_sn.get(sn) or {}
             hist = history_table.get(sn) or cur
+            scan_type_key = _scan_type_key(cur.get("scan_type", hist.get("scan_type", "rid")))
+            if scan_type_key != "phone" and (len(sn) != 20 or (not sn.isalnum())):
+                continue
             if cur:
                 last_seen_ts = cur.get("last_seen_ts")
                 if last_seen_ts is None:
@@ -1594,33 +2371,83 @@ def _state_snapshot() -> dict:
                     except Exception:
                         age = 0.0
             lost = age > LOST_TIMEOUT
+            id_src = str(cur.get("id_type", hist.get("id_type","")) or "")
+            sn_src = _sn_source_display(id_src)
+            scan_type = _scan_type_display(scan_type_key)
+            online_dur = None
+            if cur:
+                if lost:
+                    online_dur = cur.get("last_online_duration_sec")
+                    if online_dur is None:
+                        try:
+                            st = cur.get("session_start_ts")
+                            ls = cur.get("last_seen_ts")
+                            if st is not None and ls is not None:
+                                online_dur = max(0.0, float(ls) - float(st))
+                        except Exception:
+                            online_dur = None
+                else:
+                    try:
+                        st = cur.get("session_start_ts", cur.get("first_seen_ts"))
+                        if st is not None:
+                            online_dur = max(0.0, now - float(st))
+                    except Exception:
+                        online_dur = None
+                if online_dur is None:
+                    online_dur = hist.get("last_online_duration_sec")
+            else:
+                online_dur = hist.get("last_online_duration_sec")
             ch = cur.get("last_ch", hist.get("last_ch")) or 0
             ch_assumed = bool(cur.get("ch_assumed", hist.get("ch_assumed")))
+            cap_wall_ts = cur.get("last_capture_wall_ts", hist.get("last_capture_wall_ts"))
+            track_data = _sanitize_track(cur.get("track", hist.get("track", [])) or [])
             drones.append({
                 "sn": sn,
+                "sn_src": sn_src,
+                "scan_type": scan_type,
                 "model": cur.get("model", hist.get("model","N/A")),
                 "lost": lost,
                 "archived": sn not in live_by_sn,
                 "mac": cur.get("src_mac", hist.get("src_mac","")),
+                "id_type": id_src or "-",
                 "ch": f"{'~' if ch_assumed else ''}{ch}" if ch else "?",
+                "ch_assumed": ch_assumed,
                 "lat": cur.get("lat", hist.get("lat")),
                 "lon": cur.get("lon", hist.get("lon")),
                 "alt": cur.get("alt", hist.get("alt")),
                 "spd": cur.get("speed", hist.get("speed")),
                 "vspd": cur.get("vspeed", hist.get("vspeed")),
+                "pilot_lat": cur.get("pilot_lat", hist.get("pilot_lat")),
+                "pilot_lon": cur.get("pilot_lon", hist.get("pilot_lon")),
+                "pilot_loc_type": cur.get("pilot_loc_type", hist.get("pilot_loc_type")),
+                "pilot_loc_type_text": cur.get("pilot_loc_type_text", hist.get("pilot_loc_type_text","")) or "",
                 "rssi": cur.get("rssi", hist.get("rssi")),
                 "pkts": hist.get("pkt_count_total", cur.get("pkt_count",0)),
                 "dir": cur.get("move_dir", hist.get("move_dir")) or "-",
+                "ssid": cur.get("ssid", hist.get("ssid","")) or "",
+                "capture_type": cur.get("capture_type", hist.get("capture_type","")) or "",
+                "capture_time": _fmt_wall_ts(cap_wall_ts),
+                "last_pkt_time": _fmt_wall_ts(cap_wall_ts),
+                "raw_packets": list(cur.get("raw_packets", hist.get("raw_packets", [])) or [])[-3:],
+                "scan_type_key": scan_type_key,
                 "age": round(age),
+                "age_text": _fmt_age_compact(age),
+                "online_dur": (None if online_dur is None else int(round(float(online_dur)))),
                 "first_seen": _fmt_wall_ts(hist.get("first_seen_wall_ts", cur.get("first_seen_wall_ts"))),
                 "last_seen": _fmt_wall_ts(hist.get("last_seen_wall_ts", cur.get("last_seen_wall_ts"))),
+                "track_count": len(track_data),
+                "track_updated": _fmt_wall_ts(hist.get("track_updated_wall_ts", cur.get("track_updated_wall_ts"))),
             })
         drones.sort(key=lambda d: (d["lost"], d.get("archived", False), d["age"], d["sn"]))
         map_drones = [d for d in drones if not d.get("archived")]
     with log_lock:
         logs = list(ap_buf)[-80:]
         logs_seq = ap_seq
-    aps, aps_seq = _ap_snapshot()
+    aps, aps_seq, aps_total = _ap_snapshot()
+    sniff_meta = _sniff_health_meta(now, now_wall)
+    basic_cfg = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+    if not isinstance(basic_cfg, dict):
+        basic_cfg = {}
     return {
         "ts": time.strftime("%H:%M:%S"),
         "ch": f"ch{current_channel}" if current_channel else "ch?",
@@ -1630,12 +2457,23 @@ def _state_snapshot() -> dict:
         "logs_seq": logs_seq,
         "aps": aps,
         "aps_seq": aps_seq,
+        "aps_total": aps_total,
         "meta": {
             "dji_lookup_url": str(WEB_CFG.get("dji_lookup_url") or ""),
             "allow_restart": bool(WEB_CFG.get("allow_restart", True)),
             "restart_args_current": " ".join(sys.argv[1:]),
             "restart_args_saved": str(WEB_CFG.get("last_restart_args") or ""),
             "config_path": APP_CONFIG_PATH or "",
+            "iface_selected": (None if basic_cfg.get("iface") in (None, "") else str(basic_cfg.get("iface"))),
+            "scan_wifi_fast": bool(basic_cfg.get("scan_wifi_fast")),
+            "wifi_fast_supported": WIFI_FAST_SUPPORTED,
+            "wifi_fast_msg": str(WIFI_FAST_SUPPORT_MSG or ""),
+            "sniff_state": sniff_meta.get("state"),
+            "sniff_msg": sniff_meta.get("msg"),
+            "sniff_iface": sniff_meta.get("iface"),
+            "sniff_idle_sec": sniff_meta.get("idle_sec"),
+            "sniff_last_pkt": sniff_meta.get("last_pkt"),
+            "sniff_last_err_at": sniff_meta.get("last_err_at"),
         },
     }
 
@@ -1648,12 +2486,22 @@ _PAGE_HTML = """<!doctype html><html lang="zh"><head>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
-:root{--bg:#070b12;--bg2:#0d1117;--border:#1e2a38;--txt:#c5cdd9;
-      --green:#3fb950;--yellow:#d29922;--dim:#6e7681;--blue:#58a6ff;
-      --purple:#d2a8ff;--cyan:#79c0ff;--glow:rgba(88,166,255,.12)}
-body{background:var(--bg);color:var(--txt);font-family:'Courier New',monospace;font-size:15px;
+:root{
+  --font-ui:"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;
+  --bg:#070b12;--bg2:#0d1117;--border:#1e2a38;--txt:#c5cdd9;
+  --green:#3fb950;--yellow:#d29922;--dim:#6e7681;--blue:#58a6ff;
+  --purple:#d2a8ff;--cyan:#79c0ff;--glow:rgba(88,166,255,.12)
+}
+body{background:var(--bg);color:var(--txt);font-family:var(--font-ui);font-size:16px;
      height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) minmax(240px,38vh) auto;
-     row-gap:12px;overflow:hidden;position:relative}
+     row-gap:12px;overflow:hidden;position:relative;
+     transition:background-color .18s,color .18s}
+body.theme-light{
+  --bg:#f4f7fb;--bg2:#eef3f9;--border:#cfd8e3;--txt:#1f2937;
+  --green:#1f883d;--yellow:#9a6700;--dim:#6b7280;--blue:#0969da;
+  --purple:#8250df;--cyan:#1d4ed8;--glow:rgba(9,105,218,.08)
+}
 body::before{
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
   background:
@@ -1661,67 +2509,113 @@ body::before{
     radial-gradient(820px 380px at 95% 110%, rgba(121,192,255,.10), transparent 60%),
     linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,0));
 }
+body.theme-light::before{
+  background:
+    radial-gradient(900px 420px at 8% -5%, rgba(9,105,218,.10), transparent 55%),
+    radial-gradient(820px 380px at 95% 110%, rgba(37,99,235,.06), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,.45), rgba(255,255,255,0));
+}
 header,.tbl-wrap,.panel,footer{position:relative;z-index:1}
+.mono, code, .logbox, .aplist, .adv-input, .stat b{font-family:var(--font-mono)}
 
-/* ── 顶栏 ── */
+/* 鈹€鈹€ 椤舵爮 鈹€鈹€ */
 header{background:linear-gradient(180deg, rgba(16,23,33,.96), rgba(13,17,23,.96));border-bottom:1px solid var(--border);
        padding:10px 14px;display:grid;grid-template-columns:auto 1fr;
        align-items:center;gap:8px 16px;position:sticky;top:0;z-index:10;
        box-shadow:0 8px 24px rgba(0,0,0,.22), inset 0 1px 0 rgba(121,192,255,.06)}
 header .head-stats{display:flex;align-items:center;justify-content:flex-end;
        gap:8px 16px;flex-wrap:wrap;min-width:0}
-header h1{font-size:18px;font-weight:700;color:var(--blue);letter-spacing:.04em}
+header h1{font-size:20px;font-weight:700;color:var(--blue);letter-spacing:.04em}
 header details.adv{grid-column:1/-1;border:1px solid var(--border);border-radius:6px;background:#0b1320}
-header details.adv > summary{cursor:pointer;list-style:none;padding:8px 10px;color:#8b949e;font-size:13px}
+header details.adv > summary{cursor:pointer;list-style:none;padding:8px 10px;color:#8b949e;font-size:14px}
 header details.adv > summary::-webkit-details-marker{display:none}
 header details.adv[open] > summary{border-bottom:1px solid var(--border);color:var(--blue)}
 .adv-body{padding:10px;display:grid;gap:8px}
 .adv-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.adv-row label{font-size:12px;color:#8b949e}
+.adv-row label{font-size:13px;color:#8b949e}
 .adv-input{min-width:260px;flex:1 1 420px;background:#0a0e14;color:var(--txt);border:1px solid #2b3a4b;border-radius:6px;padding:7px 9px;font:inherit}
-.adv-note{font-size:12px;color:#8b949e;word-break:break-all}
+.adv-note{font-size:13px;color:#8b949e;word-break:break-all}
 .adv-note code{color:#c5cdd9}
 .adv-actions{display:flex;gap:8px;flex-wrap:wrap}
-.stat{font-size:14px;color:#8b949e;white-space:nowrap}
+.cfg-editor{
+  width:100%;min-height:220px;resize:vertical;
+  background:#0a0e14;color:#cbd8e8;border:1px solid #2b3a4b;border-radius:6px;
+  padding:8px 10px;font:13px/1.5 var(--font-mono);
+}
+.stat{font-size:15px;color:#8b949e;white-space:nowrap}
 .stat b{color:var(--green)}
 .stat.ls b{color:var(--dim)}
 .stat.cs b{color:var(--purple)}
 .stat.ts b{color:var(--cyan);font-weight:400}
+.stat.snf b.ok{color:var(--green)}
+.stat.snf b.warn{color:var(--yellow)}
+.stat.snf b.err{color:#ff7b72}
+.sniff-banner{
+  display:none;
+  grid-column:1/-1;
+  margin-top:6px;
+  padding:8px 12px;
+  border:1px solid #7f3f3f;
+  border-radius:8px;
+  background:rgba(127,63,63,.18);
+  color:#ffb4b4;
+  font-size:13px;
+  line-height:1.35;
+  z-index:12;
+}
+.sniff-banner.warn{
+  border-color:#7a622a;
+  background:rgba(122,98,42,.18);
+  color:#f1d08b;
+}
+.banner-stack{
+  position:fixed;top:10px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;gap:8px;z-index:9998;
+  width:min(92vw, 860px);pointer-events:none;
+}
+.banner{
+  opacity:0;transform:translateY(-8px);
+  transition:opacity .24s ease,transform .24s ease;
+  border:1px solid #33516f;border-radius:8px;
+  background:rgba(14,25,38,.9);color:#d6e5f7;
+  padding:9px 12px;font-size:13px;line-height:1.35;
+  box-shadow:0 10px 26px rgba(0,0,0,.35);
+}
+.banner.show{opacity:1;transform:translateY(0)}
+.banner.ok{border-color:#2d6f4d;background:rgba(21,52,35,.92);color:#b8f5cf}
+.banner.warn{border-color:#8a5c34;background:rgba(61,38,20,.94);color:#ffd9a9}
 #dot-ws{width:9px;height:9px;border-radius:50%;background:var(--dim);
         display:inline-block;margin-right:4px;transition:background .3s}
 #dot-ws.on{background:var(--green)}
 
-/* ── 表格 ── */
+/* 鈹€鈹€ 琛ㄦ牸 鈹€鈹€ */
 .tbl-wrap{margin:0 12px;min-height:0;overflow:auto;
           border:1px solid var(--border);border-radius:8px;background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(10,14,20,.98));
           box-shadow:0 10px 28px rgba(0,0,0,.20), 0 0 0 1px rgba(88,166,255,.03) inset}
-table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1280px}
+table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:980px}
 thead tr{background:var(--bg2);position:sticky;top:0;z-index:9}
-thead th{padding:9px 10px;text-align:left;font-size:13px;color:#8b949e;
+thead th{padding:9px 10px;text-align:left;font-size:14px;color:#8b949e;
          border-bottom:1px solid var(--border);white-space:nowrap}
 tbody tr{border-bottom:1px solid #161b22;transition:background .12s}
 tbody tr:hover{background:rgba(88,166,255,.06)}
-tbody tr.live td:first-child{color:var(--green)}
-tbody tr.mac  td:first-child{color:var(--yellow)}
 tbody tr.lost{opacity:.4}
-tbody tr.lost td:first-child{color:var(--dim)}
-td{padding:8px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px}
-.mono{font-family:'Courier New',monospace}
+tbody tr.selected{background:rgba(88,166,255,.10)}
+td{padding:8px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px}
 .empty{text-align:center;padding:40px;color:var(--dim);font-size:15px}
-th:nth-child(1),td:nth-child(1){width:28px}
-th:nth-child(2),td:nth-child(2){width:248px}
-th:nth-child(3),td:nth-child(3){width:120px}
-th:nth-child(4),td:nth-child(4){width:50px}
-th:nth-child(5),td:nth-child(5),th:nth-child(6),td:nth-child(6){width:108px}
-th:nth-child(7),td:nth-child(7){width:80px}
-th:nth-child(8),td:nth-child(8),th:nth-child(9),td:nth-child(9){width:84px}
-th:nth-child(10),td:nth-child(10){width:78px}
-th:nth-child(11),td:nth-child(11){width:50px}
-th:nth-child(12),td:nth-child(12){width:44px}
-th:nth-child(13),td:nth-child(13){width:54px}
-th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
+th:nth-child(1),td:nth-child(1){width:46px}
+th:nth-child(2),td:nth-child(2){width:46px}
+th:nth-child(3),td:nth-child(3){width:360px}
+th:nth-child(4),td:nth-child(4){width:132px}
+th:nth-child(5),td:nth-child(5){width:96px}
+th:nth-child(6),td:nth-child(6){width:62px}
+th:nth-child(7),td:nth-child(7){width:68px}
+th:nth-child(8),td:nth-child(8){width:92px}
+th:nth-child(9),td:nth-child(9),th:nth-child(10),td:nth-child(10){width:176px}
+.sel-wrap{display:flex;align-items:center;justify-content:center}
+.sel-sn{width:16px;height:16px;accent-color:var(--blue);cursor:pointer}
+.idx-cell{color:var(--dim);text-align:center}
 
-/* ── 下方两栏：地图 + 日志 ── */
+/* 鈹€鈹€ 涓嬫柟涓ゆ爮锛氬湴鍥?+ 鏃ュ織 鈹€鈹€ */
 .bottom{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) minmax(0,.95fr);gap:12px;
         margin:0 12px;min-height:0}
 .bottom.map-collapsed{grid-template-columns:max-content minmax(0,1fr) minmax(0,1.35fr)}
@@ -1746,17 +2640,17 @@ th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
   }
   .bottom .panel.ap-panel{grid-column:auto;min-height:220px}
   .adv-input{min-width:0;flex-basis:100%}
-  th:nth-child(2),td:nth-child(2){width:220px}
+  th:nth-child(3),td:nth-child(3){width:220px}
   td{padding:7px 8px;font-size:14px}
 }
 
 .panel{border:1px solid var(--border);border-radius:8px;overflow:hidden;
        display:flex;flex-direction:column;min-height:0;
        box-shadow:0 10px 24px rgba(0,0,0,.18), 0 0 0 1px rgba(88,166,255,.02) inset}
-.panel-hdr{background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(12,18,27,.95));padding:8px 14px;font-size:13px;
+.panel-hdr{background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(12,18,27,.95));padding:8px 14px;font-size:14px;
            color:var(--blue);font-weight:700;border-bottom:1px solid var(--border);
            display:flex;justify-content:space-between;align-items:center}
-.panel-hdr span.sub{color:#8b949e;font-size:12px;font-weight:400}
+.panel-hdr span.sub{color:#8b949e;font-size:13px;font-weight:400}
 .panel-hdr .hdr-actions{display:flex;align-items:center;gap:8px}
 .panel.collapsible.collapsed{align-self:start;min-height:0}
 .panel.collapsible.collapsed .panel-hdr{padding:8px 10px;gap:8px}
@@ -1768,20 +2662,43 @@ th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
 .panel.map-panel.collapsed #map{display:none}
 .panel.map-panel.collapsed .panel-hdr{border-bottom:none}
 
-/* ── Leaflet 地图 ── */
+/* 鈹€鈹€ Leaflet 鍦板浘 鈹€鈹€ */
 #map{flex:1;width:100%;min-height:0}
+.panel.map-panel.fullscreen{
+  position:fixed;inset:0;z-index:9997;border-radius:0;margin:0;background:var(--bg);
+}
+.panel.map-panel.fullscreen .panel-hdr{
+  position:absolute;left:12px;right:12px;top:10px;z-index:20;border-radius:8px;
+}
+.panel.map-panel.fullscreen #map{
+  position:absolute;inset:0;height:100%;width:100%;
+}
+.map-mini-list{
+  display:none;
+  position:absolute;right:14px;top:62px;z-index:21;
+  width:min(320px,45vw);max-height:48vh;overflow:auto;
+  border:1px solid var(--border);border-radius:8px;
+  background:rgba(8,12,20,.88);backdrop-filter:blur(2px);
+  padding:8px;
+}
+.map-mini-list .mini-title{font-size:12px;color:#8b949e;margin-bottom:6px}
+.map-mini-list .mini-item{
+  display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;white-space:nowrap;
+}
+.map-mini-list .mini-item .sn{overflow:hidden;text-overflow:ellipsis}
+.panel.map-panel.fullscreen .map-mini-list{display:block}
 
-/* ── 日志框 ── */
+/* 鈹€鈹€ 鏃ュ織妗?鈹€鈹€ */
 .logbox{flex:1;overflow-y:auto;padding:7px 12px;
-        font-family:'Courier New',monospace;font-size:13px;line-height:1.65;
+        font-size:14px;line-height:1.65;
         background:var(--bg);min-height:0}
 .logbox .ap{color:var(--txt)}
 .logbox .rid{color:var(--green);font-weight:700}
 .panel-hdr label{display:flex;align-items:center;gap:6px;cursor:pointer;
-                 color:#8b949e;font-weight:400;font-size:12px}
+                 color:#8b949e;font-weight:400;font-size:13px}
 .btn-mini{
   border:1px solid #334556;background:linear-gradient(180deg,#121b27,#0f1721);color:#c5cdd9;
-  padding:4px 8px;border-radius:6px;font:inherit;font-size:12px;cursor:pointer;
+  padding:5px 9px;border-radius:6px;font:inherit;font-size:13px;cursor:pointer;
   transition:background .12s,border-color .12s,box-shadow .12s,color .12s;
 }
 .btn-mini:hover{background:linear-gradient(180deg,#182334,#152131);border-color:#4f6a85;box-shadow:0 0 0 2px rgba(88,166,255,.08)}
@@ -1790,23 +2707,176 @@ th:nth-child(14),td:nth-child(14),th:nth-child(15),td:nth-child(15){width:172px}
 .btn-mini.warn:hover{background:#2a1717}
 .sn-cell{display:flex;align-items:center;gap:6px;min-width:0}
 .sn-cell .mono{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.sn-badge{
+  display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;
+  border:1px solid #7d6118;background:#3b2e09;color:#ffd85f;line-height:1.3;flex:0 0 auto;
+}
 .icon-btn{
   border:1px solid #314156;background:#0d1622;color:#b6c2d2;
-  width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;
+  width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;
   border-radius:5px;cursor:pointer;font-size:12px;line-height:1;flex:0 0 auto;
 }
 .icon-btn:hover{background:#172334;color:#fff}
 .icon-btn.done{border-color:#2a6a45;color:#9ef0bc}
-.aplist{flex:1;overflow:auto;background:var(--bg);font-family:'Courier New',monospace;font-size:12px;line-height:1.45;padding:6px 8px}
+tbody tr.data-row{cursor:pointer}
+tbody td.hl{
+  background-color:rgba(255,216,96,calc(var(--hl-alpha,.0) * .58));
+}
+.info-modal{
+  position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.46);backdrop-filter:blur(2px);z-index:9999;padding:14px;
+}
+.info-modal.show{display:flex}
+.info-card{
+  width:min(440px, calc(100vw - 28px));
+  max-height:min(78vh, 560px);
+  border:1px solid #2a3a4d;border-radius:10px;overflow:hidden;
+  background:linear-gradient(180deg,#0f1721,#0c121a);
+  box-shadow:0 16px 40px rgba(0,0,0,.42);
+  display:flex;flex-direction:column;
+}
+.info-card-hd{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:10px 12px;border-bottom:1px solid #203247;color:#8fbde7;font-weight:700;
+}
+.info-card-close{
+  border:1px solid #344a60;background:#111c29;color:#c6d6ea;
+  width:26px;height:26px;border-radius:6px;cursor:pointer;line-height:1;
+}
+.info-card-close:hover{background:#1a2a3d;color:#fff}
+.info-card-body{
+  padding:12px 14px;overflow:auto;
+  white-space:normal;line-height:1.6;color:#d7e2ef;font-size:14px;
+}
+.info-grid{display:grid;grid-template-columns:1fr;gap:4px}
+.info-row{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:start}
+.info-row .k{color:#8fbde7}
+.info-row .v{word-break:break-all}
+.raw-title{margin:10px 0 6px 0;font-weight:700;color:#9cc7ef}
+.raw-meta{font-size:12px;color:#8fa7c2;margin:6px 0 4px 0}
+.raw-code{
+  margin:0 0 8px 0;padding:8px 10px;border-radius:6px;
+  border:1px solid #29405a;background:#0a1320;color:#d4e5f8;
+  font:12px/1.45 var(--font-mono);white-space:pre-wrap;word-break:break-all;
+}
+.raw-empty{color:#8b949e;font-size:13px}
+.info-card-body .mono{font-family:var(--font-mono)}
+.aplist{flex:1;overflow:auto;background:var(--bg);font-size:13px;line-height:1.45;padding:6px 8px}
 .aplist .ap-empty{color:var(--dim);padding:14px 8px}
-.aprow{display:grid;grid-template-columns:132px 52px 60px 54px 76px minmax(0,1.1fr) minmax(0,1fr);gap:8px;padding:5px 6px;border-bottom:1px solid #141b23;align-items:start}
+.aprow{display:grid;grid-template-columns:42px minmax(116px, 15ch) 62px 86px minmax(0,1.15fr) minmax(0,1fr);gap:8px;padding:5px 6px;border-bottom:1px solid #141b23;align-items:start}
 .aprow:hover{background:#101722}
 .aprow.hd{position:sticky;top:0;background:#0d1117;color:#8b949e;font-weight:700;z-index:1}
-.aprow .mono{white-space:nowrap;overflow:visible;text-overflow:clip}
+.aprow .idx{text-align:right;color:#8fa4bc}
+.aprow .mono{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.aprow .ap-mac{font-feature-settings:"tnum" 1}
+.aplist.wide .aprow{grid-template-columns:42px minmax(170px, 20ch) 64px 92px minmax(0,1.15fr) minmax(0,1fr)}
 .aprow .ssid{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all}
 .aprow .vendor{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all;color:#c9d5e6}
 .aprow .ssid-col,.aprow .vendor-col{min-width:0}
 .subline{font-size:11px;color:#8b949e}
+
+body.theme-light header{
+  background:linear-gradient(180deg, rgba(255,255,255,.96), rgba(247,250,253,.96));
+  box-shadow:0 8px 24px rgba(15,23,42,.08), inset 0 1px 0 rgba(9,105,218,.06);
+}
+body.theme-light header details.adv{background:#ffffff;border-color:#d8e1eb}
+body.theme-light header details.adv > summary{color:#57606a}
+body.theme-light header details.adv[open] > summary{color:var(--blue);border-bottom-color:#d8e1eb}
+body.theme-light .tbl-wrap{
+  background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(250,252,255,.98));
+  box-shadow:0 10px 28px rgba(15,23,42,.07), 0 0 0 1px rgba(9,105,218,.03) inset;
+}
+body.theme-light thead tr{background:#f3f6fa}
+body.theme-light thead th{color:#5b6470}
+body.theme-light tbody tr{border-bottom-color:#e6ecf2}
+body.theme-light tbody tr:hover{background:rgba(9,105,218,.05)}
+body.theme-light .panel{
+  box-shadow:0 10px 24px rgba(15,23,42,.07), 0 0 0 1px rgba(9,105,218,.02) inset;
+}
+body.theme-light .panel-hdr{
+  background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(244,248,253,.95));
+}
+body.theme-light .panel-hdr,
+body.theme-light .panel-hdr span.sub,
+body.theme-light .panel-hdr label,
+body.theme-light .adv-row label,
+body.theme-light .adv-note,
+body.theme-light .stat,
+body.theme-light footer,
+body.theme-light .subline{color:#5b6470}
+body.theme-light .logbox,
+body.theme-light .aplist{background:#ffffff}
+body.theme-light .aprow{border-bottom-color:#edf1f5}
+body.theme-light .aprow:hover{background:#f4f8ff}
+body.theme-light .aprow.hd{background:#f3f6fa;color:#5b6470}
+body.theme-light .aprow .vendor{color:#334155}
+body.theme-light .adv-input{
+  background:#ffffff;color:#1f2937;border-color:#c9d4df;
+}
+body.theme-light .adv-note code{color:#1f2937}
+body.theme-light .cfg-editor{
+  background:#ffffff;color:#1f2937;border-color:#c9d4df;
+}
+body.theme-light .btn-mini{
+  border-color:#b8c6d6;
+  background:linear-gradient(180deg,#ffffff,#f4f7fb);
+  color:#334155;
+}
+body.theme-light .btn-mini:hover{
+  background:linear-gradient(180deg,#f9fbff,#edf3fb);
+  border-color:#95abc3;
+  box-shadow:0 0 0 2px rgba(9,105,218,.08);
+}
+body.theme-light .btn-mini.warn{border-color:#d6a3a3;color:#9b1c1c}
+body.theme-light .btn-mini.warn:hover{background:#fff1f1}
+body.theme-light .icon-btn{
+  border-color:#b8c6d6;background:#f7faff;color:#475569;
+}
+body.theme-light .icon-btn:hover{background:#eaf2ff;color:#0f172a}
+body.theme-light .icon-btn.done{border-color:#4aa56f;color:#0f7a3b}
+body.theme-light .sn-badge{border-color:#cfb061;background:#fff6db;color:#7b5b00}
+body.theme-light tbody td.hl{
+  background-color:rgba(250,213,97,calc(var(--hl-alpha,.0) * .52));
+}
+body.theme-light tbody tr.selected{background:rgba(9,105,218,.09)}
+body.theme-light .map-mini-list{
+  border-color:#cfd8e3;background:rgba(255,255,255,.94);
+}
+body.theme-light .map-mini-list .mini-title{color:#57606a}
+body.theme-light .info-modal{background:rgba(15,23,42,.24)}
+body.theme-light .info-card{
+  border-color:#ced9e5;
+  background:linear-gradient(180deg,#ffffff,#f7fbff);
+  box-shadow:0 18px 36px rgba(15,23,42,.18);
+}
+body.theme-light .info-card-hd{
+  color:#2d4e72;border-bottom-color:#d8e4ef;
+}
+body.theme-light .info-card-close{
+  border-color:#b7c6d8;background:#f2f7fd;color:#35506d;
+}
+body.theme-light .info-card-close:hover{background:#e7f0fb;color:#1e334a}
+body.theme-light .info-card-body{color:#1f2937}
+body.theme-light .info-row .k{color:#35506d}
+body.theme-light .raw-title{color:#35506d}
+body.theme-light .raw-meta{color:#64748b}
+body.theme-light .raw-code{
+  border-color:#c7d7e9;background:#f6faff;color:#1f2937;
+}
+body.theme-light .raw-empty{color:#64748b}
+body.theme-light .sniff-banner{
+  border-color:#d7a6a6;
+  background:#fff3f3;
+  color:#9f2a2a;
+}
+body.theme-light .sniff-banner.warn{
+  border-color:#d4bf8a;
+  background:#fff9e8;
+  color:#8a6800;
+}
+body.theme-light .banner{border-color:#b4c8df;background:rgba(255,255,255,.97);color:#334155}
+body.theme-light .banner.ok{border-color:#89c49d;background:#ecfff3;color:#14532d}
+body.theme-light .banner.warn{border-color:#d5b07f;background:#fff8eb;color:#7c2d12}
  
 footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 </style>
@@ -1814,22 +2884,19 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 <header>
   <h1>&#x2708; RID Monitor</h1>
   <div class="head-stats">
-  <span class="stat">在线 <b id="n-live">-</b></span>
-  <span class="stat ls">离线 <b id="n-lost">-</b></span>
-  <span class="stat cs">信道 <b id="cur-ch">-</b></span>
-  <span class="stat ts">更新 <b id="cur-ts">-</b></span>
-  <span class="stat"><span id="dot-ws"></span><span id="ws-status">连接中…</span></span>
-  <button class="btn-mini" id="btn-clear-history" type="button">清空历史</button>
+  <span class="stat">&#x5728;&#x7EBF; <b id="n-live">-</b></span>
+  <span class="stat ls">&#x79BB;&#x7EBF; <b id="n-lost">-</b></span>
+  <span class="stat cs">&#x4FE1;&#x9053; <b id="cur-ch">-</b></span>
+  <span class="stat ts">&#x66F4;&#x65B0; <b id="cur-ts">-</b></span>
+  <span class="stat"><span id="dot-ws"></span><span id="ws-status">&#x8FDE;&#x63A5;&#x4E2D;</span></span>
+  <button class="btn-mini" id="btn-clear-history" type="button">&#x6E05;&#x7A7A;&#x5386;&#x53F2;</button>
   </div>
 </header>
 
 <div class="tbl-wrap">
 <table id="dtable">
 <thead><tr>
-  <th></th><th>SN</th><th>机型</th><th>ch</th>
-  <th>纬度</th><th>经度</th><th>高程</th>
-  <th>速度</th><th>垂速</th><th>信号</th>
-  <th>包</th><th>方向</th><th>上次</th><th>首次上线</th><th>最后上线</th>
+  <th>&#x9009;</th><th>#</th><th>SN</th><th>&#x673A;&#x578B;</th><th>&#x4FE1;&#x53F7;</th><th>&#x5305;</th><th>&#x65B9;&#x5411;</th><th>&#x6570;&#x636E;&#x66F4;&#x65B0;</th><th>&#x672B;&#x6B21;&#x53D1;&#x73B0;</th><th>&#x6700;&#x540E;&#x6570;&#x636E;&#x5305;</th>
 </tr></thead>
 <tbody id="tbody"></tbody>
 </table>
@@ -1838,24 +2905,24 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 <div class="bottom">
   <div class="panel">
     <div class="panel-hdr">
-      &#x1F5FA; 地图
-      <span class="sub" id="map-hint">等待坐标…</span>
+      &#x1F5FA; &#x5730;&#x56FE;
+      <span class="sub" id="map-hint">&#x7B49;&#x5F85;&#x5750;&#x6807;...</span>
     </div>
     <div id="map"></div>
   </div>
   <div class="panel">
     <div class="panel-hdr">
-      &#x1F4E1; AP 扫描日志
-      <label><input type="checkbox" id="autoscroll" checked>自动滚动</label>
+      &#x1F4E1; AP &#x626B;&#x63CF;&#x65E5;&#x5FD7;
+      <label><input type="checkbox" id="autoscroll" checked>&#x81EA;&#x52A8;&#x6EDA;&#x52A8;</label>
     </div>
     <div class="logbox" id="logbox"></div>
   </div>
 </div>
 
-<footer>WebSocket 实时推送 &nbsp;·&nbsp; OpenDroneID RID Monitor</footer>
+<footer>Light RID Scanner</footer>
 
 <script>
-// ── WebSocket ────────────────────────────────────────────────
+// 鈹€鈹€ WebSocket 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 var ws, reconnTimer;
 var lastLogsSeq = -1;
 var lastApsSeq = -1;
@@ -1864,9 +2931,161 @@ var restartBusy = false;
 var metaState = {};
 var uiFrozen = false;
 var frozenPendingData = null;
+var uiTheme = 'dark';
+var infoCardEscBound = false;
+var webNotifyEnabled = false;
+var droneStatePrev = {};
+var droneFieldPrev = {};
+var droneFieldHl = {};
+var latestDroneMap = {};
+var latestDroneRows = [];
+var latestMapRows = [];
+var latestApsRows = [];
+var latestApsTotal = 0;
+var selectedSnSet = {};
+var trackCache = {};
+var trackLoading = {};
+var HL_FADE_IN_MS = 500;
+var HL_HOLD_MS = 5000;
+var HL_FADE_OUT_MS = 3000;
+var HL_TOTAL_MS = HL_FADE_IN_MS + HL_HOLD_MS + HL_FADE_OUT_MS;
+var highlightAnimRunning = false;
+var ifaceOptionsLoaded = false;
+var sniffBannerPrevState = '';
+var mapCollapsedBeforeFullscreen = null;
 
 function qs(id){ return document.getElementById(id); }
 function fmt(v,dec,unit){ return v==null?'N/A':Number(v).toFixed(dec)+unit; }
+function shortMac(mac){
+  mac = String(mac||'');
+  if(mac.length <= 11) return mac;
+  return mac.slice(0,8)+'...'+mac.slice(-5);
+}
+function infoRowHtml(label, value){
+  return '<div class="info-row"><span class="k">'+esc(label)+'</span><span class="v">'+esc(value==null?'':value)+'</span></div>';
+}
+function snSourceText(e){
+  var idType = String((e && e.id_type) || '').toUpperCase();
+  return (idType === 'SSID') ? '\u0053\u0053\u0049\u0044' : '\u0052\u0049\u0044\u5305';
+}
+function scanTypeText(e){
+  var k = String((e && e.scan_type_key) || '').toLowerCase();
+  if(k === 'phone') return '\u624b\u673a\u5feb\u4f20';
+  return '\u0052\u0049\u0044\u62a5\u9001';
+}
+function buildInfoHtml(e){
+  e = e || {};
+  var html = '<div class="info-grid">';
+  html += infoRowHtml('SN', String(e.sn || '-'));
+  html += infoRowHtml('机型', String(e.model || 'N/A'));
+  html += infoRowHtml('在线状态', e.lost ? '离线' : '在线');
+  html += infoRowHtml('归档', e.archived ? '是' : '否');
+  html += infoRowHtml('MAC', String(e.mac || '-'));
+  html += infoRowHtml('SSID', String(e.ssid || '(hidden)'));
+  html += infoRowHtml('来源', snSourceText(e));
+  html += infoRowHtml('扫描类型', scanTypeText(e));
+  html += infoRowHtml('扫描类型Key', String(e.scan_type_key || '-'));
+  html += infoRowHtml('捕获类型', String(e.capture_type || '-'));
+  html += infoRowHtml('捕获时间', String(e.capture_time || '-'));
+  html += infoRowHtml('最后数据包', String(e.last_pkt_time || e.capture_time || '-'));
+  html += infoRowHtml('ID类型', String(e.id_type || '-'));
+  html += infoRowHtml('信号', e.rssi==null ? 'N/A' : (e.rssi + 'dBm'));
+  html += infoRowHtml('信道', String(e.ch || '?') + (e.ch_assumed ? ' (assumed)' : ''));
+  html += infoRowHtml('包数', String(e.pkts==null?0:e.pkts));
+  html += infoRowHtml('纬度', fmt(e.lat,6,''));
+  html += infoRowHtml('经度', fmt(e.lon,6,''));
+  html += infoRowHtml('飞手纬度', fmt(e.pilot_lat,6,''));
+  html += infoRowHtml('飞手经度', fmt(e.pilot_lon,6,''));
+  html += infoRowHtml('飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-'));
+  html += infoRowHtml('高度', fmt(e.alt,1,'m'));
+  html += infoRowHtml('速度', fmt(e.spd,2,'m/s'));
+  html += infoRowHtml('垂直速度', fmt(e.vspd,2,'m/s'));
+  html += infoRowHtml('方向', String(e.dir || '-'));
+  html += infoRowHtml('首次上线', String(e.first_seen || '-'));
+  html += infoRowHtml('最后上线', String(e.last_seen || '-'));
+  html += infoRowHtml('在线时长', fmtDurSec(e.online_dur));
+  html += infoRowHtml('数据更新时间', String(e.age_text || fmtAge(e.age)));
+  html += infoRowHtml('轨迹点数', String(e.track_count==null?0:e.track_count));
+  html += '</div>';
+  var raws = Array.isArray(e.raw_packets) ? e.raw_packets : [];
+  html += '<div class="raw-title">原始包</div>';
+  if(raws.length){
+    raws.forEach(function(p, idx){
+      p = p || {};
+      html += '<div class="raw-meta">#'+(idx+1)+' ['+esc(String(p.capture_type || e.capture_type || '-'))+'] '+esc(String(p.ts || e.capture_time || '-'))+'</div>';
+      html += '<pre class="raw-code">'+esc(String(p.hex || ''))+'</pre>';
+    });
+  } else {
+    html += '<div class="raw-empty">暂无</div>';
+  }
+  return html;
+}
+function fmtDurSec(sec){
+  if(sec==null || !isFinite(sec)) return '-';
+  sec = Math.max(0, Math.round(Number(sec)||0));
+  var d = Math.floor(sec / 86400); sec %= 86400;
+  var h = Math.floor(sec / 3600); sec %= 3600;
+  var m = Math.floor(sec / 60); sec %= 60;
+  if(d) return d+'d'+h+'h';
+  if(h) return h+'h'+m+'m';
+  if(m) return m+'m'+sec+'s';
+  return sec+'s';
+}
+function fmtAge(sec){
+  if(sec==null || !isFinite(sec)) return '-';
+  sec = Math.max(0, Math.round(Number(sec)||0));
+  if(sec < 60) return sec + 's';
+  if(sec < 3600) return Math.floor(sec / 60) + 'm';
+  if(sec <= 216000) return Math.floor(sec / 3600) + 'h';
+  return Math.floor(sec / 86400) + 'd';
+}
+function isSnSelected(sn){
+  sn = String(sn || '');
+  return !!selectedSnSet[sn];
+}
+function selectedSnList(){
+  return Object.keys(selectedSnSet).filter(function(sn){ return !!selectedSnSet[sn]; });
+}
+async function ensureTrackLoaded(sn, force){
+  sn = String(sn || '');
+  if(!sn) return;
+  if(trackLoading[sn]) return;
+  if(trackCache[sn] && !force) return;
+  trackLoading[sn] = true;
+  try{
+    var data = await getJson('/api/tracks/get?sn=' + encodeURIComponent(sn));
+    var tr = Array.isArray(data.track) ? data.track : [];
+    trackCache[sn] = tr;
+    if(isSnSelected(sn)){
+      updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+    }
+  }catch(_e){
+    if(!trackCache[sn]) trackCache[sn] = [];
+  }finally{
+    delete trackLoading[sn];
+  }
+}
+function syncSelectedFromRows(rows){
+  var valid = {};
+  (rows || []).forEach(function(e){
+    var sn = String((e && e.sn) || '');
+    if(sn) valid[sn] = true;
+  });
+  Object.keys(selectedSnSet).forEach(function(sn){
+    if(!valid[sn]) delete selectedSnSet[sn];
+  });
+}
+function setSnSelected(sn, on){
+  sn = String(sn || '');
+  if(!sn) return;
+  if(on) selectedSnSet[sn] = true;
+  else delete selectedSnSet[sn];
+  if(on) ensureTrackLoaded(sn, false);
+  syncTableSelectionUi();
+  renderMapMiniList(latestDroneRows);
+  refreshTrackMgrOptions(latestDroneRows);
+  updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+}
 function esc(v){
   return String(v==null?'':v)
     .replace(/&/g,'&amp;')
@@ -1874,6 +3093,251 @@ function esc(v){
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;')
     .replace(/'/g,'&#39;');
+}
+function escAttr(v){
+  return esc(v).replace(/\\n/g,'&#10;');
+}
+function hideInfoCard(){
+  var modal = qs('info-modal');
+  if(!modal) return;
+  modal.classList.remove('show');
+}
+function showInfoCard(msg, asHtml){
+  var modal = qs('info-modal');
+  var body = qs('info-card-body');
+  if(!modal || !body) return;
+  if(asHtml){
+    body.innerHTML = String(msg || '');
+  }else{
+    body.textContent = String(msg || '无详情');
+  }
+  modal.classList.add('show');
+}
+function fieldKey(sn, field){ return String(sn||'') + '|' + String(field||''); }
+function markFieldHighlight(sn, field, ms){
+  var now = Date.now();
+  droneFieldHl[fieldKey(sn, field)] = {start: now, end: now + (ms || HL_TOTAL_MS)};
+}
+function highlightAlpha(sn, field){
+  var it = droneFieldHl[fieldKey(sn, field)];
+  if(!it) return 0;
+  var now = Date.now();
+  var end = Number(it.end || 0);
+  if(now >= end){
+    delete droneFieldHl[fieldKey(sn, field)];
+    return 0;
+  }
+  var start = Number(it.start || now);
+  var t = Math.max(0, now - start);
+  if(t <= HL_FADE_IN_MS){
+    return Math.max(0, Math.min(1, t / HL_FADE_IN_MS));
+  }
+  if(t <= (HL_FADE_IN_MS + HL_HOLD_MS)){
+    return 1;
+  }
+  var fo = t - HL_FADE_IN_MS - HL_HOLD_MS;
+  if(fo >= HL_FADE_OUT_MS){
+    return 0;
+  }
+  return Math.max(0, 1 - (fo / HL_FADE_OUT_MS));
+}
+function fieldCellAttrs(sn, field, extraCls){
+  var cls = extraCls ? String(extraCls) : '';
+  var attrs = ' data-hl-sn="'+escAttr(sn)+'" data-hl-field="'+escAttr(field)+'"';
+  var a = highlightAlpha(sn, field);
+  if(a <= 0){
+    return (cls ? (' class="'+cls+'"') : '') + attrs;
+  }
+  cls = (cls ? (cls + ' ') : '') + 'hl';
+  return ' class=\"'+cls+'\"'+attrs+' style=\"--hl-alpha:'+a.toFixed(3)+'\"';
+}
+function animateHighlightsStep(){
+  var nodes = document.querySelectorAll('#tbody td[data-hl-sn][data-hl-field]');
+  var active = false;
+  for(var i=0;i<nodes.length;i++){
+    var td = nodes[i];
+    var sn = td.getAttribute('data-hl-sn') || '';
+    var field = td.getAttribute('data-hl-field') || '';
+    var a = highlightAlpha(sn, field);
+    if(a > 0){
+      active = true;
+      if(!td.classList.contains('hl')) td.classList.add('hl');
+      td.style.setProperty('--hl-alpha', a.toFixed(3));
+    }else{
+      if(td.classList.contains('hl')) td.classList.remove('hl');
+      td.style.removeProperty('--hl-alpha');
+    }
+  }
+  if(active){
+    requestAnimationFrame(animateHighlightsStep);
+  }else{
+    highlightAnimRunning = false;
+  }
+}
+function ensureHighlightAnimation(){
+  if(highlightAnimRunning) return;
+  highlightAnimRunning = true;
+  requestAnimationFrame(animateHighlightsStep);
+}
+function syncFieldHighlights(list){
+  var seen = {};
+  (list || []).forEach(function(e){
+    e = e || {};
+    var sn = String(e.sn || '');
+    if(!sn) return;
+    seen[sn] = true;
+    var cur = {
+      model: String(e.model || ''),
+      rssi: String(e.rssi == null ? '' : e.rssi),
+      pkts: String(e.pkts == null ? '' : e.pkts),
+      dir: String(e.dir || ''),
+      last_seen: String(e.last_seen || ''),
+      last_pkt_time: String(e.last_pkt_time || e.capture_time || ''),
+      age_text: String(e.age_text || fmtAge(e.age)),
+      lat: String(e.lat == null ? '' : e.lat),
+      lon: String(e.lon == null ? '' : e.lon),
+      alt: String(e.alt == null ? '' : e.alt),
+      spd: String(e.spd == null ? '' : e.spd),
+      vspd: String(e.vspd == null ? '' : e.vspd)
+    };
+    var prev = droneFieldPrev[sn];
+    if(prev){
+      Object.keys(cur).forEach(function(k){
+        if(prev[k] !== cur[k]) markFieldHighlight(sn, k, HL_TOTAL_MS);
+      });
+    }
+    droneFieldPrev[sn] = cur;
+  });
+  Object.keys(droneFieldPrev).forEach(function(sn){
+    if(!seen[sn]) delete droneFieldPrev[sn];
+  });
+}
+function showBanner(text, kind, timeoutMs){
+  var host = qs('banner-stack');
+  if(!host){
+    host = document.createElement('div');
+    host.id = 'banner-stack';
+    host.className = 'banner-stack';
+    document.body.appendChild(host);
+  }
+  var node = document.createElement('div');
+  node.className = 'banner ' + (kind || 'info');
+  node.textContent = String(text || '');
+  host.appendChild(node);
+  setTimeout(function(){ node.classList.add('show'); }, 10);
+  var ttl = Math.max(1200, Number(timeoutMs || 3200));
+  setTimeout(function(){
+    node.classList.remove('show');
+    setTimeout(function(){ if(node.parentNode) node.parentNode.removeChild(node); }, 280);
+  }, ttl);
+}
+function notifyBtnText(){
+  if(!('Notification' in window)) return '\u7f51\u9875\u901a\u77e5(\u4e0d\u652f\u6301)';
+  if(webNotifyEnabled && Notification.permission === 'granted') return '\u7f51\u9875\u901a\u77e5(\u5df2\u5f00)';
+  if(Notification.permission === 'denied') return '\u7f51\u9875\u901a\u77e5(\u5df2\u62d2\u7edd)';
+  return '\u7f51\u9875\u901a\u77e5';
+}
+function updateNotifyButton(){
+  var btn = qs('btn-web-notify');
+  if(!btn) return;
+  btn.textContent = notifyBtnText();
+  btn.disabled = !('Notification' in window) || Notification.permission === 'denied';
+}
+async function requestWebNotifyPermission(){
+  if(!('Notification' in window)){
+    showBanner('当前浏览器不支持网页通知', 'warn', 4200);
+    return;
+  }
+  try{
+    if(Notification.permission === 'granted'){
+      webNotifyEnabled = true;
+      updateNotifyButton();
+      showBanner('网页通知已启用', 'ok', 2200);
+      return;
+    }
+    var perm = await Notification.requestPermission();
+    webNotifyEnabled = (perm === 'granted');
+    updateNotifyButton();
+    if(webNotifyEnabled){
+      try{
+        new Notification('RID Monitor 通知已启用', {body:'将推送飞机上下线事件'});
+      }catch(_e){}
+      showBanner('网页通知权限已授权', 'ok', 2400);
+    } else if(perm === 'denied'){
+      showBanner('网页通知权限被拒绝', 'warn', 4200);
+    }
+  }catch(_e){}
+}
+function pushWebNotification(title, body, tag){
+  if(!webNotifyEnabled) return;
+  if(!('Notification' in window) || Notification.permission !== 'granted') return;
+  try{
+    new Notification(title, {body: body || '', tag: tag || ('rid-'+Date.now())});
+  }catch(_e){}
+}
+function handleDroneNotifications(list){
+  var seen = {};
+  var nowLabel = new Date().toLocaleTimeString();
+  (list || []).forEach(function(e){
+    e = e || {};
+    var sn = String(e.sn || '');
+    if(!sn) return;
+    seen[sn] = true;
+    var isLost = !!e.lost;
+    if(typeof droneStatePrev[sn] === 'undefined'){
+      droneStatePrev[sn] = isLost;
+      return;
+    }
+    if(droneStatePrev[sn] !== isLost){
+      var title = isLost ? '\u98de\u673a\u4e0b\u7ebf' : '\u98de\u673a\u4e0a\u7ebf';
+      var body = nowLabel + '  ' + sn + '\\n' + String(e.model || 'N/A') + '  ' +
+        (e.rssi == null ? 'N/A' : (e.rssi + 'dBm'));
+      pushWebNotification(title, body, 'rid-'+sn+'-'+(isLost?'off':'on'));
+      showBanner(title + '  ' + sn, isLost ? 'warn' : 'ok', 2600);
+    }
+    droneStatePrev[sn] = isLost;
+  });
+  Object.keys(droneStatePrev).forEach(function(sn){
+    if(!seen[sn]) delete droneStatePrev[sn];
+  });
+}
+async function getJson(url){
+  var resp = await fetch(url, {cache:'no-store'});
+  var data = {};
+  try{ data = await resp.json(); }catch(_e){}
+  if(!resp.ok || data.ok===false){
+    throw new Error((data && data.error) ? data.error : ('HTTP '+resp.status));
+  }
+  return data;
+}
+function loadThemePref(){
+  try{
+    var s = localStorage.getItem('rid_ui_theme');
+    if(s === 'dark' || s === 'light') return s;
+  }catch(_e){}
+  try{
+    if(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches){
+      return 'light';
+    }
+  }catch(_e){}
+  return 'dark';
+}
+function applyTheme(theme){
+  uiTheme = (theme === 'light') ? 'light' : 'dark';
+  var light = (uiTheme === 'light');
+  if(document.body){
+    document.body.classList.toggle('theme-light', light);
+    document.body.classList.toggle('theme-dark', !light);
+  }
+  try{ localStorage.setItem('rid_ui_theme', uiTheme); }catch(_e){}
+  var btn = qs('btn-theme');
+  if(btn){
+    btn.textContent = light ? '\u6df1\u8272' : '\u6d45\u8272';
+    btn.title = light ? '\u5207\u6362\u4e3a\u6df1\u8272' : '\u5207\u6362\u4e3a\u6d45\u8272';
+  }
+}
+function toggleTheme(){
+  applyTheme(uiTheme === 'light' ? 'dark' : 'light');
 }
 async function postJson(url, body){
   var resp = await fetch(url, {
@@ -1887,6 +3351,42 @@ async function postJson(url, body){
     throw new Error((data && data.error) ? data.error : ('HTTP '+resp.status));
   }
   return data;
+}
+
+async function loadIfaceOptions(force){
+  if(ifaceOptionsLoaded && !force) return;
+  var sel = qs('iface-select');
+  var st = qs('iface-status');
+  if(!sel) return;
+  try{
+    var data = await getJson('/api/interfaces');
+    var items = Array.isArray(data.items) ? data.items : [];
+    var html = '<option value="">(auto)</option>';
+    items.forEach(function(it){
+      it = it || {};
+      var name = String(it.name || '');
+      if(!name) return;
+      var mode = String(it.mode || '');
+      var s5 = it.supports_5g ? '5G' : '2.4G';
+      var lb = name + (mode ? (' ['+mode+']') : '') + ' ' + s5;
+      html += '<option value=\"'+escAttr(name)+'\">'+esc(lb)+'</option>';
+    });
+    sel.innerHTML = html;
+    var chosen = (metaState && metaState.iface_selected!=null) ? String(metaState.iface_selected) : String(data.selected_iface || '');
+    if(chosen) sel.value = chosen;
+    var chk = qs('scan-wifi-fast');
+    if(chk && !chk.dataset.edited){
+      chk.checked = !!(metaState && metaState.scan_wifi_fast);
+      if(typeof data.scan_wifi_fast !== 'undefined') chk.checked = !!data.scan_wifi_fast;
+    }
+    if(st){
+      var active = String((metaState && metaState.sniff_iface) || data.active_iface || '-');
+      st.textContent = '当前采集网卡: ' + active;
+    }
+    ifaceOptionsLoaded = true;
+  }catch(e){
+    if(st) st.textContent = '网卡加载失败: ' + ((e && e.message) ? e.message : e);
+  }
 }
 
 function setFreezeState(frozen){
@@ -1961,11 +3461,156 @@ function syncBottomPanelLayout(){
   }
 }
 
+function isMapFullscreen(){
+  var panel = qs('map-panel');
+  var fe = document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement || null;
+  return !!(panel && fe && (fe === panel || panel.contains(fe)));
+}
+
+function updateMapFullscreenButton(){
+  var btn = qs('btn-map-fullscreen');
+  if(!btn) return;
+  btn.textContent = isMapFullscreen() ? '退出全屏' : '全屏';
+}
+
+async function toggleMapFullscreen(){
+  var panel = qs('map-panel');
+  if(!panel) return;
+  try{
+    if(isMapFullscreen()){
+      if(document.exitFullscreen) await document.exitFullscreen();
+      else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }else{
+      mapCollapsedBeforeFullscreen = panel.classList.contains('collapsed');
+      if(mapCollapsedBeforeFullscreen){
+        setMapPanelCollapsed(false);
+      }
+      if(panel.requestFullscreen) await panel.requestFullscreen();
+      else if(panel.webkitRequestFullscreen) panel.webkitRequestFullscreen();
+    }
+  }catch(e){
+    showBanner('全屏切换失败: ' + ((e && e.message) ? e.message : e), 'warn', 3200);
+  }
+}
+
+document.addEventListener('fullscreenchange', function(){
+  var panel = qs('map-panel');
+  var entering = isMapFullscreen();
+  if(panel){
+    panel.classList.toggle('fullscreen', entering);
+    if(entering && panel.classList.contains('collapsed')){
+      setMapPanelCollapsed(false);
+    }
+    if(!entering && mapCollapsedBeforeFullscreen === true){
+      setMapPanelCollapsed(true);
+    }
+  }
+  if(!entering) mapCollapsedBeforeFullscreen = null;
+  updateMapFullscreenButton();
+  renderMapMiniList(latestDroneRows);
+  if(map){
+    setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 0);
+  }
+});
+
+function renderMapMiniList(list){
+  var box = qs('map-mini-list');
+  if(!box) return;
+  var rows = Array.isArray(list) ? list : [];
+  if(!rows.length){
+    box.innerHTML = '<div class="mini-title">暂无飞机</div>';
+    return;
+  }
+  var html = '<div class="mini-title">轨迹选择（勾选后显示飞手与轨迹）</div>';
+  rows.forEach(function(e, idx){
+    e = e || {};
+    var sn = String(e.sn || '');
+    if(!sn) return;
+    var checked = isSnSelected(sn) ? ' checked' : '';
+    html += '<label class="mini-item"><input class="mini-sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+
+      '<span class="mono">#'+(idx+1)+'</span><span class="sn" title="'+esc(sn)+'">'+esc(sn)+'</span></label>';
+  });
+  box.innerHTML = html;
+  var cbs = box.querySelectorAll('.mini-sel-sn');
+  for(var i=0;i<cbs.length;i++){
+    cbs[i].addEventListener('change', function(ev){
+      var sn = ev.target.getAttribute('data-sn') || '';
+      setSnSelected(sn, !!ev.target.checked);
+      syncTableSelectionUi();
+    });
+  }
+}
+
+function refreshTrackMgrOptions(list){
+  var sel = qs('track-sn-select');
+  if(!sel) return;
+  var rows = Array.isArray(list) ? list : [];
+  var cur = String(sel.value || '');
+  var html = '<option value="">请选择飞机</option>';
+  rows.forEach(function(e){
+    e = e || {};
+    var sn = String(e.sn || '');
+    if(!sn) return;
+    var model = String(e.model || 'N/A');
+    var cnt = Number(e.track_count || 0);
+    var t = String(e.last_seen || '-');
+    html += '<option value="'+escAttr(sn)+'">'+esc(sn+' | '+model+' | 轨迹'+cnt+'点 | 末次'+t)+'</option>';
+  });
+  sel.innerHTML = html;
+  if(cur && rows.some(function(e){ return String((e && e.sn) || '') === cur; })){
+    sel.value = cur;
+  }
+}
+
+function syncTableSelectionUi(){
+  var cbs = document.querySelectorAll('#tbody .sel-sn');
+  for(var i=0;i<cbs.length;i++){
+    var sn = String(cbs[i].getAttribute('data-sn') || '');
+    cbs[i].checked = isSnSelected(sn);
+  }
+}
+
 function buildExtraUi(){
   if(window.__ridExtraUiReady) return;
   window.__ridExtraUiReady = true;
 
+  if(!qs('info-modal')){
+    var modal = document.createElement('div');
+    modal.id = 'info-modal';
+    modal.className = 'info-modal';
+    modal.innerHTML =
+      '<div class="info-card" role="dialog" aria-modal="true" aria-label="\u8be6\u60c5\u4fe1\u606f">'+
+      '  <div class="info-card-hd"><span>详情信息</span><button id="info-card-close" class="info-card-close" type="button" title="关闭">×</button></div>'+
+      '  <div id="info-card-body" class="info-card-body"></div>'+
+      '</div>';
+    document.body.appendChild(modal);
+    modal.addEventListener('click', function(ev){
+      if(ev.target === modal) hideInfoCard();
+    });
+  }
+  if(qs('info-card-close')) qs('info-card-close').addEventListener('click', hideInfoCard);
+  if(!infoCardEscBound){
+    document.addEventListener('keydown', function(ev){
+      if(ev && ev.key === 'Escape') hideInfoCard();
+    });
+    infoCardEscBound = true;
+  }
+
   var clearBtn = qs('btn-clear-history');
+  if(clearBtn && !qs('sniff-state')){
+    var sniffStat = document.createElement('span');
+    sniffStat.className = 'stat snf';
+    sniffStat.innerHTML = '\u91c7\u96c6 <b id="sniff-state" class="warn">-</b>';
+    clearBtn.parentNode.insertBefore(sniffStat, clearBtn);
+  }
+  if(clearBtn && !qs('btn-theme')){
+    var themeBtn = document.createElement('button');
+    themeBtn.className = 'btn-mini';
+    themeBtn.id = 'btn-theme';
+    themeBtn.type = 'button';
+    themeBtn.textContent = '\u6d45\u8272';
+    clearBtn.parentNode.insertBefore(themeBtn, clearBtn);
+  }
   if(clearBtn && !qs('btn-dji-lookup')){
     var djiBtn = document.createElement('button');
     djiBtn.className = 'btn-mini';
@@ -1982,8 +3627,22 @@ function buildExtraUi(){
     freezeBtn.textContent = '\u51bb\u7ed3\u5217\u8868';
     clearBtn.parentNode.insertBefore(freezeBtn, clearBtn);
   }
+  if(clearBtn && !qs('btn-web-notify')){
+    var notifyBtn = document.createElement('button');
+    notifyBtn.className = 'btn-mini';
+    notifyBtn.id = 'btn-web-notify';
+    notifyBtn.type = 'button';
+    notifyBtn.textContent = '\u7f51\u9875\u901a\u77e5';
+    clearBtn.parentNode.insertBefore(notifyBtn, clearBtn);
+  }
 
   var header = document.querySelector('header');
+  if(header && !qs('sniff-banner')){
+    var banner = document.createElement('div');
+    banner.id = 'sniff-banner';
+    banner.className = 'sniff-banner';
+    header.appendChild(banner);
+  }
   if(header && !qs('adv-panel')){
     var details = document.createElement('details');
     details.className = 'adv';
@@ -1995,10 +3654,35 @@ function buildExtraUi(){
       '    <label for="restart-args">\u53c2\u6570</label>'+
       '    <input id="restart-args" class="adv-input" type="text" placeholder="\u4f8b\u5982: --no-tui --channel 6">'+
       '  </div>'+
+      '  <div class="adv-row">'+
+      '    <label for="iface-select">\u7f51\u5361</label>'+
+      '    <select id="iface-select" class="adv-input"><option value="">(auto)</option></select>'+
+      '    <button class="btn-mini" id="btn-iface-refresh" type="button">\u5237\u65b0\u7f51\u5361</button>'+
+      '  </div>'+
+      '  <div class="adv-row">'+
+      '    <label><input id="scan-wifi-fast" type="checkbox"> \u626b\u63cfWiFi\u5feb\u4f20(5GHz\u5e38\u89c1\u4fe1\u9053)</label>'+
+      '  </div>'+
+      '  <div class="adv-note" id="iface-status">-</div>'+
       '  <div class="adv-actions">'+
       '    <button class="btn-mini" id="btn-restart-once" type="button">\u4ec5\u672c\u6b21\u91cd\u542f</button>'+
       '    <button class="btn-mini warn" id="btn-restart-save" type="button">\u4fdd\u5b58\u5e76\u91cd\u542f</button>'+
       '  </div>'+
+      '  <div class="adv-actions">'+
+      '    <button class="btn-mini" id="btn-config-load" type="button">\u8bfb\u53d6\u914d\u7f6e</button>'+
+      '    <button class="btn-mini" id="btn-config-save" type="button">\u4fdd\u5b58\u5e76\u70ed\u91cd\u8f7d</button>'+
+      '  </div>'+
+      '  <div class="adv-note" id="config-editor-status">-</div>'+
+      '  <textarea id="config-editor" class="cfg-editor" spellcheck="false" placeholder="\u5728\u8fd9\u91cc\u7f16\u8f91 rid_config.json"></textarea>'+
+      '  <div class="adv-row">'+
+      '    <label for="track-sn-select">\u5386\u53f2/\u8f68\u8ff9</label>'+
+      '    <select id="track-sn-select" class="adv-input"><option value="">\u8bf7\u9009\u62e9\u98de\u673a</option></select>'+
+      '  </div>'+
+      '  <div class="adv-actions">'+
+      '    <button class="btn-mini warn" id="btn-history-delete" type="button">\u5220\u9664\u8be5\u98de\u673a</button>'+
+      '    <button class="btn-mini" id="btn-track-clear-one" type="button">\u6e05\u7a7a\u8be5\u673a\u8f68\u8ff9</button>'+
+      '    <button class="btn-mini warn" id="btn-track-clear-all" type="button">\u6e05\u7a7a\u5168\u90e8\u8f68\u8ff9</button>'+
+      '  </div>'+
+      '  <div class="adv-note" id="track-mgr-status">-</div>'+
       '  <div class="adv-note">DJI\u5730\u5740: <code id="dji-url-text">-</code></div>'+
       '  <div class="adv-note">\u5f53\u524d\u53c2\u6570: <code id="restart-current-args">-</code></div>'+
       '  <div class="adv-note">\u5df2\u4fdd\u5b58\u53c2\u6570: <code id="restart-saved-args">-</code></div>'+
@@ -2028,6 +3712,13 @@ function buildExtraUi(){
         mapActions.className = 'hdr-actions';
         var hint = mapHdr.querySelector('#map-hint');
         if(hint) mapActions.appendChild(hint);
+        var fsBtn = document.createElement('button');
+        fsBtn.className = 'btn-mini';
+        fsBtn.id = 'btn-map-fullscreen';
+        fsBtn.type = 'button';
+        fsBtn.textContent = '全屏';
+        fsBtn.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); toggleMapFullscreen(); });
+        mapActions.appendChild(fsBtn);
         var mapBtn = document.createElement('button');
         mapBtn.className = 'btn-mini';
         mapBtn.id = 'map-panel-toggle';
@@ -2041,6 +3732,12 @@ function buildExtraUi(){
           if(t && t.closest && t.closest('button')) return;
           toggleMapPanel();
         });
+      }
+      if(!qs('map-mini-list')){
+        var mini = document.createElement('div');
+        mini.id = 'map-mini-list';
+        mini.className = 'map-mini-list';
+        mapPanel.appendChild(mini);
       }
       setMapPanelCollapsed(false);
     }
@@ -2077,17 +3774,52 @@ function buildExtraUi(){
   }
 
   if(qs('btn-clear-history')) qs('btn-clear-history').addEventListener('click', clearHistory);
+  if(qs('btn-theme')) qs('btn-theme').addEventListener('click', toggleTheme);
   if(qs('btn-dji-lookup')) qs('btn-dji-lookup').addEventListener('click', openDjiLookup);
   if(qs('btn-freeze')) qs('btn-freeze').addEventListener('click', toggleFreeze);
+  if(qs('btn-web-notify')) qs('btn-web-notify').addEventListener('click', requestWebNotifyPermission);
   if(qs('btn-restart-once')) qs('btn-restart-once').addEventListener('click', function(){ restartProgram(false); });
   if(qs('btn-restart-save')) qs('btn-restart-save').addEventListener('click', function(){ restartProgram(true); });
+  if(qs('btn-config-load')) qs('btn-config-load').addEventListener('click', loadConfigEditor);
+  if(qs('btn-config-save')) qs('btn-config-save').addEventListener('click', saveConfigEditor);
+  if(qs('btn-history-delete')) qs('btn-history-delete').addEventListener('click', deleteHistoryBySelect);
+  if(qs('btn-track-clear-one')) qs('btn-track-clear-one').addEventListener('click', clearTrackBySelect);
+  if(qs('btn-track-clear-all')) qs('btn-track-clear-all').addEventListener('click', clearTrackAll);
+  if(qs('btn-iface-refresh')) qs('btn-iface-refresh').addEventListener('click', function(){ loadIfaceOptions(true); });
+  if(qs('iface-select')) qs('iface-select').addEventListener('change', function(){ this.dataset.edited='1'; });
+  if(qs('scan-wifi-fast')) qs('scan-wifi-fast').addEventListener('change', function(){ this.dataset.edited='1'; });
   if(qs('restart-args')) qs('restart-args').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('tbody')) qs('tbody').addEventListener('click', function(ev){
+    var cb = ev.target && ev.target.closest ? ev.target.closest('.sel-sn') : null;
+    if(cb){
+      ev.stopPropagation();
+      var snCb = cb.getAttribute('data-sn') || '';
+      setSnSelected(snCb, !!cb.checked);
+      return;
+    }
     var btn = ev.target && ev.target.closest ? ev.target.closest('.copy-sn') : null;
-    if(!btn) return;
-    copySn(btn.getAttribute('data-sn') || '');
+    if(btn){
+      ev.stopPropagation();
+      copySn(btn.getAttribute('data-sn') || '');
+      return;
+    }
+    var tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-sn]') : null;
+    if(tr){
+      var sn = tr.getAttribute('data-sn') || '';
+      var e = latestDroneMap[sn];
+      if(e) showInfoCard(buildInfoHtml(e), true);
+    }
   });
+  applyTheme(uiTheme);
+  if(('Notification' in window) && Notification.permission === 'granted'){
+    webNotifyEnabled = true;
+  }
+  updateNotifyButton();
+  loadConfigEditor();
+  loadIfaceOptions(false);
   setFreezeState(false);
+  updateMapFullscreenButton();
+  renderMapMiniList([]);
 }
 
 function applyMeta(meta){
@@ -2104,6 +3836,81 @@ function applyMeta(meta){
   if(input && !input.dataset.edited){
     var preset = String(metaState.restart_args_saved || metaState.restart_args_current || '');
     input.value = preset;
+  }
+  var ifaceSel = qs('iface-select');
+  if(ifaceSel && !ifaceSel.dataset.edited){
+    var ifaceVal = metaState.iface_selected;
+    if(ifaceVal == null || ifaceVal === '') ifaceVal = '';
+    ifaceSel.value = String(ifaceVal);
+  }
+  var scanFast = qs('scan-wifi-fast');
+  if(scanFast && !scanFast.dataset.edited){
+    scanFast.checked = !!metaState.scan_wifi_fast;
+  }
+  var ifaceStatus = qs('iface-status');
+  if(ifaceStatus){
+    var activeIface = String(metaState.sniff_iface || '-');
+    var extra = '';
+    if(!!metaState.scan_wifi_fast){
+      var supported = metaState.wifi_fast_supported;
+      if(supported === false) extra = ' | 5GHz不支持';
+      else if(supported === true) extra = ' | 5GHz可用';
+      if(metaState.wifi_fast_msg) extra += ' | ' + String(metaState.wifi_fast_msg);
+    }
+    ifaceStatus.textContent = '当前采集网卡: ' + activeIface + extra;
+  }
+  if(!!metaState.scan_wifi_fast && metaState.wifi_fast_supported === false){
+    var warnMsg = String(metaState.wifi_fast_msg || '网卡不支持5GHz，WiFi快传扫描不可用');
+    if(applyMeta.__fastWarn !== warnMsg){
+      showBanner(warnMsg, 'warn', 4200);
+      applyMeta.__fastWarn = warnMsg;
+    }
+  }
+  updateNotifyButton();
+  applySniffStatus(metaState);
+}
+
+function applySniffStatus(meta){
+  var state = String((meta && meta.sniff_state) || 'warn');
+  var msg = String((meta && meta.sniff_msg) || '');
+  var iface = String((meta && meta.sniff_iface) || '');
+  var idle = Number((meta && meta.sniff_idle_sec) || 0);
+  var lastPkt = String((meta && meta.sniff_last_pkt) || '-');
+
+  var badge = qs('sniff-state');
+  if(badge){
+    badge.classList.remove('ok','warn','err');
+    if(state === 'ok'){
+      badge.classList.add('ok');
+      badge.textContent = '\u6b63\u5e38';
+    } else if(state === 'error'){
+      badge.classList.add('err');
+      badge.textContent = '\u5f02\u5e38';
+    } else {
+      badge.classList.add('warn');
+      badge.textContent = '\u8b66\u544a';
+    }
+  }
+
+  var banner = qs('sniff-banner');
+  if(!banner) return;
+  if(state === 'ok'){
+    banner.style.display = 'none';
+    banner.textContent = '';
+    banner.className = 'sniff-banner';
+    sniffBannerPrevState = state;
+    return;
+  }
+  var tip = (state === 'error' ? '\u91c7\u96c6\u5f02\u5e38\uff1a' : '\u91c7\u96c6\u544a\u8b66\uff1a') + (msg || '\u672a\u77e5');
+  if(iface) tip += ' [iface: '+iface+']';
+  if(idle > 0) tip += ' (' + Math.round(idle) + 's)';
+  if(lastPkt && lastPkt !== '-') tip += '  \u4e0a\u6b21\u5e27: ' + lastPkt;
+  banner.textContent = tip;
+  banner.className = 'sniff-banner ' + (state === 'error' ? 'error' : 'warn');
+  banner.style.display = 'block';
+  if(state !== sniffBannerPrevState){
+    showBanner(tip, state === 'error' ? 'warn' : 'info', 4200);
+    sniffBannerPrevState = state;
   }
 }
 
@@ -2172,12 +3979,72 @@ async function clearHistory(){
   if(btn){ btn.disabled = true; btn.textContent = '\u6e05\u7a7a\u4e2d...'; }
   try{
     var data = await postJson('/api/history/clear', {});
-    alert('\u5df2\u6e05\u7a7a\u5386\u53f2' + (typeof data.cleared==='number' ? ('\uff08'+data.cleared+'\u67b6\uff09') : ''));
+    selectedSnSet = {};
+    trackCache = {};
+    showBanner('历史已清空' + (typeof data.cleared==='number' ? ('（'+data.cleared+'架）') : ''), 'ok', 2600);
   }catch(e){
-    alert('\u6e05\u7a7a\u5931\u8d25: ' + ((e && e.message) ? e.message : e));
+    showBanner('清空失败: ' + ((e && e.message) ? e.message : e), 'warn', 4200);
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '\u6e05\u7a7a\u5386\u53f2'; }
     clearHistoryBusy = false;
+  }
+}
+
+async function deleteHistoryBySelect(){
+  var sel = qs('track-sn-select');
+  var st = qs('track-mgr-status');
+  var sn = sel ? String(sel.value || '').trim() : '';
+  if(!sn){
+    if(st) st.textContent = '请先选择飞机';
+    return;
+  }
+  if(!confirm('删除该飞机历史记录？\\n' + sn)) return;
+  if(st) st.textContent = '删除中...';
+  try{
+    var data = await postJson('/api/history/delete', {sn: sn});
+    delete selectedSnSet[sn];
+    delete trackCache[sn];
+    if(st) st.textContent = data.removed ? ('已删除: ' + sn) : ('未找到: ' + sn);
+    showBanner('已删除历史: ' + sn, 'ok', 2400);
+  }catch(e){
+    if(st) st.textContent = '删除失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('删除失败', 'warn', 3200);
+  }
+}
+
+async function clearTrackBySelect(){
+  var sel = qs('track-sn-select');
+  var st = qs('track-mgr-status');
+  var sn = sel ? String(sel.value || '').trim() : '';
+  if(!sn){
+    if(st) st.textContent = '请先选择飞机';
+    return;
+  }
+  if(!confirm('清空该飞机轨迹？\\n' + sn)) return;
+  if(st) st.textContent = '清空中...';
+  try{
+    var data = await postJson('/api/tracks/clear', {sn: sn});
+    trackCache[sn] = [];
+    if(st) st.textContent = '已清空轨迹: ' + sn + '（影响' + Number(data.affected || 0) + '架）';
+    showBanner('轨迹已清空: ' + sn, 'ok', 2400);
+  }catch(e){
+    if(st) st.textContent = '清空失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('清空轨迹失败', 'warn', 3200);
+  }
+}
+
+async function clearTrackAll(){
+  var st = qs('track-mgr-status');
+  if(!confirm('清空所有飞机轨迹？')) return;
+  if(st) st.textContent = '清空中...';
+  try{
+    var data = await postJson('/api/tracks/clear', {});
+    trackCache = {};
+    if(st) st.textContent = '已清空全部轨迹（影响' + Number(data.affected || 0) + '架）';
+    showBanner('全部轨迹已清空', 'ok', 2600);
+  }catch(e){
+    if(st) st.textContent = '清空失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('清空全部轨迹失败', 'warn', 3200);
   }
 }
 
@@ -2185,47 +4052,106 @@ async function restartProgram(saveCfg){
   if(restartBusy) return;
   var input = qs('restart-args');
   var argsText = input ? String(input.value || '').trim() : '';
+  var ifaceSel = qs('iface-select');
+  var iface = ifaceSel ? String(ifaceSel.value || '').trim() : '';
+  var scanFast = !!(qs('scan-wifi-fast') && qs('scan-wifi-fast').checked);
   var tip = saveCfg ? '\u4fdd\u5b58\u914d\u7f6e\u5e76\u91cd\u542f\u7a0b\u5e8f\uff1f' : '\u6309\u5f53\u524d\u8f93\u5165\u53c2\u6570\u91cd\u542f\u7a0b\u5e8f\uff08\u4ec5\u672c\u6b21\uff09\uff1f';
   if(!confirm(tip)) return;
   restartBusy = true;
   applyMeta(metaState);
   try{
-    await postJson('/api/admin/restart', {args: argsText, save: !!saveCfg});
-    alert(saveCfg ? '\u5df2\u63d0\u4ea4\uff1a\u4fdd\u5b58\u5e76\u91cd\u542f' : '\u5df2\u63d0\u4ea4\uff1a\u4ec5\u672c\u6b21\u91cd\u542f');
+    await postJson('/api/admin/restart', {
+      args: argsText,
+      save: !!saveCfg,
+      iface: iface,
+      scan_wifi_fast: scanFast
+    });
+    showBanner(saveCfg ? '已提交：保存并重启' : '已提交：仅本次重启', 'ok', 2800);
   }catch(e){
-    alert('\u91cd\u542f\u5931\u8d25: ' + ((e && e.message) ? e.message : e));
+    showBanner('重启失败: ' + ((e && e.message) ? e.message : e), 'warn', 4800);
   }finally{
     restartBusy = false;
     applyMeta(metaState);
   }
 }
 
-function renderAps(aps){
+async function loadConfigEditor(){
+  var ta = qs('config-editor');
+  var st = qs('config-editor-status');
+  if(!ta) return;
+  if(st) st.textContent = '读取中...';
+  try{
+    var data = await getJson('/api/config');
+    ta.value = String(data.text || '');
+    if(st) st.textContent = '已读取: ' + String(data.path || '-');
+  }catch(e){
+    if(st) st.textContent = '读取失败: ' + ((e && e.message) ? e.message : e);
+  }
+}
+
+async function saveConfigEditor(){
+  var ta = qs('config-editor');
+  var st = qs('config-editor-status');
+  if(!ta) return;
+  var text = String(ta.value || '');
+  if(!text.trim()){
+    if(st) st.textContent = '配置内容为空';
+    return;
+  }
+  if(st) st.textContent = '保存中...';
+  try{
+    var data = await postJson('/api/config/save', {text: text});
+    if(st){
+      st.textContent = '保存成功: ' + String(data.saved_to || '-') + '，' +
+        (data.reloaded ? '已热重载' : '未热重载');
+    }
+    showBanner('配置已保存', 'ok', 2400);
+    loadIfaceOptions(true);
+  }catch(e){
+    if(st) st.textContent = '保存失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('配置保存失败', 'warn', 4200);
+  }
+}
+
+function renderAps(aps, total){
   var box = qs('aplist');
   if(!box) return;
   var rows = Array.isArray(aps) ? aps : [];
-  if(qs('ap-list-count')) qs('ap-list-count').textContent = String(rows.length);
+  latestApsRows = rows.slice();
+  latestApsTotal = Number(total||0);
+  var t = Number(total||0);
+  if(qs('ap-list-count')){
+    qs('ap-list-count').textContent = (t > rows.length) ? (rows.length + '/' + t) : String(rows.length);
+  }
   if(!rows.length){
     box.innerHTML = '<div class="ap-empty">\u6682\u65e0AP\u6570\u636e</div>';
     return;
   }
+  var wide = (Number(box.clientWidth || 0) >= 780);
+  box.classList.toggle('wide', wide);
+  rows.sort(function(a,b){
+    var ar = (a && a.rssi != null) ? Number(a.rssi) : -9999;
+    var br = (b && b.rssi != null) ? Number(b.rssi) : -9999;
+    return br - ar;
+  });
   var html = '';
-  html += '<div class="aprow hd"><div>MAC</div><div>ch</div><div>\u4fe1\u53f7</div><div>\u5e74\u9f84</div><div>\u7c7b\u578b</div><div>SSID</div><div>\u8bbe\u5907</div></div>';
+  html += '<div class="aprow hd"><div class="idx">#</div><div>MAC</div><div>\u4fe1\u53f7</div><div>\u7c7b\u578b</div><div>SSID</div><div>\u8bbe\u5907</div></div>';
   for(var i=0;i<rows.length;i++){
     var a = rows[i] || {};
-    var ch = (a.ch==null || a.ch===0) ? '?' : ('ch'+a.ch);
     var rssi = (a.rssi==null) ? 'N/A' : (a.rssi+'dBm');
-    var age = (a.age==null) ? '-' : (a.age+'s');
     var mac = String(a.mac || '');
     var ssid = String(a.ssid || '(hidden)');
     var vt = String(a.vendor_type || 'AP');
     var vn = String(a.vendor || '\u672a\u77e5');
+    if(vt === '\u9397\u5b34\u6e80/\u9424\u5059') vt = '\u624b\u673a/\u70ed\u70b9';
+    if(vt === '\u7487\u6550/AP') vt = '\u8def\u7531/AP';
+    if(vt === '\u9429\u78cb\u7e5b/Wi-Fi') vt = '\u76f4\u8fde/Wi-Fi';
+    if(vn === '\u93c8\u7141') vn = '\u672a\u77e5';
     if(vn === '\u52a0\u8f7d\u4e2d' && Number(a.age || 0) >= 10) vn = '\u672a\u77e5';
     html += '<div class="aprow">'+
-      '<div class="mono" title="'+esc(mac)+'">'+esc(mac)+'</div>'+
-      '<div>'+esc(ch)+'</div>'+
+      '<div class="idx">'+(i+1)+'</div>'+
+      '<div class="mono ap-mac" title="'+esc(mac)+'">'+esc(wide ? mac : shortMac(mac))+'</div>'+
       '<div>'+esc(rssi)+'</div>'+
-      '<div>'+esc(age)+'</div>'+
       '<div>'+esc(vt)+'</div>'+
       '<div class="ssid-col"><div class="ssid" title="'+esc(ssid)+'">'+esc(ssid)+'</div></div>'+
       '<div class="vendor-col"><div class="vendor" title="'+esc(vn)+'">'+esc(vn)+'</div></div>'+
@@ -2235,7 +4161,8 @@ function renderAps(aps){
 }
 
 function connect(){
-  ws = new WebSocket('ws://'+location.host+'/ws');
+  var wsProto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
+  ws = new WebSocket(wsProto + location.host + '/ws');
   ws.onopen  = function(){ setWsState(true); };
   ws.onclose = function(){ setWsState(false); reconnTimer=setTimeout(connect,2000); };
   ws.onerror = function(){ ws.close(); };
@@ -2262,36 +4189,53 @@ function onData(d){
   var live = list.filter(function(x){ return x && !x.lost; }).length;
   qs('n-live').textContent = live;
   qs('n-lost').textContent = list.length - live;
+  syncFieldHighlights(list);
+  handleDroneNotifications(list);
+  latestDroneMap = {};
+  latestDroneRows = list.slice();
+  syncSelectedFromRows(latestDroneRows);
 
   var rows='';
   if(!list.length){
-    rows='<tr><td colspan="15" class="empty">\u6682\u65e0\u6570\u636e</td></tr>';
+    rows='<tr><td colspan="10" class="empty">\u6682\u65e0\u6570\u636e</td></tr>';
   } else {
-    list.forEach(function(e){
+    list.forEach(function(e, idx){
       e = e || {};
       var sn = String(e.sn || '');
+      if(sn) latestDroneMap[sn] = e;
+      var selected = isSnSelected(sn);
+      var snSrc = snSourceText(e);
+      var scanType = scanTypeText(e);
       var cls = e.lost ? 'lost' : (sn.indexOf('MAC:')===0 ? 'mac' : 'live');
-      var dot = e.lost ? '&#9675;' : '&#9679;';
-      rows += '<tr class="'+cls+'">'+
-        '<td>'+dot+'</td>'+
-        '<td><div class="sn-cell"><span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+esc(sn)+'" title="\u590d\u5236SN">&#x29C9;</button></div></td>'+
-        '<td>'+esc(e.model || 'N/A')+'</td>'+
-        '<td>'+esc(e.ch || '?')+'</td>'+
-        '<td class="mono">'+fmt(e.lat,5,'')+'</td>'+
-        '<td class="mono">'+fmt(e.lon,5,'')+'</td>'+
-        '<td>'+fmt(e.alt,1,'m')+'</td>'+
-        '<td>'+fmt(e.spd,1,'m/s')+'</td>'+
-        '<td>'+fmt(e.vspd,1,'')+'</td>'+
-        '<td>'+fmt(e.rssi,0,'dBm')+'</td>'+
-        '<td>'+esc(e.pkts==null?'0':e.pkts)+'</td>'+
-        '<td>'+esc(e.dir || '-')+'</td>'+
-        '<td>'+esc((e.age==null?'-':e.age)+'s')+'</td>'+
-        '<td class="mono">'+esc(e.first_seen || '-')+'</td>'+
-        '<td class="mono">'+esc(e.last_seen || '-')+'</td>'+
+      if(selected) cls += ' selected';
+      var snMeta = '<span class="sn-badge">'+esc(snSrc)+'</span><span class="sn-badge">'+esc(scanType)+'</span>';
+      var modelCls = fieldCellAttrs(sn, 'model', '');
+      var rssiCls = fieldCellAttrs(sn, 'rssi', '');
+      var pktCls = fieldCellAttrs(sn, 'pkts', '');
+      var dirCls = fieldCellAttrs(sn, 'dir', '');
+      var ageCls = fieldCellAttrs(sn, 'age_text', 'mono');
+      var lastSeenCls = fieldCellAttrs(sn, 'last_seen', 'mono');
+      var lastPktCls = fieldCellAttrs(sn, 'last_pkt_time', 'mono');
+      var checked = selected ? ' checked' : '';
+      rows += '<tr class="'+cls+' data-row" data-sn="'+escAttr(sn)+'">'+
+        '<td><div class="sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'></div></td>'+
+        '<td class="idx-cell">'+(idx+1)+'</td>'+
+        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+esc(sn)+'" title="\u590d\u5236SN">&#x29C9;</button></div></td>'+
+        '<td'+modelCls+'>'+esc(e.model || 'N/A')+'</td>'+
+        '<td'+rssiCls+'>'+fmt(e.rssi,0,'dBm')+'</td>'+
+        '<td'+pktCls+'>'+esc(e.pkts==null?'0':e.pkts)+'</td>'+
+        '<td'+dirCls+'>'+esc(e.dir || '-')+'</td>'+
+        '<td'+ageCls+'>'+esc(e.age_text || fmtAge(e.age))+'</td>'+
+        '<td'+lastSeenCls+'>'+esc(e.last_seen || '-')+'</td>'+
+        '<td'+lastPktCls+'>'+esc(e.last_pkt_time || e.capture_time || '-')+'</td>'+
         '</tr>';
     });
   }
   qs('tbody').innerHTML = rows;
+  syncTableSelectionUi();
+  renderMapMiniList(list);
+  refreshTrackMgrOptions(list);
+  ensureHighlightAnimation();
 
   var box = qs('logbox');
   var auto = qs('autoscroll').checked;
@@ -2313,28 +4257,42 @@ function onData(d){
   if(auto) box.scrollTop=box.scrollHeight;
 
   if(lastApsSeq !== d.aps_seq){
-    renderAps(d.aps || []);
+    renderAps(d.aps || [], d.aps_total || 0);
     lastApsSeq = d.aps_seq;
   }
 
+  latestMapRows = Array.isArray(d.map_drones) ? d.map_drones : (Array.isArray(d.drones) ? d.drones : []);
+  selectedSnList().forEach(function(sn){
+    var e = latestDroneMap[sn];
+    if(e && Number(e.track_count || 0) !== Number((trackCache[sn] || []).length)){
+      ensureTrackLoaded(sn, true);
+    }
+  });
   initMap();
-  updateMap(d.map_drones || d.drones || []);
+  updateMap(latestMapRows);
 }
 
+applyTheme(loadThemePref());
 buildExtraUi();
 connect();
 
-var map = null, markers = {}, trails = {};
+var map = null, markers = {}, pilotMarkers = {}, trackLines = {};
 var COLORS = ['#58a6ff','#3fb950','#d29922','#d2a8ff','#79c0ff','#ff7b72'];
 var colorIdx = {};
-window.addEventListener('resize', function(){ if(map) map.invalidateSize(false); });
+window.addEventListener('resize', function(){
+  if(map) map.invalidateSize(false);
+  if(latestApsRows.length){
+    renderAps(latestApsRows, latestApsTotal);
+  }
+});
 
 function initMap(){
   if(map) return;
   map = L.map('map', {zoomControl:true, attributionControl:true});
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
+    subdomains:['1','2','3','4'],
     maxZoom:19,
-    attribution:'© <a href="https://openstreetmap.org">OpenStreetMap</a>'
+    attribution:'&copy; \u9ad8\u5fb7\u5730\u56fe'
   }).addTo(map);
   map.setView([30, 114], 5);
   setTimeout(function(){ if(map) map.invalidateSize(false); }, 0);
@@ -2344,40 +4302,63 @@ function droneIcon(color, lost){
   var op = lost ? 0.4 : 1.0;
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">'
     +'<circle cx="14" cy="14" r="10" fill="'+color+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.5"/>'
-    +'<text x="14" y="19" text-anchor="middle" font-size="13" fill="#fff" font-family="monospace" font-weight="bold">✈</text>'
+    +'<text x="14" y="19" text-anchor="middle" font-size="13" fill="#fff" font-family="monospace" font-weight="bold">&#x2708;</text>'
     +'</svg>';
   return L.divIcon({
     html: svg, className:'', iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14]
   });
 }
 
+function pilotIcon(color, lost){
+  var op = lost ? 0.4 : 1.0;
+  var fill = color || '#ffb84d';
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+    +'<rect x="3.5" y="3.5" width="17" height="17" rx="4" ry="4" fill="'+fill+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.4"/>'
+    +'<text x="12" y="16" text-anchor="middle" font-size="12" fill="#fff" font-family="monospace" font-weight="bold">&#x1F464;</text>'
+    +'</svg>';
+  return L.divIcon({
+    html: svg, className:'', iconSize:[24,24], iconAnchor:[12,12], popupAnchor:[0,-10]
+  });
+}
+
 function updateMap(drones){
   if(!map) return;
-  var live = drones.filter(function(e){ return e.lat!=null && e.lon!=null; });
-  if(!live.length){
-    document.getElementById('map-hint').textContent='无坐标数据';
+  var liveAir = drones.filter(function(e){ return e.lat!=null && e.lon!=null; });
+  var selected = selectedSnList();
+  var selectedSet = {};
+  selected.forEach(function(sn){ selectedSet[sn] = true; });
+  var livePilot = drones.filter(function(e){
+    var sn = String((e && e.sn) || '');
+    return !!selectedSet[sn] && e.pilot_lat!=null && e.pilot_lon!=null;
+  });
+  if(!liveAir.length){
+    Object.keys(markers).forEach(function(sn){ map.removeLayer(markers[sn]); delete markers[sn]; });
+    Object.keys(pilotMarkers).forEach(function(sn){ map.removeLayer(pilotMarkers[sn]); delete pilotMarkers[sn]; });
+    Object.keys(trackLines).forEach(function(sn){ map.removeLayer(trackLines[sn]); delete trackLines[sn]; });
+    document.getElementById('map-hint').textContent='\u65e0\u5750\u6807\u6570\u636e';
     return;
   }
-  document.getElementById('map-hint').textContent = live.length+'架有坐标';
+  document.getElementById('map-hint').textContent =
+    '\u98de\u673a:' + liveAir.length + '  \u5df2\u9009:' + selected.length + '  \u98de\u624b:' + livePilot.length;
 
-  // 分配颜色
-  live.forEach(function(e){
+  // color assignment by SN
+  drones.forEach(function(e){
     if(!colorIdx[e.sn]){
       var n = Object.keys(colorIdx).length;
       colorIdx[e.sn] = COLORS[n % COLORS.length];
     }
   });
 
-  var activeSns = {};
-  live.forEach(function(e){
-    activeSns[e.sn] = true;
+  var activeAir = {};
+  liveAir.forEach(function(e){
+    activeAir[e.sn] = true;
     var col = colorIdx[e.sn];
     var popup = '<b>'+e.sn+'</b><br>'+e.model+'<br>'
       +(e.lat!=null?e.lat.toFixed(5):'-')+', '+(e.lon!=null?e.lon.toFixed(5):'-')
-      +'<br>高程: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
-      +'<br>速度: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
-      +'<br>信号: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
-      +'<br>上次: '+e.age+'s';
+      +'<br>\u9ad8\u5ea6: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
+      +'<br>\u901f\u5ea6: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
+      +'<br>\u4fe1\u53f7: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
+      +'<br>\u6570\u636e\u66f4\u65b0: '+esc(String(e.age_text || fmtAge(e.age)));
 
     if(markers[e.sn]){
       markers[e.sn].setLatLng([e.lat, e.lon])
@@ -2387,33 +4368,88 @@ function updateMap(drones){
       markers[e.sn] = L.marker([e.lat, e.lon], {icon: droneIcon(col, e.lost)})
         .addTo(map).bindPopup(popup);
     }
+  });
 
-    // 轨迹
-    if(!trails[e.sn]) trails[e.sn] = [];
-    var tr = trails[e.sn];
-    var last = tr[tr.length-1];
-    if(!last || last[0]!==e.lat || last[1]!==e.lon){
-      tr.push([e.lat, e.lon]);
-      if(tr.length > 60) tr.shift();
+  var activePilot = {};
+  livePilot.forEach(function(e){
+    var sn = String(e.sn || '');
+    if(!sn) return;
+    activePilot[sn] = true;
+    var col = colorIdx[sn] || '#ffb84d';
+    var ptxt = String(e.pilot_loc_type_text || e.pilot_loc_type || 'unknown');
+    var popup = '<b>'+sn+'</b><br>\u98de\u624b\u4f4d\u7f6e<br>'
+      +(e.pilot_lat!=null?e.pilot_lat.toFixed(5):'-')+', '+(e.pilot_lon!=null?e.pilot_lon.toFixed(5):'-')
+      +'<br>\u7c7b\u578b: '+esc(ptxt);
+    if(pilotMarkers[sn]){
+      pilotMarkers[sn].setLatLng([e.pilot_lat, e.pilot_lon])
+        .setIcon(pilotIcon(col, e.lost))
+        .setPopupContent(popup);
+    }else{
+      pilotMarkers[sn] = L.marker([e.pilot_lat, e.pilot_lon], {icon: pilotIcon(col, e.lost)})
+        .addTo(map).bindPopup(popup);
     }
-    if(trails[e.sn+'_line']){
-      trails[e.sn+'_line'].setLatLngs(tr);
+  });
+
+  var activeTrack = {};
+  selected.forEach(function(sn){
+    sn = String(sn || '');
+    if(!sn) return;
+    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    if(tr.length < 2){
+      if(trackLines[sn]){
+        map.removeLayer(trackLines[sn]);
+        delete trackLines[sn];
+      }
+      return;
+    }
+    var latlngs = [];
+    for(var i=0;i<tr.length;i++){
+      var p = tr[i] || {};
+      var lat = Number(p.lat), lon = Number(p.lon);
+      if(isFinite(lat) && isFinite(lon)) latlngs.push([lat, lon]);
+    }
+    if(latlngs.length < 2){
+      if(trackLines[sn]){
+        map.removeLayer(trackLines[sn]);
+        delete trackLines[sn];
+      }
+      return;
+    }
+    activeTrack[sn] = true;
+    if(trackLines[sn]){
+      trackLines[sn].setLatLngs(latlngs);
     } else {
-      trails[e.sn+'_line'] = L.polyline(tr, {color:col, weight:2, opacity:0.6, dashArray:'5,4'}).addTo(map);
+      trackLines[sn] = L.polyline(latlngs, {
+        color:'#9fd8ff',
+        weight:3,
+        opacity:0.45,
+        lineJoin:'round'
+      }).addTo(map);
     }
   });
 
-  // 移除消失的标记
+  // remove stale aircraft markers
   Object.keys(markers).forEach(function(sn){
-    if(!activeSns[sn]){
+    if(!activeAir[sn]){
       map.removeLayer(markers[sn]); delete markers[sn];
-      if(trails[sn+'_line']){ map.removeLayer(trails[sn+'_line']); delete trails[sn+'_line']; }
+    }
+  });
+  // remove stale pilot markers
+  Object.keys(pilotMarkers).forEach(function(sn){
+    if(!activePilot[sn]){
+      map.removeLayer(pilotMarkers[sn]); delete pilotMarkers[sn];
+    }
+  });
+  // remove stale or unselected tracks
+  Object.keys(trackLines).forEach(function(sn){
+    if(!activeTrack[sn]){
+      map.removeLayer(trackLines[sn]); delete trackLines[sn];
     }
   });
 
-  // 首次自动定位到所有点
-  if(live.length && !map._rid_fitted){
-    var latlngs = live.map(function(e){ return [e.lat, e.lon]; });
+  // first-time fit bounds for aircraft only
+  var latlngs = liveAir.map(function(e){ return [e.lat, e.lon]; });
+  if(latlngs.length && !map._rid_fitted){
     if(latlngs.length === 1) map.setView(latlngs[0], 14);
     else map.fitBounds(L.latLngBounds(latlngs).pad(0.3));
     map._rid_fitted = true;
@@ -2477,15 +4513,66 @@ def http_server_thread() -> None:
             return obj if isinstance(obj, dict) else {}
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query or "")
+            if path in ("/", "/index.html"):
                 body = _PAGE_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-            elif self.path == "/ws":
-                # headers 已由 BaseHTTPRequestHandler 解析好，直接取 key
+            elif path == "/api/config":
+                if not APP_CONFIG_PATH:
+                    self._send_json({"ok": False, "error": "config path missing"}, 500)
+                    return
+                try:
+                    ensure_config_file(APP_CONFIG_PATH)
+                    with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                        text = f.read()
+                    self._send_json({
+                        "ok": True,
+                        "path": APP_CONFIG_PATH,
+                        "text": text,
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/interfaces":
+                try:
+                    basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+                    if not isinstance(basic, dict):
+                        basic = {}
+                    self._send_json({
+                        "ok": True,
+                        "items": _iface_options_snapshot(),
+                        "active_iface": str(sniff_iface_name or ""),
+                        "selected_iface": (None if basic.get("iface") in (None, "") else str(basic.get("iface"))),
+                        "scan_wifi_fast": bool(basic.get("scan_wifi_fast")),
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/tracks/get":
+                sn = ""
+                try:
+                    sn = str((query.get("sn") or [""])[0] or "").strip()
+                except Exception:
+                    sn = ""
+                if not sn:
+                    self._send_json({"ok": False, "error": "sn required"}, 400)
+                    return
+                with state_lock:
+                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    track = _sanitize_track(src.get("track") or [])
+                self._send_json({
+                    "ok": True,
+                    "sn": sn,
+                    "count": len(track),
+                    "track": track,
+                }, 200)
+            elif path == "/ws":
+                # headers 宸茬敱 BaseHTTPRequestHandler 瑙ｆ瀽濂斤紝鐩存帴鍙?key
                 key = self.headers.get("Sec-WebSocket-Key","").strip()
                 if not key:
                     self.send_response(400); self.end_headers(); return
@@ -2506,7 +4593,7 @@ def http_server_thread() -> None:
                         _json.dumps(_state_snapshot(), ensure_ascii=False).encode()))
                 except Exception:
                     pass
-                # 保持连接，排空客户端帧直到断开
+                # 淇濇寔杩炴帴锛屾帓绌哄鎴风甯х洿鍒版柇寮€
                 try:
                     sock.settimeout(120)
                     while True:
@@ -2535,7 +4622,9 @@ def http_server_thread() -> None:
                 self.send_response(404); self.end_headers()
 
         def do_POST(self):
-            if self.path == "/api/history/clear":
+            from urllib.parse import urlparse
+            path = urlparse(self.path).path
+            if path == "/api/history/clear":
                 self._read_json_body()
                 try:
                     cleared, removed = clear_history_store(delete_file=True)
@@ -2547,17 +4636,50 @@ def http_server_thread() -> None:
                     }, 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
-            elif self.path == "/api/admin/restart":
+            elif path == "/api/history/delete":
+                body = self._read_json_body()
+                sn = str(body.get("sn") or "").strip()
+                if not sn:
+                    self._send_json({"ok": False, "error": "sn required"}, 400)
+                    return
+                removed = delete_history_item(sn)
+                self._send_json({"ok": True, "sn": sn, "removed": bool(removed)}, 200)
+            elif path == "/api/tracks/clear":
+                body = self._read_json_body()
+                sn = str(body.get("sn") or "").strip()
+                affected = clear_track_store(sn if sn else None)
+                self._send_json({
+                    "ok": True,
+                    "sn": (sn or None),
+                    "affected": int(affected),
+                }, 200)
+            elif path == "/api/admin/restart":
                 body = self._read_json_body()
                 if not bool(WEB_CFG.get("allow_restart", True)):
                     self._send_json({"ok": False, "error": "restart disabled"}, 403)
                     return
                 args_text = str(body.get("args") or "")
                 save_cfg = bool(body.get("save"))
+                iface_override_raw = body.get("iface")
+                iface_override = None if iface_override_raw in (None, "") else str(iface_override_raw).strip()
+                scan_wifi_fast_override = body.get("scan_wifi_fast")
                 try:
                     tokens, raw = _parse_restart_args_text(args_text)
+                    if iface_override_raw is not None:
+                        tokens = _merge_token_option(tokens, "--iface", iface_override)
+                    if scan_wifi_fast_override is not None:
+                        tokens = _merge_token_flag(tokens, "--scan-wifi-fast", _to_bool(scan_wifi_fast_override, False))
                     if save_cfg:
-                        ok, msg = _save_basic_config_from_tokens(tokens, raw_text=raw or args_text)
+                        overrides: dict = {}
+                        if iface_override_raw is not None:
+                            overrides["iface"] = iface_override
+                        if scan_wifi_fast_override is not None:
+                            overrides["scan_wifi_fast"] = _to_bool(scan_wifi_fast_override, False)
+                        ok, msg = _save_basic_config_from_tokens(
+                            tokens,
+                            raw_text=raw or args_text,
+                            overrides=overrides,
+                        )
                         if not ok:
                             self._send_json({"ok": False, "error": f"save config failed: {msg}"}, 400)
                             return
@@ -2575,6 +4697,35 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": str(e)}, 400)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/config/save":
+                body = self._read_json_body()
+                if not APP_CONFIG_PATH:
+                    self._send_json({"ok": False, "error": "config path missing"}, 500)
+                    return
+                raw_text = str(body.get("text") or "")
+                if not raw_text.strip():
+                    self._send_json({"ok": False, "error": "empty config text"}, 400)
+                    return
+                try:
+                    parsed = json.loads(raw_text)
+                    if not isinstance(parsed, dict):
+                        self._send_json({"ok": False, "error": "config root must be object"}, 400)
+                        return
+                except Exception as e:
+                    self._send_json({"ok": False, "error": f"invalid json: {e}"}, 400)
+                    return
+                ok, msg = save_app_config(APP_CONFIG_PATH, parsed)
+                if not ok:
+                    self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
+                    return
+                cfg_loaded = load_app_config(APP_CONFIG_PATH)
+                r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                self._send_json({
+                    "ok": True,
+                    "saved_to": APP_CONFIG_PATH,
+                    "reloaded": bool(r_ok),
+                    "reload_msg": r_msg,
+                }, 200)
             else:
                 self._send_json({"ok": False, "error": "not found"}, 404)
 
@@ -2583,25 +4734,28 @@ def http_server_thread() -> None:
     try:
         srv = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     except OSError as e:
-        _log(f"[WARN] HTTP+WS 服务启动失败(端口{HTTP_PORT}被占用?): {e}，继续运行抓包")
+        _log(f"[WARN] HTTP+WS start failed (port {HTTP_PORT} in use): {e}; continue sniff only")
         return
 
     _threading.Thread(target=_ws_push_loop, daemon=True).start()
-    _log(f"[INFO] HTTP+WS 服务已启动: http://0.0.0.0:{HTTP_PORT}/")
+    _log(f"[INFO] HTTP+WS service started: http://0.0.0.0:{HTTP_PORT}/")
     try:
         srv.serve_forever()
     except Exception as e:
-        _log(f"[WARN] HTTP+WS 服务异常退出: {e}")
+        _log(f"[WARN] HTTP+WS service exception: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 # parse_frame
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def parse_frame(pkt) -> None:
     global ap_seq
     try:
         if not pkt.haslayer(Dot11): return
         d11 = pkt[Dot11]
-        if d11.type != 0 or d11.subtype not in (8, 5, 13): return
+        if d11.type != 0: return
+        _sniff_note_packet()
+        if d11.subtype not in (8, 5, 13): return
+        subtype_name = {8:"Beacon",5:"ProbeResp",13:"Action"}.get(d11.subtype,"Mgmt")
 
         src_mac = d11.addr2 or "unknown"
         rssi    = None
@@ -2614,7 +4768,7 @@ def parse_frame(pkt) -> None:
         ch_assumed = (rt_ch is None)
         now       = time.monotonic()
 
-        # SSID 提取
+        # SSID 鎻愬彇
         ssid = None
         if pkt.haslayer(Dot11Beacon):
             try:
@@ -2627,7 +4781,7 @@ def parse_frame(pkt) -> None:
                         break
                     elt = elt.payload
             except Exception: pass
-            # AP 扫描日志（供 HTTP 日志框使用）
+            # AP 鎵弿鏃ュ織锛堜緵 HTTP 鏃ュ織妗嗕娇鐢級
             ts    = time.strftime("%H:%M:%S")
             rssi_s = f"{rssi}dBm" if rssi is not None else "N/A"
             ch_s2  = f"ch{ch}" if ch else "ch?"
@@ -2640,21 +4794,20 @@ def parse_frame(pkt) -> None:
             except Exception:
                 pass
 
-        # ODID 载荷提取
+        # ODID 杞借嵎鎻愬彇
         payloads = extract_from_ies(pkt)
-        if d11.subtype in (13, 5, 8):   # 额外: 对所有管理帧类型也搜索原始
+        if d11.subtype in (13, 5, 8):   # 棰濆: 瀵规墍鏈夌鐞嗗抚绫诲瀷涔熸悳绱㈠師濮?
             raw_p = extract_from_raw(pkt)
-            # 去重
+            # 鍘婚噸
             sigs = {zlib.crc32(p)&0xFFFFFFFF for p in payloads}
             for p in raw_p:
                 if (zlib.crc32(p)&0xFFFFFFFF) not in sigs:
                     payloads.append(p)
 
-        # Debug 扫描日志
+        # Debug 鎵弿鏃ュ織
         if DEBUG_MODE:
             rssi_s  = f"{rssi}dBm" if rssi is not None else "N/A"
             ch_s    = f"{'~' if ch_assumed else ''}ch{ch}" if ch else "ch?"
-            subtype_name = {8:"Beacon",5:"ProbeResp",13:"Action"}.get(d11.subtype,"Mgmt")
             ssid_s  = f" SSID={ssid!r}" if ssid else ""
             odid_s  = ""
             if payloads:
@@ -2662,11 +4815,23 @@ def parse_frame(pkt) -> None:
                 odid_s = f" ODID={len(payloads)}[{','.join(types)}]"
             _scan(f"[FRAME] {subtype_name} src={src_mac} {rssi_s} {ch_s}{ssid_s}{odid_s}")
 
+        is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
+        frame_hex = ""
+        try:
+            frame_hex = _hex_preview(bytes(pkt), max_bytes=220)
+        except Exception:
+            frame_hex = ""
+
         if not payloads:
-            # 即使没有 ODID 载荷，只要 SSID 含 RID SN，也刷新 last_seen_ts
-            if ssid and src_mac in mac_to_ssid_sn:
-                state_update(src_mac, {"basic_id": None, "location": None},
-                             rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0)
+            # 鍗充娇娌℃湁 ODID 杞借嵎锛屽彧瑕?SSID 鍚?RID SN锛屼篃鍒锋柊 last_seen_ts
+            if is_wifi_fast:
+                state_update(src_mac, {"basic_id": {"uas_id": _wifi_fast_sn(src_mac), "id_type": "SSID"}, "location": None, "system": None},
+                             rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0,
+                             scan_type="phone", ssid=(ssid or ""), capture_type=subtype_name, raw_pkt_hex=frame_hex)
+            elif ssid and src_mac in mac_to_ssid_sn:
+                state_update(src_mac, {"basic_id": None, "location": None, "system": None},
+                             rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0,
+                             scan_type="rid", ssid=ssid, capture_type=subtype_name, raw_pkt_hex=frame_hex)
             return
 
         _notify_hit(ch if not ch_assumed or ch==current_channel else 0)
@@ -2676,10 +4841,13 @@ def parse_frame(pkt) -> None:
             mt = (p[0]>>4)&0xF
             if mt != MSG_TYPE_PACK:
                 return [p[:ODID_MSG_SIZE]] if len(p)>=ODID_MSG_SIZE else [p]
-            qty = p[1] if len(p)>=2 else 0
+            layout = _decode_odid_pack_layout(p)
+            if not layout:
+                return [p]
+            base, msg_size, qty = layout
             out = []
             for i in range(qty):
-                s, e2 = 2+i*ODID_MSG_SIZE, 2+(i+1)*ODID_MSG_SIZE
+                s, e2 = base + i * msg_size, base + (i + 1) * msg_size
                 if e2 <= len(p): out.append(p[s:e2])
             return out or [p]
 
@@ -2688,37 +4856,48 @@ def parse_frame(pkt) -> None:
             for piece in explode(payload):
                 sig     = zlib.crc32(piece if len(piece)>=ODID_MSG_SIZE else payload)&0xFFFFFFFF
                 decoded = decode_odid(piece)
+                if is_wifi_fast and not (decoded.get("basic_id") and decoded.get("basic_id", {}).get("uas_id")):
+                    decoded = {
+                        "basic_id": {"uas_id": _wifi_fast_sn(src_mac), "id_type": "SSID"},
+                        "location": decoded.get("location"),
+                        "system": decoded.get("system"),
+                    }
                 state_update(src_mac, decoded, rssi=rssi, ch=ch,
-                             ch_assumed=ch_assumed, pl_sig=sig)
+                             ch_assumed=ch_assumed, pl_sig=sig,
+                             scan_type=("phone" if is_wifi_fast else "rid"),
+                             ssid=ssid, capture_type=subtype_name,
+                             raw_pkt_hex=_hex_preview(piece if piece else payload, max_bytes=160))
                 if DEBUG_MODE:
                     b = decoded.get("basic_id")
                     l = decoded.get("location")
-                    if b: _scan(f"  ↳ BasicID: {b}")
-                    if l: _scan(f"  ↳ Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
+                    s = decoded.get("system")
+                    if b: _scan(f"  鈫?BasicID: {b}")
+                    if l: _scan(f"  鈫?Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
                                 f"alt={l.get('alt_geodetic'):.1f}m spd={l.get('speed_ms')}")
+                    if s: _scan(f"  -> System(pilot): lat={s.get('pilot_lat')} lon={s.get('pilot_lon')} type={s.get('pilot_loc_type_text')}")
     except Exception as ex:
         if DEBUG_MODE:
             _scan(f"[ERR] parse_frame: {ex}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TUI — curses
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# TUI 鈥?curses
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-# 列定义：(表头文字, 显示宽度, 字段key)
+# 鍒楀畾涔夛細(琛ㄥご鏂囧瓧, 鏄剧ず瀹藉害, 瀛楁key)
 COLUMNS = [
     ("●",    2, "dot"),
     ("SN",  22, "sn_s"),
-    ("机型", 12, "model"),
+    ("鏈哄瀷", 12, "model"),
     ("ch",   5, "ch_s"),
-    ("纬度", 11, "lat_s"),
-    ("经度", 11, "lon_s"),
-    ("高程",  8, "alt_s"),
-    ("速度",  8, "spd_s"),
+    ("绾害", 11, "lat_s"),
+    ("缁忓害", 11, "lon_s"),
+    ("楂樼▼",  8, "alt_s"),
+    ("閫熷害",  8, "spd_s"),
     ("垂速",  7, "vsp_s"),
-    ("信号",  8, "rssi_s"),
+    ("淇″彿",  8, "rssi_s"),
     ("包",    6, "pkts"),
-    ("方向",  4, "dir_s"),
-    ("上次",  7, "age_s"),
+    ("鏂瑰悜",  4, "dir_s"),
+    ("涓婃",  7, "age_s"),
 ]
 
 def _entry_row(e: dict, now: float) -> dict:
@@ -2730,7 +4909,7 @@ def _entry_row(e: dict, now: float) -> dict:
         "dot":     "○" if lost else "●",
         "lost":    lost,
         "mac_only": sn.startswith("MAC:"),
-        "sn_s":    (sn[:20]+"…") if len(sn)>21 else sn,
+        "sn_s":    (sn[:20]+"...") if len(sn)>21 else sn,
         "model":   str(e.get("model","N/A")),
         "ch_s":    f"{'~' if e.get('ch_assumed') else ''}{ch}" if ch else "?",
         "lat_s":   _fmt(e.get("lat"),".5f"),
@@ -2750,12 +4929,12 @@ def tui_main(stdscr, args) -> None:
     curses.start_color()
     curses.use_default_colors()
 
-    curses.init_pair(1, curses.COLOR_GREEN,  -1)   # 在线 SN
-    curses.init_pair(2, curses.COLOR_YELLOW, -1)   # 仅 MAC
-    curses.init_pair(3, curses.COLOR_WHITE,  -1)   # 离线
-    curses.init_pair(4, curses.COLOR_CYAN,   -1)   # 表头
-    curses.init_pair(5, curses.COLOR_BLACK,  curses.COLOR_CYAN)  # 标题栏
-    curses.init_pair(6, curses.COLOR_YELLOW, -1)                 # 变化高亮
+    curses.init_pair(1, curses.COLOR_GREEN,  -1)   # 鍦ㄧ嚎 SN
+    curses.init_pair(2, curses.COLOR_YELLOW, -1)   # 浠?MAC
+    curses.init_pair(3, curses.COLOR_WHITE,  -1)   # 绂荤嚎
+    curses.init_pair(4, curses.COLOR_CYAN,   -1)   # 琛ㄥご
+    curses.init_pair(5, curses.COLOR_BLACK,  curses.COLOR_CYAN)  # 鏍囬鏍?
+    curses.init_pair(6, curses.COLOR_YELLOW, -1)                 # 鍙樺寲楂樹寒
 
     C_ONLINE  = curses.color_pair(1) | curses.A_BOLD
     C_MACONLY = curses.color_pair(2)
@@ -2764,7 +4943,7 @@ def tui_main(stdscr, args) -> None:
     C_TITLE   = curses.color_pair(5) | curses.A_BOLD
     C_HL      = curses.color_pair(6) | curses.A_BOLD
 
-    # mode: "table" | "log"（事件日志） | "scan"（完整扫描日志）
+    # mode: "table" | "log"锛堜簨浠舵棩蹇楋級 | "scan"锛堝畬鏁存壂鎻忔棩蹇楋級
     mode       = "table"
     log_offset = 0
     last_draw  = 0.0
@@ -2780,11 +4959,11 @@ def tui_main(stdscr, args) -> None:
             break
         elif key in (ord('d'), ord('D')):
             if mode == "table":
-                mode = "scan"       # 第一次按 d：扫描日志
+                mode = "scan"       # 绗竴娆℃寜 d锛氭壂鎻忔棩蹇?
             elif mode == "scan":
-                mode = "log"        # 第二次按 d：事件日志
+                mode = "log"        # 绗簩娆℃寜 d锛氫簨浠舵棩蹇?
             else:
-                mode = "table"      # 第三次按 d：回表格
+                mode = "table"      # 绗笁娆℃寜 d锛氬洖琛ㄦ牸
             log_offset = 0
         elif key == curses.KEY_UP:
             if mode != "table": log_offset = min(log_offset+3, LOG_BUF_SIZE-1)
@@ -2800,16 +4979,16 @@ def tui_main(stdscr, args) -> None:
 
         stdscr.erase()
 
-        # ── 标题栏 ──────────────────────────────────────────────────────
+        # 鈹€鈹€ 鏍囬鏍?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         with state_lock:
             n_total = len(state_table)
             n_live  = sum(1 for e in state_table.values()
                          if (now-e["last_seen_ts"]) <= LOST_TIMEOUT)
         ch_s    = f"ch{current_channel}" if current_channel else "ch?"
         dbg_s   = " [DEBUG]" if DEBUG_MODE else ""
-        mode_lbl = {"table":"表格","scan":"扫描日志","log":"事件日志"}.get(mode,"?")
-        left  = f"  RID Monitor  ●{n_live}在线  ○{n_total-n_live}离线  {ch_s}{dbg_s} "
-        right = f" [d]{mode_lbl}→  [↑↓]滚动  [q]退出 "
+        mode_lbl = {"table":"table","scan":"scan-log","log":"events"}.get(mode,"?")
+        left  = f"  RID Monitor  LIVE={n_live}  LOST={n_total-n_live}  {ch_s}{dbg_s} "
+        right = f" [d]{mode_lbl}  [↑↓]scroll  [q]quit "
         bar   = left.ljust(w - _sw(right)) + right
         try: stdscr.addstr(0, 0, _pad(bar, w), C_TITLE)
         except curses.error: pass
@@ -2817,19 +4996,19 @@ def tui_main(stdscr, args) -> None:
         if mode == "table":
             _draw_table(stdscr, h, w, now, C_HEADER, C_ONLINE, C_MACONLY, C_LOST, C_HL)
         elif mode == "scan":
-            _draw_buf(stdscr, h, w, scan_buf, log_offset, "扫描日志（所有帧）", "d→事件 d→表格")
+            _draw_buf(stdscr, h, w, scan_buf, log_offset, "scan log (all frames)", "d->events d->table")
         else:
-            _draw_buf(stdscr, h, w, log_buf,  log_offset, "事件日志", "d→表格")
+            _draw_buf(stdscr, h, w, log_buf,  log_offset, "事件日志", "d->表格")
 
         try: stdscr.refresh()
         except curses.error: pass
 
 def _draw_table(stdscr, h, w, now, C_HEADER, C_ONLINE, C_MACONLY, C_LOST, C_HL):
-    # 表头
+    # 琛ㄥご
     hdr = ""
     for label, width, _ in COLUMNS:
         hdr += _pad(label, width) + " "
-    sep = "─" * min(w, _sw(hdr))
+    sep = "鈹€" * min(w, _sw(hdr))
     try:
         stdscr.addstr(1, 0, hdr[:w], C_HEADER)
         stdscr.addstr(2, 0, sep[:w], C_HEADER)
@@ -2856,7 +5035,7 @@ def _draw_table(stdscr, h, w, now, C_HEADER, C_ONLINE, C_MACONLY, C_LOST, C_HL):
         col_x = 0
         for _, width, key in COLUMNS:
             cell  = _pad(str(r.get(key,"")), width) + " "
-            # 该列有未过期的高亮？
+            # 璇ュ垪鏈夋湭杩囨湡鐨勯珮浜紵
             attr  = C_HL if (not r["lost"] and hl.get(key, 0) > now) else base_attr
             try: stdscr.addstr(row_y, col_x, cell, attr)
             except curses.error: pass
@@ -2865,7 +5044,7 @@ def _draw_table(stdscr, h, w, now, C_HEADER, C_ONLINE, C_MACONLY, C_LOST, C_HL):
 
         row_y += 1
 
-    hint = f" 共 {len(entries)} 架  刷新≈{TUI_REFRESH:.1f}s "
+    hint = f" total={len(entries)} refresh~{TUI_REFRESH:.1f}s "
     try: stdscr.addstr(h-1, 0, hint[:w].ljust(w), curses.A_DIM)
     except curses.error: pass
 
@@ -2880,43 +5059,44 @@ def _draw_buf(stdscr, h, w, buf: deque, offset: int, title: str, hint_extra: str
         if 1+i >= h-1: break
         try: stdscr.addstr(1+i, 0, line[:w].ljust(min(w, len(line)+4)))
         except curses.error: pass
-    hint = f" {title} [{start_i+1}–{end_i}/{total}]  ↑↓滚动  {hint_extra} "
+    hint = f" {title} [{start_i+1}-{end_i}/{total}]  scroll ↑↓  {hint_extra} "
     try: stdscr.addstr(h-1, 0, hint[:w].ljust(w), curses.A_DIM)
     except curses.error: pass
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 主程序
-# ─────────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 涓荤▼搴?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="OpenDroneID RID WLAN listener")
     parser.add_argument("--config", default=os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT),
-                        help="配置文件路径（默认 rid_config.json）")
+                        help="config file path (default: rid_config.json)")
     parser.add_argument("--iface",        default=None)
     parser.add_argument("--channel",      default=None, type=int)
     parser.add_argument("--hop",          action="store_true")
     parser.add_argument("--hop-5g",       action="store_true")
+    parser.add_argument("--scan-wifi-fast", action="store_true")
     parser.add_argument("--dwell-2g",     default=DWELL_2G_DEFAULT, type=int)
     parser.add_argument("--dwell-5g",     default=DWELL_5G_DEFAULT, type=int)
     parser.add_argument("--settle",       default=SETTLE_DEFAULT,   type=int)
     parser.add_argument("--dwell-on-hit", default=2500, type=int)
     parser.add_argument("--hit-cap",      default=6000, type=int)
     parser.add_argument("--time",         default=DEFAULT_PRINT_INTERVAL, type=float,
-                        help="心跳间隔秒（默认 2.0）")
+                        help="heartbeat interval seconds (default 2.0)")
     parser.add_argument("--min-gap",      default=DEFAULT_MIN_GAP, type=float,
-                        help="同 SN 最小输出间隔（默认 1.0）")
+                        help="minimum output gap for same SN (default 1.0)")
     parser.add_argument("--rssi-delta",   default=3, type=int)
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
     parser.add_argument("--model-map", default=os.path.join(os.getcwd(),"rid_models.json"))
     parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-                        help="历史无人机缓存文件（默认 rid_history_cache.json）")
-    parser.add_argument("--no-tui",   action="store_true", help="禁用 TUI，纯文本输出")
-    parser.add_argument("--debug",    action="store_true", help="记录所有原始帧到扫描日志")
-    parser.add_argument("--notify-test", action="store_true", help="发送一条企业微信测试通知后退出")
+                        help="history cache file (default rid_history_cache.json)")
+    parser.add_argument("--no-tui",   action="store_true", help="绂佺敤 TUI锛岀函鏂囨湰杈撳嚭")
+    parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
+    parser.add_argument("--notify-test", action="store_true", help="send one WeCom test notification then exit")
     return parser
 
 _BASIC_CFG_ARG_DESTS = {
-    "iface", "channel", "hop", "hop_5g",
+    "iface", "channel", "hop", "hop_5g", "scan_wifi_fast",
     "dwell_2g", "dwell_5g", "settle", "dwell_on_hit", "hit_cap",
     "time", "min_gap", "rssi_delta",
     "change_on_rssi", "change_on_payload",
@@ -2931,22 +5111,47 @@ def _parse_restart_args_text(args_text: str | None) -> tuple[list[str], str]:
     try:
         tokens = shlex.split(raw, posix=True)
     except ValueError as e:
-        raise ValueError(f"参数解析失败: {e}")
+        raise ValueError(f"鍙傛暟瑙ｆ瀽澶辫触: {e}")
     for t in tokens:
         opt = t.split("=", 1)[0]
         if opt in ("--notify-test", "--config"):
-            raise ValueError(f"不允许通过网页传入 {opt}")
+            raise ValueError(f"涓嶅厑璁搁€氳繃缃戦〉浼犲叆 {opt}")
     return tokens, raw
 
-def _save_basic_config_from_tokens(tokens: list[str], raw_text: str = "") -> tuple[bool, str]:
+def _merge_token_option(tokens: list[str], opt: str, value: str | None) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = str(tokens[i])
+        if t == opt:
+            i += 1
+            if i < len(tokens):
+                i += 1
+            continue
+        if t.startswith(opt + "="):
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    if value is not None and str(value).strip():
+        out.extend([opt, str(value).strip()])
+    return out
+
+def _merge_token_flag(tokens: list[str], flag: str, enabled: bool) -> list[str]:
+    out = [str(t) for t in tokens if str(t) != flag]
+    if enabled:
+        out.append(flag)
+    return out
+
+def _save_basic_config_from_tokens(tokens: list[str], raw_text: str = "", overrides: dict | None = None) -> tuple[bool, str]:
     global APP_CONFIG
     if not APP_CONFIG_PATH:
-        return False, "配置文件路径为空"
+        return False, "閰嶇疆鏂囦欢璺緞涓虹┖"
     parser = build_arg_parser()
     try:
         ns = parser.parse_args(tokens)
     except SystemExit:
-        return False, "参数不合法"
+        return False, "invalid args"
     explicit = _parser_explicit_dests(parser, tokens)
     cfg = load_app_config(APP_CONFIG_PATH)
     basic = cfg.setdefault("basic", {})
@@ -2956,6 +5161,12 @@ def _save_basic_config_from_tokens(tokens: list[str], raw_text: str = "") -> tup
     for dest in _BASIC_CFG_ARG_DESTS:
         if dest in explicit:
             basic[dest] = getattr(ns, dest)
+    if isinstance(overrides, dict):
+        if "iface" in overrides:
+            ov_iface = overrides.get("iface")
+            basic["iface"] = (None if ov_iface in (None, "") else str(ov_iface).strip())
+        if "scan_wifi_fast" in overrides:
+            basic["scan_wifi_fast"] = _to_bool(overrides.get("scan_wifi_fast"), False)
     web = cfg.setdefault("web", {})
     if not isinstance(web, dict):
         web = {}
@@ -2973,14 +5184,14 @@ def _save_basic_config_from_tokens(tokens: list[str], raw_text: str = "") -> tup
 def _schedule_self_restart(tokens: list[str]) -> tuple[bool, str]:
     global restart_pending
     if not bool(WEB_CFG.get("allow_restart", True)):
-        return False, "高级重启已禁用"
+        return False, "restart disabled"
     py = sys.executable or "python3"
     script = os.path.abspath(sys.argv[0])
     if not os.path.exists(script):
-        return False, f"脚本不存在: {script}"
+        return False, f"鑴氭湰涓嶅瓨鍦? {script}"
     with restart_lock:
         if restart_pending:
-            return False, "已有重启任务"
+            return False, "宸叉湁閲嶅惎浠诲姟"
         restart_pending = True
 
     def _do_restart(argv_tokens: list[str]) -> None:
@@ -3000,10 +5211,10 @@ def _schedule_self_restart(tokens: list[str]) -> tuple[bool, str]:
             if APP_CONFIG_PATH and (not APP_CONFIG_PATH_IS_DEFAULT) and not has_cfg_arg:
                 argv_tokens.extend(["--config", APP_CONFIG_PATH])
             argv = [py, script] + argv_tokens
-            _log("[INFO] 正在重启程序...")
+            _log("[INFO] 姝ｅ湪閲嶅惎绋嬪簭...")
             os.execv(py, argv)
         except Exception as e:
-            _log(f"[WARN] 程序重启失败: {e}")
+            _log(f"[WARN] 绋嬪簭閲嶅惎澶辫触: {e}")
             with restart_lock:
                 restart_pending = False
 
@@ -3014,6 +5225,8 @@ def main() -> None:
     global PRINT_INTERVAL, MIN_GAP, CHANGE_ON_RSSI, CHANGE_ON_PL
     global RSSI_DELTA, NO_TUI, DEBUG_MODE, current_channel, HISTORY_STORE_PATH, APP_CONFIG
     global APP_CONFIG_PATH, APP_CONFIG_PATH_IS_DEFAULT, APP_START_CWD
+    global sniff_iface_name
+    global SCAN_WIFI_FAST, WIFI_FAST_SUPPORTED, WIFI_FAST_SUPPORT_MSG
 
     try:
         if hasattr(sys.stdout,"reconfigure"):
@@ -3021,31 +5234,32 @@ def main() -> None:
     except Exception:
         pass
 
-    parser = argparse.ArgumentParser(description="OpenDroneID RID WLAN 监听器")
+    parser = argparse.ArgumentParser(description="OpenDroneID RID WLAN listener")
     parser.add_argument("--config", default=os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT),
-                        help="配置文件路径（默认: rid_config.json）")
+                        help="config file path (default: rid_config.json)")
     parser.add_argument("--iface",        default=None)
     parser.add_argument("--channel",      default=None, type=int)
     parser.add_argument("--hop",          action="store_true")
     parser.add_argument("--hop-5g",       action="store_true")
+    parser.add_argument("--scan-wifi-fast", action="store_true")
     parser.add_argument("--dwell-2g",     default=DWELL_2G_DEFAULT, type=int)
     parser.add_argument("--dwell-5g",     default=DWELL_5G_DEFAULT, type=int)
     parser.add_argument("--settle",       default=SETTLE_DEFAULT,   type=int)
     parser.add_argument("--dwell-on-hit", default=2500, type=int)
     parser.add_argument("--hit-cap",      default=6000, type=int)
     parser.add_argument("--time",         default=DEFAULT_PRINT_INTERVAL, type=float,
-                        help="心跳间隔秒（默认 2.0）")
+                        help="heartbeat interval seconds (default 2.0)")
     parser.add_argument("--min-gap",      default=DEFAULT_MIN_GAP, type=float,
-                        help="同 SN 最小输出间隔（默认 1.0）")
+                        help="minimum output gap for same SN (default 1.0)")
     parser.add_argument("--rssi-delta",   default=3, type=int)
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
     parser.add_argument("--model-map", default=os.path.join(os.getcwd(),"rid_models.json"))
     parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-                        help="历史无人机缓存文件（默认: rid_history_cache.json）")
-    parser.add_argument("--no-tui",   action="store_true", help="禁用 TUI，纯文本输出")
-    parser.add_argument("--debug",    action="store_true", help="记录所有原始帧到扫描日志")
-    parser.add_argument("--notify-test", action="store_true", help="发送一条企业微信测试通知后退出")
+                        help="history cache file (default: rid_history_cache.json)")
+    parser.add_argument("--no-tui",   action="store_true", help="绂佺敤 TUI锛岀函鏂囨湰杈撳嚭")
+    parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
+    parser.add_argument("--notify-test", action="store_true", help="send one WeCom test notification then exit")
     APP_START_CWD = os.getcwd()
     args = parser.parse_args()
 
@@ -3062,9 +5276,10 @@ def main() -> None:
     RSSI_DELTA      = max(1, int(args.rssi_delta))
     NO_TUI          = bool(args.no_tui)
     DEBUG_MODE      = bool(args.debug)
+    SCAN_WIFI_FAST  = bool(args.scan_wifi_fast)
     HISTORY_STORE_PATH = os.path.abspath(str(args.history_file)) if args.history_file else None
 
-    # 把 Python logging 重定向到 scan_buf（而非 stderr，避免被 TUI 吞掉）
+    # 鎶?Python logging 閲嶅畾鍚戝埌 scan_buf锛堣€岄潪 stderr锛岄伩鍏嶈 TUI 鍚炴帀锛?
     class BufHandler(logging.Handler):
         def emit(self, record):
             _scan(f"[{record.levelname}] {self.format(record)}")
@@ -3083,20 +5298,40 @@ def main() -> None:
     if args.notify_test:
         ok, resp = send_test_notification_from_config()
         if ok:
-            _log("[INFO] 企业微信测试通知发送成功")
+            _log("[INFO] WeCom notify test sent")
             if resp:
-                _log(f"[INFO] 企业微信返回: {resp}")
+                _log(f"[INFO] WeCom response: {resp}")
         else:
-            _log(f"[WARN] 企业微信测试通知发送失败: {resp}")
+            _log(f"[WARN] WeCom test notification failed: {resp}")
         return
 
     if os.geteuid() != 0:
-        _log("[WARN] 建议以 root 权限运行 (sudo)")
+        _log("[WARN] 寤鸿浠?root 鏉冮檺杩愯 (sudo)")
+
+    if SCAN_WIFI_FAST and (not args.hop) and (not args.channel):
+        args.hop = True
+        args.hop_5g = True
+        _log("[INFO] WiFi fast-transfer scan enabled: auto use 2.4G+5G hopping")
+    elif SCAN_WIFI_FAST and args.hop and (not args.hop_5g):
+        args.hop_5g = True
+        _log("[INFO] WiFi fast-transfer scan enabled: append 5G hopping")
 
     iface = interface_detect(prefer=args.iface)
+    with sniff_health_lock:
+        sniff_iface_name = str(iface or "")
+    try:
+        WIFI_FAST_SUPPORTED = bool(detect_5g(iface))
+    except Exception:
+        WIFI_FAST_SUPPORTED = False
+    WIFI_FAST_SUPPORT_MSG = ""
+    if SCAN_WIFI_FAST and WIFI_FAST_SUPPORTED:
+        WIFI_FAST_SUPPORT_MSG = f"iface {iface} supports 5GHz; WiFi fast-transfer scan enabled"
+    if SCAN_WIFI_FAST and not WIFI_FAST_SUPPORTED:
+        WIFI_FAST_SUPPORT_MSG = f"iface {iface} does not support 5GHz; WiFi fast-transfer scan unavailable"
+        _log(f"[WARN] {WIFI_FAST_SUPPORT_MSG}")
 
     if args.hop and args.channel:
-        _log("[WARN] --hop 与 --channel 同时指定，使用跳频")
+        _log("[WARN] --hop and --channel both set; using hopping mode")
 
     if args.hop:
         dw2    = max(100, args.dwell_2g)
@@ -3104,30 +5339,33 @@ def main() -> None:
         hop_2g = CHANNELS_2G[:]
         hop_5g: list[int] = []
         if args.hop_5g:
-            if detect_5g(iface):
-                hop_5g = CHANNELS_5G[:]
-                _log(f"[INFO] 5G 信道={hop_5g}")
+            if WIFI_FAST_SUPPORTED:
+                if SCAN_WIFI_FAST:
+                    hop_5g = sorted(set(CHANNELS_5G + CHANNELS_5G_COMMON))
+                else:
+                    hop_5g = CHANNELS_5G[:]
+                _log(f"[INFO] 5G channels={hop_5g}")
             else:
-                _log("[INFO] 5G 不支持，仅 2.4G")
-        _log(f"[INFO] 跳频 2.4G={hop_2g}@{dw2}ms" + (f" 5G={hop_5g}@{dw5}ms" if hop_5g else ""))
+                _log("[INFO] 5G unsupported, using 2.4G only")
+        _log(f"[INFO] hopping 2.4G={hop_2g}@{dw2}ms" + (f" 5G={hop_5g}@{dw5}ms" if hop_5g else ""))
         Thread(target=channel_hopper,
                args=(iface, hop_2g, hop_5g, dw2, dw5,
                      max(0,args.settle), args.dwell_on_hit, args.hit_cap),
                daemon=True).start()
     elif args.channel:
-        _log(f"[INFO] 锁定信道 {args.channel}")
+        _log(f"[INFO] lock channel {args.channel}")
         run_cmd(f"iw dev {iface} set channel {args.channel}")
         current_channel = args.channel
     else:
-        # 默认锁定 ch6（DJI RID 常用频道）
-        _log("[INFO] 默认锁定信道 6（DJI RID 常用）  --hop 可启用跳频  --channel N 可指定")
+        # 榛樿閿佸畾 ch6锛圖JI RID 甯哥敤棰戦亾锛?
+        _log("[INFO] default lock channel 6 (DJI RID common). Use --hop or --channel N to change")
         run_cmd(f"iw dev {iface} set channel 6")
         current_channel = 6
 
-    _log(f"[INFO] 输出: 首次立即 / 变化(min-gap={MIN_GAP:.1f}s) / 心跳(time={PRINT_INTERVAL:.1f}s)")
-    _log(f"[INFO] LOST 灰色={LOST_TIMEOUT:.0f}s  PURGE={PURGE_TIMEOUT:.0f}s")
+    _log(f"[INFO] output: first/changed(min-gap={MIN_GAP:.1f}s)/heartbeat(time={PRINT_INTERVAL:.1f}s)")
+    _log(f"[INFO] LOST timeout={LOST_TIMEOUT:.0f}s  PURGE={PURGE_TIMEOUT:.0f}s")
     if DEBUG_MODE:
-        _log("[INFO] DEBUG 模式: 所有原始帧写入扫描日志（按 d 查看）")
+        _log("[INFO] DEBUG mode: all raw frames are written into scan log (press d)")
 
     Thread(target=lost_checker, daemon=True).start()
     Thread(target=http_server_thread, daemon=True).start()
@@ -3135,23 +5373,98 @@ def main() -> None:
     start_notify_worker()
 
     def sniff_thread():
+        global sniff_iface_name
         retry_delay = 2.0
+        fail_count = 0
+        recover_fail_count = 0
+        iface_cur = str(iface or "")
+
+        def note_recover_failure(reason: str) -> None:
+            nonlocal recover_fail_count
+            recover_fail_count += 1
+            _log(f"[WARN] sniff recover failed {recover_fail_count}/{SNIFF_RESTART_AFTER_FAILS}: {reason}")
+            if recover_fail_count >= SNIFF_RESTART_AFTER_FAILS:
+                _log("[WARN] sniff recover failed too many times, schedule self-restart")
+                ok, msg = _schedule_self_restart(list(sys.argv[1:]))
+                if not ok:
+                    _log(f"[WARN] self-restart scheduling failed: {msg}")
+                recover_fail_count = 0
+
+        def note_recover_success() -> None:
+            nonlocal recover_fail_count
+            recover_fail_count = 0
         while True:
+            if not iface_cur:
+                iface_cur = _sniff_pick_iface()
+                if iface_cur:
+                    with sniff_health_lock:
+                        sniff_iface_name = iface_cur
+                    _log(f"[INFO] sniff iface recovered: {iface_cur}")
+                else:
+                    _sniff_note_error("no iface available")
+                    note_recover_failure("no iface available")
+                    _log(f"[WARN] sniff no available iface, retry in {retry_delay:.0f}s")
+                    time.sleep(retry_delay)
+                    continue
+
             try:
-                sniff(iface=iface, prn=parse_frame, store=False, monitor=True)
-                _log(f"[WARN] sniff 已退出（接口可能短暂掉线），{retry_delay:.0f}s后重试")
+                with sniff_health_lock:
+                    sniff_iface_name = iface_cur
+                sniff(iface=iface_cur, prn=parse_frame, store=False, monitor=True, timeout=SNIFF_POLL_TIMEOUT)
+                fail_count = 0
+                note_recover_success()
+                idle = _sniff_idle_sec()
+                if idle is not None and idle >= SNIFF_STALL_RECOVER_SEC:
+                    ok = _sniff_recover_iface(iface_cur, f"idle {idle:.0f}s without management frame")
+                    if not ok:
+                        new_iface = _sniff_pick_iface(prefer=iface_cur)
+                        if new_iface and new_iface != iface_cur:
+                            _log(f"[WARN] sniff iface switch: {iface_cur} -> {new_iface}")
+                            iface_cur = new_iface
+                            with sniff_health_lock:
+                                sniff_iface_name = iface_cur
+                            _sniff_recover_iface(iface_cur, "switch iface recovery", force=True)
+                time.sleep(0.05)
             except Exception as ex:
-                _log(f"[WARN] sniff异常: {ex}，{retry_delay:.0f}s后重试")
-            time.sleep(retry_delay)
+                fail_count += 1
+                ex_msg = str(ex or "")
+                _sniff_note_error(f"sniff exception#{fail_count}: {ex_msg}")
+                note_recover_failure(ex_msg)
+                if fail_count >= SNIFF_RESTART_AFTER_FAILS:
+                    _log(f"[WARN] sniff exception count reached {SNIFF_RESTART_AFTER_FAILS}, scheduling self-restart")
+                    ok, msg = _schedule_self_restart(list(sys.argv[1:]))
+                    if not ok:
+                        _log(f"[WARN] self-restart scheduling failed: {msg}")
+                    fail_count = 0
+
+                if _sniff_is_no_device_error(ex):
+                    new_iface = _sniff_pick_iface(prefer=iface_cur)
+                    if new_iface and new_iface != iface_cur:
+                        _log(f"[WARN] sniff iface unavailable, switch {iface_cur} -> {new_iface}")
+                        iface_cur = new_iface
+                        with sniff_health_lock:
+                            sniff_iface_name = iface_cur
+                        _sniff_recover_iface(iface_cur, f"after iface switch: {ex_msg}", force=True)
+                    elif new_iface:
+                        _log(f"[WARN] sniff iface exception#{fail_count}: {ex_msg}, try reset {iface_cur}")
+                        _sniff_recover_iface(iface_cur, f"exception#{fail_count}: {ex_msg}", force=True)
+                    else:
+                        _log(f"[WARN] sniff iface lost: {ex_msg}, waiting for NIC recovery")
+                        iface_cur = ""
+                else:
+                    _log(f"[WARN] sniff exception#{fail_count}: {ex_msg}, retry in {retry_delay:.0f}s")
+                    _sniff_recover_iface(iface_cur, f"exception#{fail_count}: {ex_msg}", force=(fail_count >= 3))
+
+                time.sleep(retry_delay)
 
     Thread(target=sniff_thread, daemon=True).start()
 
     if NO_TUI:
-        _log("[INFO] --no-tui 模式（Ctrl+C 退出）")
+        _log("[INFO] --no-tui mode (Ctrl+C to exit)")
         try:
             while True: time.sleep(1)
         except KeyboardInterrupt:
-            _log("[INFO] 已停止")
+            _log("[INFO] stopped")
         finally:
             save_history_store(force=True)
     else:
@@ -3161,12 +5474,12 @@ def main() -> None:
             pass
         finally:
             save_history_store(force=True)
-            print("\n[INFO] TUI 已退出，最后 30 条事件日志：")
+            print("\n[INFO] TUI 宸查€€鍑猴紝鏈€鍚?30 鏉′簨浠舵棩蹇楋細")
             with log_lock:
                 for line in list(log_buf)[-30:]:
                     print(line)
             if DEBUG_MODE:
-                print("\n[INFO] 最后 30 条扫描日志：")
+                print("\n[INFO] 鏈€鍚?30 鏉℃壂鎻忔棩蹇楋細")
                 with log_lock:
                     for line in list(scan_buf)[-30:]:
                         print(line)

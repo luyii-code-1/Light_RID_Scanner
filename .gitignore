@@ -17,3 +17,7 @@ run.py.bak_*
 _remote_*.sh
 _page_extracted.*
 memory.txt
+_moji_tokens.txt
+run.py.bak_mojibake
+*.broken.*
+rid_models.from_pi.json

@@ -1,36 +1,25 @@
 # Light RID Scanner
 
-Lightweight OpenDroneID / Remote ID Wi-Fi scanner focused on long-running stability and practical field use.
-
-- Runtime: terminal (`--no-tui`) + web UI
-- Platform: Raspberry Pi / Linux monitor mode
-- Parser: Beacon + Vendor IE + OpenDroneID Message Pack
-- Persistence: history + track cache
-- Notification: WeCom bot + optional browser notifications
+Lightweight OpenDroneID / Remote ID Wi-Fi scanner for Raspberry Pi and other Linux devices running monitor mode.  
+Designed for long-running deployment with realtime Web UI, history retention, trajectory drawing, AP monitoring, and notifications.
 
 ## 中文说明
 
 ### 功能概览
 
-- 实时接收并解析 OpenDroneID（RID）广播
-- 网页端设备列表实时刷新，支持点击查看详情
-- 地图默认仅显示无人机位置
-- 仅在勾选设备后显示：
-  - 飞手位置
-  - 历史轨迹（淡蓝半透明线）
-- 支持地图全屏，全屏下有迷你设备选择列表
-- 历史与轨迹管理：
-  - 删除指定飞机历史
-  - 清空指定飞机轨迹
-  - 清空全部轨迹
-- 配置文件支持热保存（尽量不重启）
+- 实时接收并解析 OpenDroneID / Remote ID Wi-Fi Beacon
+- 网页端显示实时设备列表、历史设备、AP 列表与地图
+- 支持显示飞机位置、飞手位置、历史轨迹
+- 支持历史与轨迹管理（删除、清空、导出）
+- 支持企业微信机器人通知与浏览器通知
+- 适合树莓派长期运行，可配合 `systemd` 守护
 
 ### 主要文件
 
-- `run.py`：主程序（采集、解析、WebSocket、网页）
-- `rid_config.example.json`：公开脱敏配置模板
-- `rid_config.json`：本地实际配置（已在 `.gitignore` 忽略）
+- `run.py`：主程序（采集、解析、HTTP/WebSocket、前端页面）
 - `rid_models.json`：机型前缀映射
+- `rid_config.example.json`：脱敏配置模板（可提交）
+- `rid_config.json`：本地实际配置（不要提交）
 
 ### 启动方式
 
@@ -42,23 +31,39 @@ sudo ~/rid/.venv/bin/python3 run.py --no-tui
 
 - `http://<device-ip>:4600/`
 
-### 新增接口（轨迹/历史管理）
+### 配置与安全
 
-- `GET /api/tracks/get?sn=<SN>`：获取指定飞机轨迹
-- `POST /api/tracks/clear`：清空轨迹（可传 `sn`）
-- `POST /api/history/delete`：删除指定飞机历史（传 `sn`）
+- 部署时使用 `rid_config.json`
+- 代码仓库仅保留 `rid_config.example.json`
+- 企业微信 webhook key、本机 IP、私有路径等敏感信息请仅保存在本地
+
+### 常用接口
+
+- `GET /api/tracks/get?sn=<SN>`：获取单架飞机轨迹
+- `POST /api/tracks/clear`：清空轨迹（可带 `{"sn":"..."}` 清空单架）
+- `POST /api/history/delete`：删除单架历史
 - `POST /api/history/clear`：清空全部历史
+- `GET /api/config`：读取当前配置文本
+- `POST /api/config/save`：保存并热重载配置
 
 ## English
 
 ### Highlights
 
-- Realtime OpenDroneID decoding from Wi-Fi management frames
-- Web UI with live list, details card, AP panel, and map
-- Aircraft markers shown by default
-- Pilot marker + historical trajectory shown only for selected aircraft
-- Fullscreen map mode with mini selection panel
-- History/track maintenance APIs for long-running deployments
+- Realtime OpenDroneID / Remote ID decoding from Wi-Fi management frames
+- Web UI with live aircraft list, AP list, details panel, and map
+- Aircraft position, pilot position, and trajectory rendering
+- History persistence and trajectory cache management
+- WeCom bot notification and browser notification support
+- Runtime control via configuration file
+- Suitable for long-running Raspberry Pi deployment with `systemd`
+
+### Main Files
+
+- `run.py`: scanner, parser, HTTP/WebSocket server, and embedded frontend
+- `rid_models.json`: aircraft model prefix map
+- `rid_config.example.json`: sanitized configuration template
+- `rid_config.json`: local runtime config (do not commit)
 
 ### Start
 
@@ -70,14 +75,8 @@ Open:
 
 - `http://<device-ip>:4600/`
 
-### API (Track / History)
+### Security Notes
 
-- `GET /api/tracks/get?sn=<SN>`
-- `POST /api/tracks/clear` (optional body: `{"sn":"..."}`)
-- `POST /api/history/delete` (body: `{"sn":"..."}`)
-- `POST /api/history/clear`
-
-## Security
-
-- Do not commit real `rid_config.json` with webhook keys.
-- Keep secrets local; commit `rid_config.example.json` only.
+- Do not commit real `rid_config.json`
+- Keep webhook keys and local-only settings out of Git
+- Commit `rid_config.example.json` only

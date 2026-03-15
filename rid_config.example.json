@@ -36,7 +36,11 @@
     "scan_type_rid": "RID报送",
     "scan_type_phone": "手机快传",
     "sn_source_rid": "RID包",
-    "sn_source_ssid": "SSID"
+    "sn_source_ssid": "SSID",
+    "base_name": "基站",
+    "base_lat": null,
+    "base_lon": null,
+    "base_zoom": 13
   },
   "ap": {
     "list_max": 80,

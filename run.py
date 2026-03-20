@@ -17,7 +17,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import curses
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -146,6 +149,12 @@ AP_CFG: dict = {
     "vendor_db_file": os.path.join(os.getcwd(), OUI_DB_DEFAULT),
     "vendor_auto_download": True,
 }
+AUTH_CFG: dict = {
+    "enabled": False,
+    "username_sha256": "",
+    "password_sha256": "",
+    "realm": "Light RID Scanner",
+}
 NOTIFY_CFG: dict = {
     "enabled": False,
     "only_online": True,
@@ -173,6 +182,10 @@ oui_last_attempt_wall = 0.0
 
 restart_lock = Lock()
 restart_pending = False
+
+hw_worker_lock = Lock()
+hw_worker_started = False
+hw_task_queue: "queue.Queue[dict]" = queue.Queue(maxsize=128)
 
 sniff_health_lock = Lock()
 sniff_last_pkt_mono: float = 0.0
@@ -675,6 +688,12 @@ def default_app_config() -> dict:
             "vendor_db_file": os.path.join(os.getcwd(), OUI_DB_DEFAULT),
             "vendor_auto_download": True,
         },
+        "auth": {
+            "enabled": False,
+            "username_sha256": "",
+            "password_sha256": "",
+            "realm": "Light RID Scanner",
+        },
     }
 
 def ensure_config_file(path: str) -> None:
@@ -944,6 +963,32 @@ def _normalize_ap_cfg(cfg: dict | None) -> dict:
     base["vendor_db_file"] = os.path.abspath(db_path) if db_path else None
     return base
 
+def _sha256_hex(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest().lower()
+
+def _normalize_auth_cfg(cfg: dict | None) -> dict:
+    base = dict(AUTH_CFG)
+    if isinstance(cfg, dict):
+        auth = cfg.get("auth")
+        if isinstance(auth, dict):
+            for k in base.keys():
+                if k in auth:
+                    base[k] = auth.get(k)
+    base["enabled"] = bool(base.get("enabled"))
+    base["realm"] = str(base.get("realm") or "Light RID Scanner").strip() or "Light RID Scanner"
+    u = str(base.get("username_sha256") or "").strip().lower()
+    p = str(base.get("password_sha256") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", u or ""):
+        u = ""
+    if not re.fullmatch(r"[0-9a-f]{64}", p or ""):
+        p = ""
+    base["username_sha256"] = u
+    base["password_sha256"] = p
+    if base["enabled"] and (not u or not p):
+        _log("[WARN] auth enabled but username/password hash missing, fallback disabled")
+        base["enabled"] = False
+    return base
+
 def init_web_from_config(cfg: dict | None) -> None:
     global WEB_CFG
     WEB_CFG = _normalize_web_cfg(cfg)
@@ -980,6 +1025,10 @@ def init_ap_from_config(cfg: dict | None) -> None:
     global AP_CFG
     AP_CFG = _normalize_ap_cfg(cfg)
 
+def init_auth_from_config(cfg: dict | None) -> None:
+    global AUTH_CFG
+    AUTH_CFG = _normalize_auth_cfg(cfg)
+
 def init_notify_from_config(cfg: dict | None) -> None:
     global NOTIFY_CFG
     NOTIFY_CFG = _normalize_notify_cfg(cfg)
@@ -996,6 +1045,7 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
     APP_CONFIG = _deep_merge_dict(default_app_config(), cfg)
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
+    init_auth_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)
 
     basic = APP_CONFIG.get("basic")
@@ -2662,6 +2712,186 @@ def _state_snapshot() -> dict:
             "sniff_last_err_at": sniff_meta.get("last_err_at"),
         },
     }
+
+def _auth_enabled() -> bool:
+    return bool(AUTH_CFG.get("enabled"))
+
+def _auth_check_userpass(username: str, password: str) -> bool:
+    if not _auth_enabled():
+        return True
+    u_hash = str(AUTH_CFG.get("username_sha256") or "").strip().lower()
+    p_hash = str(AUTH_CFG.get("password_sha256") or "").strip().lower()
+    if not u_hash or not p_hash:
+        return False
+    u_ok = hmac.compare_digest(_sha256_hex(username), u_hash)
+    p_ok = hmac.compare_digest(_sha256_hex(password), p_hash)
+    return bool(u_ok and p_ok)
+
+def _auth_check_basic_header(header_value: str | None) -> bool:
+    if not _auth_enabled():
+        return True
+    raw = str(header_value or "").strip()
+    if not raw.startswith("Basic "):
+        return False
+    token = raw[6:].strip()
+    if not token:
+        return False
+    try:
+        text = base64.b64decode(token).decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    if ":" not in text:
+        return False
+    user, pwd = text.split(":", 1)
+    return _auth_check_userpass(user, pwd)
+
+def _hw_safe_iface(iface: str) -> str | None:
+    name = str(iface or "").strip()
+    if not name:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,32}", name):
+        return None
+    iftypes = _sniff_iface_candidates()
+    if name not in iftypes:
+        return None
+    return name
+
+def _hw_cmd_result(cmd: str, timeout: int = 8) -> dict:
+    try:
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        ok = (proc.returncode == 0)
+        return {
+            "ok": ok,
+            "cmd": cmd,
+            "code": int(proc.returncode),
+            "stdout": out,
+            "stderr": err,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "cmd": cmd,
+            "code": -1,
+            "stdout": "",
+            "stderr": str(e),
+        }
+
+def _hw_status_snapshot() -> dict:
+    return {
+        "items": _iface_options_snapshot(),
+        "active_iface": str(sniff_iface_name or ""),
+        "sniff_state": _sniff_health_meta(time.monotonic(), time.time()),
+        "current_channel": int(current_channel or 0),
+        "scan_wifi_fast": bool(SCAN_WIFI_FAST),
+        "wifi_fast_supported": WIFI_FAST_SUPPORTED,
+        "wifi_fast_msg": str(WIFI_FAST_SUPPORT_MSG or ""),
+    }
+
+def _hw_execute_task(task: dict) -> dict:
+    global current_channel
+    op = str(task.get("op") or "").strip().lower()
+    iface = _hw_safe_iface(task.get("iface"))
+    if op == "status":
+        return {"ok": True, "data": _hw_status_snapshot()}
+    if op == "list_ifaces":
+        return {"ok": True, "items": _iface_options_snapshot(), "active_iface": str(sniff_iface_name or "")}
+    if op == "iw_dev":
+        return _hw_cmd_result("iw dev", timeout=8)
+    if op == "iw_info":
+        if not iface:
+            return {"ok": False, "error": "invalid iface"}
+        return _hw_cmd_result(f"iw dev {iface} info", timeout=8)
+    if op == "iw_link":
+        if not iface:
+            return {"ok": False, "error": "invalid iface"}
+        return _hw_cmd_result(f"iw dev {iface} link", timeout=8)
+    if op == "set_monitor":
+        if not iface:
+            return {"ok": False, "error": "invalid iface"}
+        steps = [
+            _hw_cmd_result(f"ip link set {iface} down", timeout=8),
+            _hw_cmd_result(f"iw dev {iface} set type monitor", timeout=8),
+            _hw_cmd_result(f"ip link set {iface} up", timeout=8),
+            _hw_cmd_result(f"iw dev {iface} set power_save off", timeout=8),
+        ]
+        return {"ok": all(s.get("ok") for s in steps), "steps": steps}
+    if op == "set_managed":
+        if not iface:
+            return {"ok": False, "error": "invalid iface"}
+        steps = [
+            _hw_cmd_result(f"ip link set {iface} down", timeout=8),
+            _hw_cmd_result(f"iw dev {iface} set type managed", timeout=8),
+            _hw_cmd_result(f"ip link set {iface} up", timeout=8),
+            _hw_cmd_result(f"iw dev {iface} set power_save off", timeout=8),
+        ]
+        return {"ok": all(s.get("ok") for s in steps), "steps": steps}
+    if op == "restart_iface":
+        if not iface:
+            return {"ok": False, "error": "invalid iface"}
+        steps = [
+            _hw_cmd_result(f"ip link set {iface} down", timeout=8),
+            _hw_cmd_result(f"ip link set {iface} up", timeout=8),
+            _hw_cmd_result(f"iw dev {iface} set power_save off", timeout=8),
+        ]
+        return {"ok": all(s.get("ok") for s in steps), "steps": steps}
+    if op == "set_channel":
+        if not iface:
+            return {"ok": False, "error": "invalid iface"}
+        try:
+            ch = int(task.get("channel"))
+        except Exception:
+            return {"ok": False, "error": "invalid channel"}
+        if ch < 1 or ch > 196:
+            return {"ok": False, "error": "channel out of range"}
+        r = _hw_cmd_result(f"iw dev {iface} set channel {ch}", timeout=8)
+        if r.get("ok"):
+            current_channel = ch
+        return r
+    if op == "restart_program":
+        ok, msg = _schedule_self_restart(list(sys.argv[1:]))
+        return {"ok": bool(ok), "msg": msg}
+    return {"ok": False, "error": f"unsupported op: {op}"}
+
+def _hw_worker_loop() -> None:
+    while True:
+        task = hw_task_queue.get()
+        if not isinstance(task, dict):
+            continue
+        rsp_q = task.get("_rsp_q")
+        try:
+            out = _hw_execute_task(task)
+        except Exception as e:
+            out = {"ok": False, "error": str(e)}
+        if isinstance(rsp_q, queue.Queue):
+            try:
+                rsp_q.put_nowait(out)
+            except Exception:
+                pass
+
+def start_hw_worker() -> None:
+    global hw_worker_started
+    with hw_worker_lock:
+        if hw_worker_started:
+            return
+        hw_worker_started = True
+    Thread(target=_hw_worker_loop, daemon=True).start()
+
+def _hw_submit_task(task: dict, timeout_sec: float = 12.0) -> dict:
+    start_hw_worker()
+    rsp_q: "queue.Queue[dict]" = queue.Queue(maxsize=1)
+    item = dict(task or {})
+    item["_rsp_q"] = rsp_q
+    try:
+        hw_task_queue.put_nowait(item)
+    except queue.Full:
+        return {"ok": False, "error": "hardware helper busy"}
+    try:
+        out = rsp_q.get(timeout=max(0.5, float(timeout_sec)))
+    except Exception:
+        return {"ok": False, "error": "hardware helper timeout"}
+    return out if isinstance(out, dict) else {"ok": False, "error": "invalid helper response"}
 
 _PAGE_HTML = """<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
@@ -4632,25 +4862,13 @@ function applySniffStatus(meta){
 }
 
 function openHardwareAssistant(){
-  var adv = qs('adv-panel');
-  if(adv){
-    adv.open = true;
-    try{ adv.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){}
+  var mobile = false;
+  try { mobile = window.matchMedia('(max-width: 900px)').matches; } catch(_e) {}
+  if(mobile){
+    window.open('/hardware-assistant', '_blank', 'noopener,noreferrer');
+  } else {
+    window.open('/hardware-assistant', 'hardware_assistant_window', 'noopener,noreferrer,width=1120,height=860');
   }
-  loadIfaceOptions(true);
-  var row = qs('hw-assistant-row');
-  if(row){
-    row.classList.remove('focus-pulse');
-    // Force reflow so repeated clicks can replay animation.
-    void row.offsetWidth;
-    row.classList.add('focus-pulse');
-    setTimeout(function(){ row.classList.remove('focus-pulse'); }, 2200);
-  }
-  var sel = qs('iface-select');
-  if(sel){
-    try{ sel.focus({preventScroll:true}); }catch(_e){ try{ sel.focus(); }catch(_e2){} }
-  }
-  showBanner('已打开“高级设置 - 硬件配置助手”', 'info', 1800);
 }
 
 function openDjiLookup(){
@@ -5365,6 +5583,133 @@ function updateMap(drones){
 </script>
 </body></html>"""
 
+_HW_PAGE_HTML = """<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>硬件配置助手 - Light RID Scanner</title>
+<style>
+*{box-sizing:border-box} body{margin:0;background:#0b1118;color:#d7e1ef;font:14px/1.5 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+header{padding:10px 14px;border-bottom:1px solid #243244;background:#101925;display:flex;justify-content:space-between;align-items:center;gap:8px}
+h1{margin:0;font-size:16px;color:#7ab8ff}
+.wrap{padding:12px;display:grid;gap:12px}
+.card{border:1px solid #28384d;border-radius:10px;background:#0f1722;padding:10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{border:1px solid #365375;background:#152236;color:#d7e1ef;padding:6px 10px;border-radius:7px;cursor:pointer}
+.btn:hover{background:#1b2a41}
+.btn.warn{border-color:#7f3f3f;color:#ffb3b3}
+select,input{background:#0b131e;color:#d7e1ef;border:1px solid #33475f;border-radius:7px;padding:6px 8px}
+pre{margin:0;max-height:48vh;overflow:auto;background:#08101a;border:1px solid #223246;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,Consolas,monospace}
+.muted{color:#8ca1bb;font-size:12px}
+#status{white-space:pre-wrap}
+</style>
+</head><body>
+<header>
+  <h1>硬件配置助手</h1>
+  <div class="row">
+    <button class="btn" id="btn-back" type="button">返回主页面</button>
+    <button class="btn" id="btn-refresh" type="button">刷新状态</button>
+  </div>
+</header>
+<div class="wrap">
+  <div class="card">
+    <div class="row">
+      <label for="iface">网卡</label>
+      <select id="iface"><option value="">(auto)</option></select>
+      <label for="channel">信道</label>
+      <input id="channel" type="number" min="1" max="196" value="6" style="width:90px">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="btn-iw-dev" type="button">iw dev</button>
+      <button class="btn" id="btn-iw-info" type="button">iw info</button>
+      <button class="btn" id="btn-iw-link" type="button">iw link</button>
+      <button class="btn" id="btn-set-monitor" type="button">切监控模式</button>
+      <button class="btn" id="btn-set-managed" type="button">切托管模式</button>
+      <button class="btn" id="btn-restart-iface" type="button">重启网卡</button>
+      <button class="btn" id="btn-set-channel" type="button">设置信道</button>
+      <button class="btn warn" id="btn-restart-program" type="button">重启主程序</button>
+    </div>
+    <div class="muted" id="status" style="margin-top:8px">-</div>
+  </div>
+  <div class="card">
+    <div class="muted" style="margin-bottom:6px">命令输出</div>
+    <pre id="output">-</pre>
+  </div>
+</div>
+<script>
+function qs(id){ return document.getElementById(id); }
+function showStatus(s){ qs('status').textContent = String(s||'-'); }
+function showOut(t){ qs('output').textContent = String(t||'-'); }
+async function getJson(url){
+  const r = await fetch(url, {cache:'no-store'});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+async function postJson(url, body){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+function curIface(){ return String(qs('iface').value || '').trim(); }
+function fmtOpResult(d){
+  if(!d) return '-';
+  if(Array.isArray(d.steps)){
+    return d.steps.map((x, i)=>`[${i+1}] ${x.cmd}\\ncode=${x.code}\\n${x.stdout||''}\\n${x.stderr||''}`).join('\\n\\n');
+  }
+  if(typeof d.stdout === 'string' || typeof d.stderr === 'string'){
+    return `cmd: ${d.cmd||'-'}\\ncode: ${d.code}\\n\\n${d.stdout||''}${(d.stderr?('\\n'+d.stderr):'')}`;
+  }
+  return JSON.stringify(d, null, 2);
+}
+async function refreshStatus(){
+  try{
+    const d = await getJson('/api/hw/status');
+    const items = Array.isArray(d.items) ? d.items : [];
+    const sel = qs('iface');
+    const old = sel.value;
+    sel.innerHTML = '<option value="">(auto)</option>' + items.map(it=>{
+      const n = String(it.name||'');
+      const m = String(it.mode||'');
+      const g = it.supports_5g ? '5G' : '2.4G';
+      return `<option value="${n}">${n} [${m}] ${g}</option>`;
+    }).join('');
+    if(old) sel.value = old;
+    const snf = d.sniff_state || {};
+    showStatus(`采集网卡: ${d.active_iface||'-'} | 状态: ${snf.state||'-'} | ${snf.msg||'-'}`);
+    showOut(JSON.stringify(d, null, 2));
+  }catch(e){
+    showStatus('刷新失败: ' + (e.message || e));
+  }
+}
+async function runOp(op, ext){
+  try{
+    showStatus('执行中: ' + op);
+    const body = Object.assign({op: op, iface: curIface()}, ext||{});
+    const d = await postJson('/api/hw/op', body);
+    showStatus('完成: ' + op + (d.ok ? ' (OK)' : ' (FAILED)'));
+    showOut(fmtOpResult(d));
+    if(op === 'restart_program'){ setTimeout(refreshStatus, 1200); }
+  }catch(e){
+    showStatus('执行失败: ' + (e.message || e));
+  }
+}
+qs('btn-back').addEventListener('click', ()=>{ location.href = '/'; });
+qs('btn-refresh').addEventListener('click', refreshStatus);
+qs('btn-iw-dev').addEventListener('click', ()=>runOp('iw_dev'));
+qs('btn-iw-info').addEventListener('click', ()=>runOp('iw_info'));
+qs('btn-iw-link').addEventListener('click', ()=>runOp('iw_link'));
+qs('btn-set-monitor').addEventListener('click', ()=>runOp('set_monitor'));
+qs('btn-set-managed').addEventListener('click', ()=>runOp('set_managed'));
+qs('btn-restart-iface').addEventListener('click', ()=>runOp('restart_iface'));
+qs('btn-set-channel').addEventListener('click', ()=>runOp('set_channel', {channel: Number(qs('channel').value||0)}));
+qs('btn-restart-program').addEventListener('click', ()=>{
+  if(confirm('确认重启主程序？')) runOp('restart_program');
+});
+refreshStatus();
+</script>
+</body></html>"""
+
 def _build_html() -> str:
     return _PAGE_HTML
 
@@ -5419,13 +5764,43 @@ def http_server_thread() -> None:
                 return {}
             return obj if isinstance(obj, dict) else {}
 
+        def _auth_fail(self):
+            self.send_response(401)
+            realm = str(AUTH_CFG.get("realm") or "Light RID Scanner").replace('"', "")
+            self.send_header("WWW-Authenticate", f'Basic realm="{realm}", charset="UTF-8"')
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            body = json.dumps({"ok": False, "error": "auth required"}, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
+        def _require_auth(self) -> bool:
+            if not _auth_enabled():
+                return True
+            if _auth_check_basic_header(self.headers.get("Authorization")):
+                return True
+            self._auth_fail()
+            return False
+
         def do_GET(self):
             from urllib.parse import urlparse, parse_qs
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
+            if not self._require_auth():
+                return
             if path in ("/", "/index.html"):
                 body = _PAGE_HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path in ("/hardware-assistant", "/hardware-assistant.html"):
+                body = _HW_PAGE_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -5458,6 +5833,17 @@ def http_server_thread() -> None:
                         "selected_iface": (None if basic.get("iface") in (None, "") else str(basic.get("iface"))),
                         "scan_wifi_fast": bool(basic.get("scan_wifi_fast")),
                     }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/hw/status":
+                try:
+                    snap = _hw_submit_task({"op": "status"}, timeout_sec=10)
+                    if snap.get("ok") and isinstance(snap.get("data"), dict):
+                        data = snap.get("data")
+                        data["ok"] = True
+                        self._send_json(data, 200)
+                    else:
+                        self._send_json({"ok": False, "error": str(snap.get("error") or "status failed")}, 500)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/tracks/get":
@@ -5561,6 +5947,8 @@ def http_server_thread() -> None:
         def do_POST(self):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
+            if not self._require_auth():
+                return
             if path == "/api/history/clear":
                 self._read_json_body()
                 try:
@@ -5639,6 +6027,18 @@ def http_server_thread() -> None:
                     "sn": sn,
                     "count": len(track),
                 }, 200)
+            elif path == "/api/hw/op":
+                body = self._read_json_body()
+                op = str(body.get("op") or "").strip().lower()
+                if not op:
+                    self._send_json({"ok": False, "error": "op required"}, 400)
+                    return
+                try:
+                    rsp = _hw_submit_task(body, timeout_sec=15)
+                    code = 200 if rsp.get("ok") else 500
+                    self._send_json(rsp, code)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/admin/restart":
                 body = self._read_json_body()
                 if not bool(WEB_CFG.get("allow_restart", True)):
@@ -6337,6 +6737,7 @@ def main() -> None:
 
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
+    init_auth_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)
     start_oui_loader()
     load_model_map(args.model_map)
@@ -6433,6 +6834,7 @@ def main() -> None:
     Thread(target=lost_checker, daemon=True).start()
     Thread(target=http_server_thread, daemon=True).start()
     Thread(target=history_persist_loop, daemon=True).start()
+    start_hw_worker()
     start_notify_worker()
 
     def sniff_thread():

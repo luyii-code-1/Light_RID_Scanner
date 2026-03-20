@@ -46,5 +46,11 @@
     "list_max": 80,
     "vendor_db_file": "oui.txt",
     "vendor_auto_download": true
+  },
+  "auth": {
+    "enabled": false,
+    "username_sha256": "",
+    "password_sha256": "",
+    "realm": "Light RID Scanner"
   }
 }

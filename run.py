@@ -26,6 +26,7 @@ import queue
 import random
 import re
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -98,6 +99,8 @@ SNIFF_RESTART_AFTER_FAILS = 5
 WIFI_FAST_OUI_PREFIX = "0c:9a:e6"
 TRACK_MAX_POINTS = 12000
 TRACK_MIN_INTERVAL_SEC = 0.8
+NO_IFACE_DEGRADE_HINT = "未检测到无线网卡，已进入降级运行。请打开“高级设置 - 硬件配置助手”检查网卡。"
+CONFIG_ROLLBACK_SUFFIX = ".rollback"
 
 # -----------------------------------------------------------------------------
 # Global runtime state (initialized in `main()`)
@@ -685,32 +688,80 @@ def ensure_config_file(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    rb_path = path + CONFIG_ROLLBACK_SUFFIX
+    try:
+        shutil.copy2(path, rb_path)
+    except Exception as e:
+        _log(f"[WARN] 配置回滚副本创建失败: {e}")
     _log(f"[INFO] config file created: {path}")
+
+def _config_isolate_file(path: str | None, tag: str = "broken") -> str | None:
+    if not path or (not os.path.exists(path)):
+        return None
+    ts = time.strftime("%Y%m%d%H%M%S")
+    dst = f"{path}.{tag}.{ts}"
+    try:
+        os.replace(path, dst)
+        return dst
+    except Exception:
+        return None
+
+def _config_load_raw(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        raise ValueError("root must be object")
+    return raw
 
 def load_app_config(path: str | None) -> dict:
     if not path:
         return default_app_config()
+    rb_path = path + CONFIG_ROLLBACK_SUFFIX
     try:
         ensure_config_file(path)
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        if not isinstance(raw, dict):
-            raise ValueError("root must be object")
+        raw = _config_load_raw(path)
         cfg = _deep_merge_dict(default_app_config(), raw)
+        try:
+            shutil.copy2(path, rb_path)
+        except Exception as e:
+            _log(f"[WARN] 配置回滚副本刷新失败: {e}")
         _log(f"[INFO] config loaded: {path}")
         return cfg
     except Exception as e:
-        _log(f"[WARN] config load failed, using defaults: {e}")
-        cfg = default_app_config()
-        try:
-            if path and os.path.exists(path):
-                broken = f"{path}.broken.{time.strftime('%Y%m%d%H%M%S')}"
-                os.replace(path, broken)
-                _log(f"[WARN] 配置文件已隔离为: {broken}")
-            if path:
+        _log(f"[WARN] config load failed: {e}")
+        # Try rollback snapshot first.
+        if os.path.exists(rb_path):
+            try:
+                rb_raw = _config_load_raw(rb_path)
+                cfg = _deep_merge_dict(default_app_config(), rb_raw)
+                broken = _config_isolate_file(path, "broken")
+                if broken:
+                    _log(f"[WARN] 主配置文件已隔离为: {broken}")
                 ok, msg = save_app_config(path, cfg)
                 if ok:
-                    _log(f"[INFO] 已写入默认配置: {msg}")
+                    _log(f"[INFO] 已从回滚配置恢复: {msg}")
+                else:
+                    _log(f"[WARN] 回滚恢复写回失败: {msg}")
+                return cfg
+            except Exception as e_rb:
+                _log(f"[WARN] rollback config load failed: {e_rb}")
+                rb_broken = _config_isolate_file(rb_path, "broken")
+                if rb_broken:
+                    _log(f"[WARN] 回滚配置文件已隔离为: {rb_broken}")
+
+        _log("[WARN] 配置回滚不可用，使用默认配置重建")
+        cfg = default_app_config()
+        try:
+            broken = _config_isolate_file(path, "broken")
+            if broken:
+                _log(f"[WARN] 配置文件已隔离为: {broken}")
+            rb_broken = _config_isolate_file(rb_path, "broken")
+            if rb_broken:
+                _log(f"[WARN] 回滚配置文件已隔离为: {rb_broken}")
+            ok, msg = save_app_config(path, cfg)
+            if ok:
+                _log(f"[INFO] 已写入默认配置: {msg}")
         except Exception as e2:
             _log(f"[WARN] 配置守护写回失败: {e2}")
         return cfg
@@ -727,6 +778,21 @@ def save_app_config(path: str | None, cfg: dict) -> tuple[bool, str]:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
             f.write("\n")
         os.replace(tmp_path, path)
+        # Keep a rollback snapshot in sync for self-protection.
+        rb_path = path + CONFIG_ROLLBACK_SUFFIX
+        rb_tmp = rb_path + ".tmp"
+        try:
+            with open(rb_tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(rb_tmp, rb_path)
+        except Exception as e:
+            try:
+                if os.path.exists(rb_tmp):
+                    os.remove(rb_tmp)
+            except Exception:
+                pass
+            _log(f"[WARN] 配置回滚副本写入失败: {e}")
         return True, path
     except Exception as e:
         try:
@@ -1601,7 +1667,7 @@ def _ssid_to_sn(ssid: str) -> str | None:
     m = SSID_SN_RE.search(ssid) if ssid else None
     return m.group(1) if m else None
 
-def interface_detect(prefer: str | None = None) -> str:
+def interface_detect(prefer: str | None = None) -> str | None:
     iw      = run_cmd("iw dev")
     iftypes: dict[str, str] = {}
     cur     = None
@@ -1617,7 +1683,9 @@ def interface_detect(prefer: str | None = None) -> str:
         mon = [i for i,t in iftypes.items() if t=="monitor"]
         iface = mon[0] if mon else (list(iftypes.keys())[0] if iftypes else None)
     if not iface:
-        sys.exit("[FATAL] 未找到无线接口")
+        _log(f"[WARN] {NO_IFACE_DEGRADE_HINT}")
+        _sniff_note_error(NO_IFACE_DEGRADE_HINT)
+        return None
 
     mode = iftypes.get(iface, "unknown")
     _log(f"[INFO] iface={iface} mode={mode}")
@@ -2657,6 +2725,17 @@ header details.adv[open] > summary{border-bottom:1px solid var(--border);color:v
 .adv-col{display:grid;gap:8px;min-width:0;align-content:start}
 .adv-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
 .adv-row label{font-size:13px;color:#8b949e}
+.adv-row.focus-pulse{
+  border:1px solid rgba(88,166,255,.45);
+  border-radius:8px;
+  padding:6px;
+  box-shadow:0 0 0 2px rgba(88,166,255,.14);
+  animation:hwPulse .9s ease-out 2;
+}
+@keyframes hwPulse{
+  0%{box-shadow:0 0 0 0 rgba(88,166,255,.30)}
+  100%{box-shadow:0 0 0 10px rgba(88,166,255,0)}
+}
 .adv-input{min-width:260px;flex:1 1 420px;background:#0a0e14;color:var(--txt);border:1px solid #2b3a4b;border-radius:6px;padding:7px 9px;font:inherit}
 .adv-note{font-size:13px;color:#8b949e;word-break:break-all}
 .adv-note code{color:#c5cdd9}
@@ -3033,6 +3112,10 @@ body.theme-light .aprow.hd{background:#f3f6fa;color:#5b6470}
 body.theme-light .aprow .vendor{color:#334155}
 body.theme-light .adv-input{
   background:#ffffff;color:#1f2937;border-color:#c9d4df;
+}
+body.theme-light .adv-row.focus-pulse{
+  border-color:rgba(9,105,218,.45);
+  box-shadow:0 0 0 2px rgba(9,105,218,.12);
 }
 body.theme-light .adv-note code{color:#1f2937}
 body.theme-light .cfg-editor{
@@ -3622,6 +3705,153 @@ async function postJson(url, body){
   return data;
 }
 
+function setToolsStatus(text){
+  var st = qs('tools-status');
+  if(st) st.textContent = String(text || '-');
+}
+
+function _toolStamp(){
+  var d = new Date();
+  function p2(n){ return String(n).padStart(2, '0'); }
+  return d.getFullYear() + p2(d.getMonth()+1) + p2(d.getDate()) + '_' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+}
+
+function _downloadJsonFile(name, data){
+  var text = JSON.stringify(data, null, 2);
+  var blob = new Blob([text], {type:'application/json;charset=utf-8'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = String(name || ('rid_export_' + _toolStamp() + '.json'));
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){
+    try{ URL.revokeObjectURL(url); }catch(_e){}
+    if(a.parentNode) a.parentNode.removeChild(a);
+  }, 200);
+}
+
+function _readFileText(file){
+  return new Promise(function(resolve, reject){
+    if(!file){
+      reject(new Error('未选择文件'));
+      return;
+    }
+    var fr = new FileReader();
+    fr.onload = function(){ resolve(String(fr.result || '')); };
+    fr.onerror = function(){ reject(new Error('文件读取失败')); };
+    fr.readAsText(file, 'utf-8');
+  });
+}
+
+function _pickImportFile(id){
+  var input = qs(id);
+  if(!input) return;
+  input.value = '';
+  input.click();
+}
+
+function _pickToolSn(){
+  var sel = qs('track-sn-select');
+  var sn = sel ? String(sel.value || '').trim() : '';
+  if(sn) return sn;
+  var selected = selectedSnList();
+  if(selected.length) return String(selected[0] || '');
+  return '';
+}
+
+async function toolsExportAllDetails(){
+  setToolsStatus('导出全部详情中...');
+  try{
+    var data = await getJson('/api/tools/export/all');
+    _downloadJsonFile('rid_details_all_' + _toolStamp() + '.json', data);
+    setToolsStatus('导出完成：全部详情 ' + Number(data.count || 0) + ' 架');
+    showBanner('已导出全部详情', 'ok', 2200);
+  }catch(e){
+    var msg = (e && e.message) ? e.message : e;
+    setToolsStatus('导出失败: ' + msg);
+    showBanner('导出全部详情失败', 'warn', 3600);
+  }
+}
+
+async function toolsExportSingleTrack(){
+  var sn = _pickToolSn();
+  if(!sn){
+    setToolsStatus('请先在“历史/轨迹”中选择飞机，或勾选目标飞机');
+    showBanner('请先选择飞机再导出轨迹', 'warn', 3200);
+    return;
+  }
+  setToolsStatus('导出轨迹中: ' + sn);
+  try{
+    var data = await getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
+    _downloadJsonFile('rid_track_' + sn + '_' + _toolStamp() + '.json', data);
+    setToolsStatus('导出完成: ' + sn + ' (' + Number(data.count || 0) + ' 点)');
+    showBanner('已导出轨迹: ' + sn, 'ok', 2200);
+  }catch(e){
+    var msg = (e && e.message) ? e.message : e;
+    setToolsStatus('导出轨迹失败: ' + msg);
+    showBanner('导出轨迹失败', 'warn', 3600);
+  }
+}
+
+async function toolsImportAllDetailsFromFile(file){
+  try{
+    setToolsStatus('导入全部详情中...');
+    var txt = await _readFileText(file);
+    var payload = JSON.parse(txt);
+    var data = await postJson('/api/tools/import/all', {payload: payload});
+    setToolsStatus('导入完成: 新增 ' + Number(data.added || 0) + '，更新 ' + Number(data.updated || 0) + '，跳过 ' + Number(data.skipped || 0));
+    showBanner('全部详情导入完成', 'ok', 2400);
+  }catch(e){
+    var msg = (e && e.message) ? e.message : e;
+    setToolsStatus('导入失败: ' + msg);
+    showBanner('导入全部详情失败', 'warn', 4200);
+  }
+}
+
+async function toolsImportSingleTrackFromFile(file){
+  try{
+    setToolsStatus('导入单机轨迹中...');
+    var txt = await _readFileText(file);
+    var obj = JSON.parse(txt);
+    var sn = _pickToolSn();
+    var payload = null;
+    if(Array.isArray(obj)){
+      payload = {sn: sn, track: obj};
+    }else if(obj && typeof obj === 'object'){
+      if(obj.payload && typeof obj.payload === 'object'){
+        payload = obj.payload;
+      }else{
+        payload = obj;
+      }
+    }else{
+      throw new Error('文件格式无效');
+    }
+    if(!payload || typeof payload !== 'object'){
+      throw new Error('文件格式无效');
+    }
+    if(!payload.sn){
+      payload.sn = sn;
+    }
+    payload.sn = String(payload.sn || '').trim();
+    if(!payload.sn){
+      throw new Error('文件内无 SN，且当前未选择飞机');
+    }
+    if(!Array.isArray(payload.track)){
+      throw new Error('文件内缺少 track 数组');
+    }
+    var data = await postJson('/api/tools/import/track', {payload: payload});
+    trackCache[payload.sn] = payload.track.slice();
+    ensureTrackLoaded(payload.sn, true);
+    setToolsStatus('导入完成: ' + payload.sn + ' (' + Number(data.count || 0) + ' 点)');
+    showBanner('轨迹导入完成: ' + payload.sn, 'ok', 2400);
+  }catch(e){
+    var msg = (e && e.message) ? e.message : e;
+    setToolsStatus('导入轨迹失败: ' + msg);
+    showBanner('导入单机轨迹失败', 'warn', 4200);
+  }
+}
+
 async function loadIfaceOptions(force){
   if(ifaceOptionsLoaded && !force) return;
   var sel = qs('iface-select');
@@ -3982,6 +4212,14 @@ function buildExtraUi(){
     notifyBtn.textContent = '\u7f51\u9875\u901a\u77e5';
     clearBtn.parentNode.insertBefore(notifyBtn, clearBtn);
   }
+  if(clearBtn && !qs('btn-hw-assistant')){
+    var hwBtn = document.createElement('button');
+    hwBtn.className = 'btn-mini';
+    hwBtn.id = 'btn-hw-assistant';
+    hwBtn.type = 'button';
+    hwBtn.textContent = '\u786c\u4ef6\u52a9\u624b';
+    clearBtn.parentNode.insertBefore(hwBtn, clearBtn);
+  }
 
   var header = document.querySelector('header');
   if(header && !qs('sniff-banner')){
@@ -4002,8 +4240,8 @@ function buildExtraUi(){
       '      <label for="restart-args">\u53c2\u6570</label>'+
       '      <input id="restart-args" class="adv-input" type="text" placeholder="\u4f8b\u5982: --no-tui --channel 6">'+
       '    </div>'+
-      '    <div class="adv-row">'+
-      '      <label for="iface-select">\u7f51\u5361</label>'+
+      '    <div class="adv-row" id="hw-assistant-row">'+
+      '      <label for="iface-select">\u786c\u4ef6\u914d\u7f6e\u52a9\u624b</label>'+
       '      <select id="iface-select" class="adv-input"><option value="">(auto)</option></select>'+
       '      <button class="btn-mini" id="btn-iface-refresh" type="button">\u5237\u65b0\u7f51\u5361</button>'+
       '    </div>'+
@@ -4196,6 +4434,7 @@ function buildExtraUi(){
   if(qs('btn-dji-lookup')) qs('btn-dji-lookup').addEventListener('click', openDjiLookup);
   if(qs('btn-freeze')) qs('btn-freeze').addEventListener('click', toggleFreeze);
   if(qs('btn-web-notify')) qs('btn-web-notify').addEventListener('click', requestWebNotifyPermission);
+  if(qs('btn-hw-assistant')) qs('btn-hw-assistant').addEventListener('click', openHardwareAssistant);
   if(qs('btn-restart-once')) qs('btn-restart-once').addEventListener('click', function(){ restartProgram(false); });
   if(qs('btn-restart-save')) qs('btn-restart-save').addEventListener('click', function(){ restartProgram(true); });
   if(qs('btn-config-load')) qs('btn-config-load').addEventListener('click', loadConfigEditor);
@@ -4203,6 +4442,18 @@ function buildExtraUi(){
   if(qs('btn-history-delete')) qs('btn-history-delete').addEventListener('click', deleteHistoryBySelect);
   if(qs('btn-track-clear-one')) qs('btn-track-clear-one').addEventListener('click', clearTrackBySelect);
   if(qs('btn-track-clear-all')) qs('btn-track-clear-all').addEventListener('click', clearTrackAll);
+  if(qs('btn-tools-export-all')) qs('btn-tools-export-all').addEventListener('click', toolsExportAllDetails);
+  if(qs('btn-tools-import-all')) qs('btn-tools-import-all').addEventListener('click', function(){ _pickImportFile('tools-import-all-file'); });
+  if(qs('btn-tools-export-track')) qs('btn-tools-export-track').addEventListener('click', toolsExportSingleTrack);
+  if(qs('btn-tools-import-track')) qs('btn-tools-import-track').addEventListener('click', function(){ _pickImportFile('tools-import-track-file'); });
+  if(qs('tools-import-all-file')) qs('tools-import-all-file').addEventListener('change', function(ev){
+    var f = (ev && ev.target && ev.target.files && ev.target.files[0]) ? ev.target.files[0] : null;
+    if(f) toolsImportAllDetailsFromFile(f);
+  });
+  if(qs('tools-import-track-file')) qs('tools-import-track-file').addEventListener('change', function(ev){
+    var f = (ev && ev.target && ev.target.files && ev.target.files[0]) ? ev.target.files[0] : null;
+    if(f) toolsImportSingleTrackFromFile(f);
+  });
   if(qs('btn-iface-refresh')) qs('btn-iface-refresh').addEventListener('click', function(){ loadIfaceOptions(true); });
   if(qs('iface-select')) qs('iface-select').addEventListener('change', function(){ this.dataset.edited='1'; });
   if(qs('scan-wifi-fast')) qs('scan-wifi-fast').addEventListener('change', function(){ this.dataset.edited='1'; });
@@ -4319,7 +4570,11 @@ function applyMeta(meta){
       else if(supported === true) extra = ' | 5GHz可用';
       if(metaState.wifi_fast_msg) extra += ' | ' + String(metaState.wifi_fast_msg);
     }
-    ifaceStatus.textContent = '当前采集网卡: ' + activeIface + extra;
+    var statText = '当前采集网卡: ' + activeIface + extra;
+    if((activeIface === '-' || activeIface === '') && String(metaState.sniff_state || '') !== 'ok'){
+      statText += ' | 请打开“高级设置 - 硬件配置助手”检查网卡';
+    }
+    ifaceStatus.textContent = statText;
   }
   if(!!metaState.scan_wifi_fast && metaState.wifi_fast_supported === false){
     var warnMsg = String(metaState.wifi_fast_msg || '网卡不支持5GHz，WiFi快传扫描不可用');
@@ -4374,6 +4629,28 @@ function applySniffStatus(meta){
     showBanner(tip, state === 'error' ? 'warn' : 'info', 4200);
     sniffBannerPrevState = state;
   }
+}
+
+function openHardwareAssistant(){
+  var adv = qs('adv-panel');
+  if(adv){
+    adv.open = true;
+    try{ adv.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){}
+  }
+  loadIfaceOptions(true);
+  var row = qs('hw-assistant-row');
+  if(row){
+    row.classList.remove('focus-pulse');
+    // Force reflow so repeated clicks can replay animation.
+    void row.offsetWidth;
+    row.classList.add('focus-pulse');
+    setTimeout(function(){ row.classList.remove('focus-pulse'); }, 2200);
+  }
+  var sel = qs('iface-select');
+  if(sel){
+    try{ sel.focus({preventScroll:true}); }catch(_e){ try{ sel.focus(); }catch(_e2){} }
+  }
+  showBanner('已打开“高级设置 - 硬件配置助手”', 'info', 1800);
 }
 
 function openDjiLookup(){
@@ -5316,6 +5593,14 @@ def http_server_thread() -> None:
             elif path == "/api/tools/import/all":
                 body = self._read_json_body()
                 payload = body.get("payload", body) if isinstance(body, dict) else body
+                valid_payload = False
+                if isinstance(payload, list):
+                    valid_payload = True
+                elif isinstance(payload, dict):
+                    valid_payload = isinstance(payload.get("items"), list) or isinstance(payload.get("drones"), list)
+                if not valid_payload:
+                    self._send_json({"ok": False, "error": "invalid payload: expect items[]/drones[] or list"}, 400)
+                    return
                 added, updated, skipped = import_details_payload(payload)
                 self._send_json({
                     "ok": True,
@@ -5334,6 +5619,9 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
                 track_raw = payload.get("track")
+                if not isinstance(track_raw, list):
+                    self._send_json({"ok": False, "error": "track must be array"}, 400)
+                    return
                 track = _sanitize_track(track_raw if isinstance(track_raw, list) else [])
                 with state_lock:
                     h = history_table.get(sn) or {"sn": sn, "pkt_count_total": 0}
@@ -6078,23 +6366,29 @@ def main() -> None:
     iface = interface_detect(prefer=args.iface)
     with sniff_health_lock:
         sniff_iface_name = str(iface or "")
-    try:
-        WIFI_FAST_SUPPORTED = bool(detect_5g(iface))
-    except Exception:
-        WIFI_FAST_SUPPORTED = False
+    WIFI_FAST_SUPPORTED = False
     WIFI_FAST_SUPPORT_MSG = ""
-    if SCAN_WIFI_FAST and WIFI_FAST_SUPPORTED:
-        WIFI_FAST_SUPPORT_MSG = f"iface {iface} supports 5GHz; WiFi fast-transfer scan enabled"
-    if SCAN_WIFI_FAST and not WIFI_FAST_SUPPORTED:
-        WIFI_FAST_SUPPORT_MSG = f"iface {iface} does not support 5GHz; WiFi fast-transfer scan unavailable"
-        _log(f"[WARN] {WIFI_FAST_SUPPORT_MSG}")
+    if iface:
+        try:
+            WIFI_FAST_SUPPORTED = bool(detect_5g(iface))
+        except Exception:
+            WIFI_FAST_SUPPORTED = False
+        if SCAN_WIFI_FAST and WIFI_FAST_SUPPORTED:
+            WIFI_FAST_SUPPORT_MSG = f"iface {iface} supports 5GHz; WiFi fast-transfer scan enabled"
+        if SCAN_WIFI_FAST and not WIFI_FAST_SUPPORTED:
+            WIFI_FAST_SUPPORT_MSG = f"iface {iface} does not support 5GHz; WiFi fast-transfer scan unavailable"
+            _log(f"[WARN] {WIFI_FAST_SUPPORT_MSG}")
+    else:
+        WIFI_FAST_SUPPORT_MSG = NO_IFACE_DEGRADE_HINT
+        _log(f"[WARN] {NO_IFACE_DEGRADE_HINT}")
 
     if args.hop and args.channel:
         _log("[WARN] --hop and --channel both set; using hopping mode")
 
+    hop_cfg: tuple[list[int], list[int], int, int] | None = None
     if args.hop:
-        dw2    = max(100, args.dwell_2g)
-        dw5    = max(200, args.dwell_5g)
+        dw2 = max(100, args.dwell_2g)
+        dw5 = max(200, args.dwell_5g)
         hop_2g = CHANNELS_2G[:]
         hop_5g: list[int] = []
         if args.hop_5g:
@@ -6106,19 +6400,29 @@ def main() -> None:
                 _log(f"[INFO] 5G channels={hop_5g}")
             else:
                 _log("[INFO] 5G unsupported, using 2.4G only")
+        hop_cfg = (hop_2g, hop_5g, dw2, dw5)
         _log(f"[INFO] hopping 2.4G={hop_2g}@{dw2}ms" + (f" 5G={hop_5g}@{dw5}ms" if hop_5g else ""))
-        Thread(target=channel_hopper,
-               args=(iface, hop_2g, hop_5g, dw2, dw5,
-                     max(0,args.settle), args.dwell_on_hit, args.hit_cap),
-               daemon=True).start()
+        if iface:
+            Thread(target=channel_hopper,
+                   args=(iface, hop_2g, hop_5g, dw2, dw5,
+                         max(0, args.settle), args.dwell_on_hit, args.hit_cap),
+                   daemon=True).start()
+        else:
+            _log("[WARN] 当前无网卡，已进入降级运行；跳频将在网卡恢复后自动启用")
     elif args.channel:
         _log(f"[INFO] lock channel {args.channel}")
-        run_cmd(f"iw dev {iface} set channel {args.channel}")
+        if iface:
+            run_cmd(f"iw dev {iface} set channel {args.channel}")
+        else:
+            _log("[WARN] 当前无网卡，先记录信道配置，网卡恢复后自动应用")
         current_channel = args.channel
     else:
         # Default lock to ch6 (DJI RID commonly used channel).
         _log("[INFO] default lock channel 6 (DJI RID common). Use --hop or --channel N to change")
-        run_cmd(f"iw dev {iface} set channel 6")
+        if iface:
+            run_cmd(f"iw dev {iface} set channel 6")
+        else:
+            _log("[WARN] 当前无网卡，先使用默认信道配置，网卡恢复后自动应用")
         current_channel = 6
 
     _log(f"[INFO] output: first/changed(min-gap={MIN_GAP:.1f}s)/heartbeat(time={PRINT_INTERVAL:.1f}s)")
@@ -6137,9 +6441,13 @@ def main() -> None:
         fail_count = 0
         recover_fail_count = 0
         iface_cur = str(iface or "")
+        hop_started = bool(args.hop and bool(iface))
 
-        def note_recover_failure(reason: str) -> None:
+        def note_recover_failure(reason: str, allow_restart: bool = True) -> None:
             nonlocal recover_fail_count
+            if not allow_restart:
+                recover_fail_count = 0
+                return
             recover_fail_count += 1
             _log(f"[WARN] sniff recover failed {recover_fail_count}/{SNIFF_RESTART_AFTER_FAILS}: {reason}")
             if recover_fail_count >= SNIFF_RESTART_AFTER_FAILS:
@@ -6159,9 +6467,25 @@ def main() -> None:
                     with sniff_health_lock:
                         sniff_iface_name = iface_cur
                     _log(f"[INFO] sniff iface recovered: {iface_cur}")
+                    ok = _sniff_recover_iface(iface_cur, "iface connected", force=True)
+                    if not ok:
+                        _log(f"[WARN] sniff iface init failed: {iface_cur}, waiting retry")
+                        iface_cur = ""
+                        time.sleep(retry_delay)
+                        continue
+                    if args.hop and (not hop_started) and hop_cfg:
+                        hop_2g, hop_5g, dw2, dw5 = hop_cfg
+                        Thread(target=channel_hopper,
+                               args=(iface_cur, hop_2g, hop_5g, dw2, dw5,
+                                     max(0, args.settle), args.dwell_on_hit, args.hit_cap),
+                               daemon=True).start()
+                        hop_started = True
+                    elif (not args.hop):
+                        if current_channel:
+                            run_cmd(f"iw dev {iface_cur} set channel {current_channel}")
                 else:
-                    _sniff_note_error("no iface available")
-                    note_recover_failure("no iface available")
+                    _sniff_note_error(NO_IFACE_DEGRADE_HINT)
+                    note_recover_failure("no iface available", allow_restart=False)
                     _log(f"[WARN] sniff no available iface, retry in {retry_delay:.0f}s")
                     time.sleep(retry_delay)
                     continue
@@ -6188,15 +6512,17 @@ def main() -> None:
                 fail_count += 1
                 ex_msg = str(ex or "")
                 _sniff_note_error(f"sniff exception#{fail_count}: {ex_msg}")
-                note_recover_failure(ex_msg)
-                if fail_count >= SNIFF_RESTART_AFTER_FAILS:
+                no_dev_err = _sniff_is_no_device_error(ex)
+                note_recover_failure(ex_msg, allow_restart=(not no_dev_err))
+                if (not no_dev_err) and fail_count >= SNIFF_RESTART_AFTER_FAILS:
                     _log(f"[WARN] sniff exception count reached {SNIFF_RESTART_AFTER_FAILS}, scheduling self-restart")
                     ok, msg = _schedule_self_restart(list(sys.argv[1:]))
                     if not ok:
                         _log(f"[WARN] self-restart scheduling failed: {msg}")
                     fail_count = 0
 
-                if _sniff_is_no_device_error(ex):
+                if no_dev_err:
+                    fail_count = 0
                     new_iface = _sniff_pick_iface(prefer=iface_cur)
                     if new_iface and new_iface != iface_cur:
                         _log(f"[WARN] sniff iface unavailable, switch {iface_cur} -> {new_iface}")

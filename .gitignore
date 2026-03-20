@@ -6,6 +6,7 @@ __pycache__/
 venv/
 
 rid_config.json
+rid_config.json.rollback
 rid_history_cache.json
 oui.txt
 *_history_cache.json

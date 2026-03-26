@@ -1,0 +1,87 @@
+name: Build Release Assets
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types: [published]
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to build (e.g. v0.0.1)"
+        required: true
+
+env:
+  TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+  APP_NAME: light_rid_scanner
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            artifact: linux-amd64
+
+          - os: ubuntu-latest
+            artifact: linux-arm64
+
+          # Windows
+          - os: windows-latest
+            artifact: windows-amd64.exe
+
+          # macOS
+          - os: macos-15-intel       # Intel / amd64
+            artifact: macos-amd64
+
+          - os: macos-latest         # Apple Silicon / arm64
+            artifact: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r requirements.txt
+
+      - name: Build binary
+        shell: bash
+        run: |
+          pyinstaller \
+            --onefile \
+            --clean \
+            --name "$APP_NAME" \
+            main.py
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p release
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            mv "dist/$APP_NAME.exe" "release/$APP_NAME-${{ matrix.artifact }}"
+          else
+            mv "dist/$APP_NAME" "release/$APP_NAME-${{ matrix.artifact }}"
+          fi
+
+      - name: Upload binary to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          files: release/*
+          fail_on_unmatched_files: true

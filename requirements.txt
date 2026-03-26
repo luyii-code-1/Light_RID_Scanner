@@ -1,0 +1,2 @@
+# No external dependencies (Python standard library only)
+windows-curses; platform_system == "Windows"

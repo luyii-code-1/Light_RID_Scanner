@@ -1,82 +1,99 @@
 # Light RID Scanner
 
-Lightweight OpenDroneID / Remote ID Wi-Fi scanner for Raspberry Pi and other Linux devices running monitor mode.  
-Designed for long-running deployment with realtime Web UI, history retention, trajectory drawing, AP monitoring, and notifications.
+Light RID Scanner is a practical Remote ID / OpenDroneID Wi-Fi monitor for Raspberry Pi fixed-station deployments.
 
-## 中文说明
+The project is built around one runtime file (`run.py`) and focuses on long-running stability:
+- live web UI (drone list, AP list, map, tracks)
+- history and track persistence
+- config guard + rollback
+- hardware assistant page for NIC recovery operations
+- optional Basic Auth (username/password stored as SHA256 hashes)
 
-### 功能概览
+## Runtime
 
-- 实时接收并解析 OpenDroneID / Remote ID Wi-Fi Beacon
-- 网页端显示实时设备列表、历史设备、AP 列表与地图
-- 支持显示飞机位置、飞手位置、历史轨迹
-- 支持历史与轨迹管理（删除、清空、导出）
-- 支持企业微信机器人通知与浏览器通知
-- 适合树莓派长期运行，可配合 `systemd` 守护
+Required:
+- Linux (Raspberry Pi OS recommended)
+- Python 3.10+
+- wireless NIC with monitor mode support
+- root privileges for mode/channel operations
 
-### 主要文件
-
-- `run.py`：主程序（采集、解析、HTTP/WebSocket、前端页面）
-- `rid_models.json`：机型前缀映射
-- `rid_config.example.json`：脱敏配置模板（可提交）
-- `rid_config.json`：本地实际配置（不要提交）
-
-### 启动方式
+Start:
 
 ```bash
 sudo ~/rid/.venv/bin/python3 run.py --no-tui
 ```
 
-网页地址：
+Default web URL:
 
 - `http://<device-ip>:4600/`
 
-### 配置与安全
+## Files
 
-- 部署时使用 `rid_config.json`
-- 代码仓库仅保留 `rid_config.example.json`
-- 企业微信 webhook key、本机 IP、私有路径等敏感信息请仅保存在本地
-
-### 常用接口
-
-- `GET /api/tracks/get?sn=<SN>`：获取单架飞机轨迹
-- `POST /api/tracks/clear`：清空轨迹（可带 `{"sn":"..."}` 清空单架）
-- `POST /api/history/delete`：删除单架历史
-- `POST /api/history/clear`：清空全部历史
-- `GET /api/config`：读取当前配置文本
-- `POST /api/config/save`：保存并热重载配置
-
-## English
-
-### Highlights
-
-- Realtime OpenDroneID / Remote ID decoding from Wi-Fi management frames
-- Web UI with live aircraft list, AP list, details panel, and map
-- Aircraft position, pilot position, and trajectory rendering
-- History persistence and trajectory cache management
-- WeCom bot notification and browser notification support
-- Runtime control via configuration file
-- Suitable for long-running Raspberry Pi deployment with `systemd`
-
-### Main Files
-
-- `run.py`: scanner, parser, HTTP/WebSocket server, and embedded frontend
-- `rid_models.json`: aircraft model prefix map
-- `rid_config.example.json`: sanitized configuration template
+- `run.py`: scanner, parser, HTTP/WS server, embedded web pages
+- `rid_models.json`: model prefix map
+- `rid_config.example.json`: safe template for Git
 - `rid_config.json`: local runtime config (do not commit)
 
-### Start
+Runtime-generated files:
+- `rid_config.json.rollback`
+- `rid_history_cache.json`
 
-```bash
-sudo ~/rid/.venv/bin/python3 run.py --no-tui
+## Authentication
+
+Set hashes in `rid_config.json`:
+
+```json
+{
+  "auth": {
+    "enabled": true,
+    "username_sha256": "<sha256(username)>",
+    "password_sha256": "<sha256(password)>",
+    "realm": "Light RID Scanner"
+  }
+}
 ```
 
-Open:
+Generate hash values:
 
-- `http://<device-ip>:4600/`
+```bash
+python3 - <<'PY'
+import hashlib
+print("user:", hashlib.sha256("your_user".encode()).hexdigest())
+print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
+PY
+```
 
-### Security Notes
+## Hardware Assistant
 
-- Do not commit real `rid_config.json`
-- Keep webhook keys and local-only settings out of Git
-- Commit `rid_config.example.json` only
+Open from main page button, or directly:
+
+- `/hardware-assistant`
+
+Supported operations:
+- list interfaces
+- `iw dev`, `iw info`, `iw link`
+- switch monitor/managed mode
+- restart NIC
+- set channel
+- restart main service process
+
+## Useful APIs
+
+- `GET /api/interfaces`
+- `GET /api/tracks/get?sn=<SN>`
+- `POST /api/tracks/clear`
+- `POST /api/history/delete`
+- `POST /api/history/clear`
+- `GET /api/tools/export/all`
+- `GET /api/tools/export/track?sn=<SN>`
+- `POST /api/tools/import/all`
+- `POST /api/tools/import/track`
+- `GET /api/hw/status`
+- `POST /api/hw/op`
+
+## Commit Rules
+
+Before pushing to GitHub:
+- do not commit `rid_config.json`
+- do not commit history/cache/output artifacts
+- commit `rid_config.example.json` only

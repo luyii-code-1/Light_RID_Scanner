@@ -3884,13 +3884,21 @@ function handleDroneNotifications(list){
   });
 }
 async function getJson(url){
-  var resp = await fetch(url, {cache:'no-store'});
+  var resp = await fetch(apiUrl(url), {cache:'no-store'});
   var data = {};
   try{ data = await resp.json(); }catch(_e){}
   if(!resp.ok || data.ok===false){
     throw new Error((data && data.error) ? data.error : ('HTTP '+resp.status));
   }
   return data;
+}
+function apiUrl(url){
+  var u = String(url || '');
+  try{
+    return new URL(u, window.location.origin).toString();
+  }catch(_e){
+    return u;
+  }
 }
 function loadThemePref(){
   try{
@@ -3922,7 +3930,7 @@ function toggleTheme(){
   applyTheme(uiTheme === 'light' ? 'dark' : 'light');
 }
 async function postJson(url, body){
-  var resp = await fetch(url, {
+  var resp = await fetch(apiUrl(url), {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify(body||{})
@@ -5639,14 +5647,22 @@ pre{margin:0;max-height:48vh;overflow:auto;background:#08101a;border:1px solid #
 function qs(id){ return document.getElementById(id); }
 function showStatus(s){ qs('status').textContent = String(s||'-'); }
 function showOut(t){ qs('output').textContent = String(t||'-'); }
+function apiUrl(url){
+  const u = String(url || '');
+  try{
+    return new URL(u, window.location.origin).toString();
+  }catch(_e){
+    return u;
+  }
+}
 async function getJson(url){
-  const r = await fetch(url, {cache:'no-store'});
+  const r = await fetch(apiUrl(url), {cache:'no-store'});
   const d = await r.json().catch(()=>({}));
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
 }
 async function postJson(url, body){
-  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  const r = await fetch(apiUrl(url), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
   const d = await r.json().catch(()=>({}));
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;

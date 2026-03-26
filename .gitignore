@@ -1,24 +1,31 @@
+# Python cache / env
 __pycache__/
 *.py[cod]
 *.pyo
-
 .venv/
 venv/
 
+# Runtime config (contains secrets)
 rid_config.json
 rid_config.json.rollback
-rid_history_cache.json
-oui.txt
-*_history_cache.json
-*.secrets.json
 rid_config.local.json
+*.secrets.json
 
+# Runtime data
+rid_history_cache.json
+*_history_cache.json
+oui.txt
+
+# Local temporary / backup artifacts
 *.tmp
+*.broken.*
 run.py.bak_*
 _remote_*.sh
 _page_extracted.*
 memory.txt
 _moji_tokens.txt
 run.py.bak_mojibake
-*.broken.*
-rid_models.from_pi.json
+
+# OS / editor
+.DS_Store
+Thumbs.db

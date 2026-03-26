@@ -10,14 +10,14 @@
     "settle": 30,
     "dwell_on_hit": 2500,
     "hit_cap": 6000,
-    "time": 2.0,
-    "min_gap": 1.0,
+    "time": 1.0,
+    "min_gap": 0.5,
     "rssi_delta": 3,
     "change_on_rssi": false,
     "change_on_payload": false,
     "model_map": "rid_models.json",
     "history_file": "rid_history_cache.json",
-    "no_tui": false,
+    "no_tui": true,
     "debug": false
   },
   "notify": {
@@ -33,14 +33,14 @@
     "dji_lookup_url": "https://repair.dji.com/device/search?re=cn&lang=zh-CN",
     "allow_restart": true,
     "last_restart_args": "--no-tui",
-    "scan_type_rid": "RID报送",
-    "scan_type_phone": "手机快传",
-    "sn_source_rid": "RID包",
+    "scan_type_rid": "RID report",
+    "scan_type_phone": "Phone fast transfer",
+    "sn_source_rid": "RID packet",
     "sn_source_ssid": "SSID",
-    "base_name": "基站",
+    "base_name": "RID Station",
     "base_lat": null,
     "base_lon": null,
-    "base_zoom": 13
+    "base_zoom": 18
   },
   "ap": {
     "list_max": 80,

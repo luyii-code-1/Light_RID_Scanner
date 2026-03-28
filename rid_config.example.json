@@ -5,6 +5,7 @@
     "hop": false,
     "hop_5g": false,
     "scan_wifi_fast": false,
+    "auto_self_heal": true,
     "dwell_2g": 250,
     "dwell_5g": 800,
     "settle": 30,

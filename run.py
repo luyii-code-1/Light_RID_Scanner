@@ -646,6 +646,7 @@ def default_app_config() -> dict:
             "hop": False,
             "hop_5g": False,
             "scan_wifi_fast": False,
+            "auto_self_heal": True,
             "dwell_2g": DWELL_2G_DEFAULT,
             "dwell_5g": DWELL_5G_DEFAULT,
             "settle": SETTLE_DEFAULT,
@@ -1669,17 +1670,37 @@ def _iface_options_snapshot() -> list[dict]:
     out.sort(key=lambda x: (0 if x.get("is_monitor") else 1, x.get("name") or ""))
     return out
 
+def _cfg_preferred_iface() -> str | None:
+    try:
+        basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+        if not isinstance(basic, dict):
+            return None
+        v = basic.get("iface")
+        if v in (None, ""):
+            return None
+        s = str(v).strip()
+        return s or None
+    except Exception:
+        return None
+
+def _cfg_auto_self_heal() -> bool:
+    try:
+        basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+        if not isinstance(basic, dict):
+            return True
+        return bool(basic.get("auto_self_heal", True))
+    except Exception:
+        return True
+
 def _sniff_pick_iface(prefer: str | None = None) -> str | None:
     iftypes = _sniff_iface_candidates()
     if not iftypes:
         return None
-    if prefer and prefer in iftypes and iftypes.get(prefer) == "monitor":
+    if prefer and prefer in iftypes:
         return prefer
     mon = [i for i, t in iftypes.items() if t == "monitor"]
     if mon:
         return mon[0]
-    if prefer and prefer in iftypes:
-        return prefer
     for k in iftypes.keys():
         return k
     return None
@@ -2942,10 +2963,21 @@ header{background:linear-gradient(180deg, rgba(16,23,33,.96), rgba(13,17,23,.96)
 header .head-stats{display:flex;align-items:center;justify-content:flex-end;
        gap:8px 16px;flex-wrap:wrap;min-width:0}
 header h1{font-size:20px;font-weight:700;color:var(--blue);letter-spacing:.04em}
-header details.adv{grid-column:1/-1;border:1px solid var(--border);border-radius:6px;background:#0b1320}
-header details.adv > summary{cursor:pointer;list-style:none;padding:8px 10px;color:#8b949e;font-size:14px}
-header details.adv > summary::-webkit-details-marker{display:none}
-header details.adv[open] > summary{border-bottom:1px solid var(--border);color:var(--blue)}
+.adv-modal{
+  position:fixed;inset:0;z-index:10006;background:rgba(3,8,14,.62);
+  display:none;align-items:center;justify-content:center;padding:12px;
+}
+.adv-modal.show{display:flex}
+.adv-window{
+  width:min(1120px, calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;
+  border:1px solid var(--border);border-radius:10px;background:linear-gradient(180deg,#0d1420,#0b131d);
+  box-shadow:0 20px 48px rgba(0,0,0,.45);
+}
+.adv-window-hd{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:10px 12px;border-bottom:1px solid var(--border);color:var(--blue);font-size:14px;font-weight:700;
+}
+.adv-window-hd .btn-mini{padding:4px 8px}
 .adv-body{
   padding:10px;
   display:grid;
@@ -3116,6 +3148,7 @@ body.bottom-all-collapsed{
   .icon-btn{width:22px;height:22px}
   .sn-badge{font-size:10px;padding:1px 5px}
   .adv-row{flex-direction:column;align-items:stretch}
+  .adv-window{width:calc(100vw - 12px);max-height:calc(100vh - 12px)}
   .map-mini-list{
     width:min(92vw,340px);
     right:8px;
@@ -3309,9 +3342,14 @@ body.theme-light header{
   background:linear-gradient(180deg, rgba(255,255,255,.96), rgba(247,250,253,.96));
   box-shadow:0 8px 24px rgba(15,23,42,.08), inset 0 1px 0 rgba(9,105,218,.06);
 }
-body.theme-light header details.adv{background:#ffffff;border-color:#d8e1eb}
-body.theme-light header details.adv > summary{color:#57606a}
-body.theme-light header details.adv[open] > summary{color:var(--blue);border-bottom-color:#d8e1eb}
+body.theme-light .adv-window{
+  background:linear-gradient(180deg,#ffffff,#f7fbff);
+  border-color:#d8e1eb;
+  box-shadow:0 18px 42px rgba(15,23,42,.18);
+}
+body.theme-light .adv-window-hd{
+  color:#2d4e72;border-bottom-color:#d8e1eb;
+}
 body.theme-light .tbl-wrap{
   background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(250,252,255,.98));
   box-shadow:0 10px 28px rgba(15,23,42,.07), 0 0 0 1px rgba(9,105,218,.03) inset;
@@ -3477,8 +3515,15 @@ var latestMapRows = [];
 var latestApsRows = [];
 var latestApsTotal = 0;
 var selectedSnSet = {};
+var autoTrackSnSet = {};
 var trackCache = {};
 var trackLoading = {};
+var prefRealtimeTrack = true;
+var prefTrack2hOnly = false;
+var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
+var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
+var AUTO_TRACK_OFFLINE_HIDE_SEC = 120;
+var TRACK_FILTER_WINDOW_SEC = 7200;
 var HL_FADE_IN_MS = 0;
 var HL_HOLD_MS = 0;
 var HL_FADE_OUT_MS = 2000;
@@ -3489,6 +3534,9 @@ var sniffBannerPrevState = '';
 var mapCollapsedBeforeFullscreen = null;
 var mapFsUiTimer = null;
 var miniListRenderSig = '';
+var keyCDown = false;
+var keyRDown = false;
+var radarHotkeyArmed = false;
 
 function qs(id){ return document.getElementById(id); }
 function fmt(v,dec,unit){ return v==null?'N/A':Number(v).toFixed(dec)+unit; }
@@ -3503,6 +3551,91 @@ function intOrDefault(v, defv){
   if(v==null || v==='') return defv;
   var n = parseInt(v, 10);
   return isFinite(n) ? n : defv;
+}
+function cookieGet(name){
+  var key = String(name || '').trim();
+  if(!key) return null;
+  var parts = String(document.cookie || '').split(';');
+  for(var i=0;i<parts.length;i++){
+    var p = String(parts[i] || '').trim();
+    if(!p) continue;
+    var pos = p.indexOf('=');
+    var k = (pos < 0) ? p : p.slice(0, pos).trim();
+    if(k !== key) continue;
+    var raw = (pos < 0) ? '' : p.slice(pos + 1);
+    try{ return decodeURIComponent(raw); }catch(_e){ return raw; }
+  }
+  return null;
+}
+function cookieSet(name, value, days){
+  var key = String(name || '').trim();
+  if(!key) return;
+  var val = encodeURIComponent(String(value == null ? '' : value));
+  var nDays = Number(days);
+  if(!isFinite(nDays) || nDays <= 0) nDays = 365;
+  var secure = (location.protocol === 'https:') ? '; Secure' : '';
+  document.cookie = key + '=' + val + '; Max-Age=' + Math.round(nDays * 86400) + '; Path=/; SameSite=Lax' + secure;
+}
+function cookieBool(name, defVal){
+  var v = cookieGet(name);
+  if(v == null || v === '') return !!defVal;
+  v = String(v).toLowerCase();
+  return (v === '1' || v === 'true' || v === 'on' || v === 'yes');
+}
+function loadTrackPrefs(){
+  prefRealtimeTrack = cookieBool(COOKIE_TRACK_REALTIME, true);
+  prefTrack2hOnly = cookieBool(COOKIE_TRACK_2H_ONLY, false);
+  saveTrackPrefs();
+}
+function saveTrackPrefs(){
+  cookieSet(COOKIE_TRACK_REALTIME, prefRealtimeTrack ? '1' : '0', 365);
+  cookieSet(COOKIE_TRACK_2H_ONLY, prefTrack2hOnly ? '1' : '0', 365);
+}
+function syncTrackPrefsUi(){
+  var rt = qs('opt-realtime-track');
+  if(rt) rt.checked = !!prefRealtimeTrack;
+  var f2h = qs('opt-track-2h');
+  if(f2h) f2h.checked = !!prefTrack2hOnly;
+}
+function refreshAutoTrackSelection(rows){
+  autoTrackSnSet = {};
+  if(!prefRealtimeTrack) return;
+  var arr = Array.isArray(rows) ? rows : [];
+  for(var i=0;i<arr.length;i++){
+    var e = arr[i] || {};
+    var sn = String(e.sn || '');
+    if(!sn || e.archived) continue;
+    var age = Number(e.age || 0);
+    if(!isFinite(age) || age < 0) age = 0;
+    if(age >= AUTO_TRACK_OFFLINE_HIDE_SEC) continue;
+    autoTrackSnSet[sn] = true;
+  }
+}
+function effectiveTrackSnList(){
+  var out = {};
+  var sel = selectedSnList();
+  for(var i=0;i<sel.length;i++){
+    out[String(sel[i] || '')] = true;
+  }
+  if(prefRealtimeTrack){
+    Object.keys(autoTrackSnSet).forEach(function(sn){
+      if(sn) out[sn] = true;
+    });
+  }
+  return Object.keys(out).filter(function(sn){ return !!sn; });
+}
+function _trackTsSec(p){
+  var ts = Number((p && p.ts) || 0);
+  return (isFinite(ts) && ts > 0) ? ts : null;
+}
+function filterTrackByPrefs(track){
+  var arr = Array.isArray(track) ? track.slice() : [];
+  if(!prefTrack2hOnly) return arr;
+  var threshold = (Date.now() / 1000) - TRACK_FILTER_WINDOW_SEC;
+  return arr.filter(function(p){
+    var ts = _trackTsSec(p);
+    return ts == null ? true : (ts >= threshold);
+  });
 }
 function baseFromMeta(meta){
   meta = (meta && typeof meta === 'object') ? meta : {};
@@ -3620,7 +3753,7 @@ async function ensureTrackLoaded(sn, force){
     var data = await getJson('/api/tracks/get?sn=' + encodeURIComponent(sn));
     var tr = Array.isArray(data.track) ? data.track : [];
     trackCache[sn] = tr;
-    if(isSnSelected(sn)){
+    if(isSnSelected(sn) || (prefRealtimeTrack && autoTrackSnSet[sn])){
       updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
     }
   }catch(_e){
@@ -3672,6 +3805,43 @@ function esc(v){
 }
 function escAttr(v){
   return esc(v).replace(/\\n/g,'&#10;');
+}
+function isTypingTarget(el){
+  var t = el || document.activeElement;
+  if(!t || !t.tagName) return false;
+  var tag = String(t.tagName || '').toLowerCase();
+  if(tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  return !!t.isContentEditable;
+}
+function bindRadarHotkey(){
+  if(window.__ridRadarHotkeyBound) return;
+  window.__ridRadarHotkeyBound = true;
+  document.addEventListener('keydown', function(ev){
+    if(!ev) return;
+    if(isTypingTarget(ev.target)) return;
+    var k = String(ev.key || '').toLowerCase();
+    if(k === 'c') keyCDown = true;
+    if(k === 'r') keyRDown = true;
+    if(keyCDown && keyRDown && !radarHotkeyArmed){
+      radarHotkeyArmed = true;
+      openRadarView();
+    }
+  });
+  document.addEventListener('keyup', function(ev){
+    if(!ev) return;
+    var k = String(ev.key || '').toLowerCase();
+    if(k === 'c') keyCDown = false;
+    if(k === 'r') keyRDown = false;
+    if(!keyCDown || !keyRDown) radarHotkeyArmed = false;
+  });
+}
+function openAdvModal(){
+  var m = qs('adv-modal');
+  if(m) m.classList.add('show');
+}
+function closeAdvModal(){
+  var m = qs('adv-modal');
+  if(m) m.classList.remove('show');
 }
 function hideInfoCard(){
   var modal = qs('info-modal');
@@ -4406,7 +4576,10 @@ function buildExtraUi(){
   if(qs('info-card-close')) qs('info-card-close').addEventListener('click', hideInfoCard);
   if(!infoCardEscBound){
     document.addEventListener('keydown', function(ev){
-      if(ev && ev.key === 'Escape') hideInfoCard();
+      if(ev && ev.key === 'Escape'){
+        hideInfoCard();
+        closeAdvModal();
+      }
     });
     infoCardEscBound = true;
   }
@@ -4458,6 +4631,22 @@ function buildExtraUi(){
     hwBtn.textContent = '\u786c\u4ef6\u52a9\u624b';
     clearBtn.parentNode.insertBefore(hwBtn, clearBtn);
   }
+  if(clearBtn && !qs('btn-radar-view')){
+    var radarBtn = document.createElement('button');
+    radarBtn.className = 'btn-mini';
+    radarBtn.id = 'btn-radar-view';
+    radarBtn.type = 'button';
+    radarBtn.textContent = '\u7403\u5f62\u96f7\u8fbe';
+    clearBtn.parentNode.insertBefore(radarBtn, clearBtn);
+  }
+  if(clearBtn && !qs('btn-adv-open')){
+    var advBtn = document.createElement('button');
+    advBtn.className = 'btn-mini';
+    advBtn.id = 'btn-adv-open';
+    advBtn.type = 'button';
+    advBtn.textContent = '\u9ad8\u7ea7\u8bbe\u7f6e';
+    clearBtn.parentNode.insertBefore(advBtn, clearBtn);
+  }
 
   var header = document.querySelector('header');
   if(header && !qs('sniff-banner')){
@@ -4466,12 +4655,13 @@ function buildExtraUi(){
     banner.className = 'sniff-banner';
     header.appendChild(banner);
   }
-  if(header && !qs('adv-panel')){
-    var details = document.createElement('details');
-    details.className = 'adv';
-    details.id = 'adv-panel';
-    details.innerHTML =
-      '<summary>\u9ad8\u7ea7\u9009\u9879</summary>'+
+  if(!qs('adv-modal')){
+    var modal = document.createElement('div');
+    modal.className = 'adv-modal';
+    modal.id = 'adv-modal';
+    modal.innerHTML =
+      '<div class="adv-window" role="dialog" aria-modal="true" aria-label="\u9ad8\u7ea7\u8bbe\u7f6e">'+
+      '<div class="adv-window-hd"><span>\u9ad8\u7ea7\u8bbe\u7f6e</span><button class="btn-mini" id="btn-adv-close" type="button">\u5173\u95ed</button></div>'+
       '<div class="adv-body">'+
       '  <div class="adv-col">'+
       '    <div class="adv-row">'+
@@ -4486,6 +4676,13 @@ function buildExtraUi(){
       '    <div class="adv-row">'+
       '      <label><input id="scan-wifi-fast" type="checkbox"> \u626b\u63cfWiFi\u5feb\u4f20(5GHz\u5e38\u89c1\u4fe1\u9053)</label>'+
       '    </div>'+
+      '    <div class="adv-row">'+
+      '      <label><input id="opt-realtime-track" type="checkbox"> \u5b9e\u65f6\u8f68\u8ff9\uff08\u5728\u7ebf\u81ea\u52a8\u5c55\u793a\uff0c\u79bb\u7ebf2\u5206\u949f\u9690\u85cf\uff09</label>'+
+      '    </div>'+
+      '    <div class="adv-row">'+
+      '      <label><input id="opt-track-2h" type="checkbox"> \u81ea\u52a8\u7b5b\u9009 2 \u5c0f\u65f6\u5185\u8f68\u8ff9</label>'+
+      '    </div>'+
+      '    <div class="adv-note">\u8f68\u8ff9\u504f\u597d\u5df2\u4fdd\u5b58\u5230 Cookie</div>'+
       '    <div class="adv-row">'+
       '      <label for="base-name">\u57fa\u7ad9\u540d\u79f0</label>'+
       '      <input id="base-name" class="adv-input" type="text" placeholder="\u4f8b\u5982: \u57fa\u7ad9A">'+
@@ -4505,6 +4702,9 @@ function buildExtraUi(){
       '    </div>'+
       '    <div class="adv-note" id="base-status">-</div>'+
       '    <div class="adv-note" id="iface-status">-</div>'+
+      '    <div class="adv-actions">'+
+      '      <button class="btn-mini" id="btn-save-iface-default" type="button">\u4fdd\u5b58\u9ed8\u8ba4\u7f51\u5361</button>'+
+      '    </div>'+
       '    <div class="adv-actions">'+
       '      <button class="btn-mini" id="btn-restart-once" type="button">\u4ec5\u672c\u6b21\u91cd\u542f</button>'+
       '      <button class="btn-mini warn" id="btn-restart-save" type="button">\u4fdd\u5b58\u5e76\u91cd\u542f</button>'+
@@ -4543,8 +4743,11 @@ function buildExtraUi(){
       '    <div class="adv-note" id="tools-status">-</div>'+
       '    <div class="adv-note" id="track-mgr-status">-</div>'+
       '  </div>'+
-      '</div>';
-    header.appendChild(details);
+      '</div></div>';
+    document.body.appendChild(modal);
+    modal.addEventListener('click', function(ev){
+      if(ev.target === modal) closeAdvModal();
+    });
   }
 
   var bottom = document.querySelector('.bottom');
@@ -4673,6 +4876,9 @@ function buildExtraUi(){
   if(qs('btn-freeze')) qs('btn-freeze').addEventListener('click', toggleFreeze);
   if(qs('btn-web-notify')) qs('btn-web-notify').addEventListener('click', requestWebNotifyPermission);
   if(qs('btn-hw-assistant')) qs('btn-hw-assistant').addEventListener('click', openHardwareAssistant);
+  if(qs('btn-radar-view')) qs('btn-radar-view').addEventListener('click', openRadarView);
+  if(qs('btn-adv-open')) qs('btn-adv-open').addEventListener('click', openAdvModal);
+  if(qs('btn-adv-close')) qs('btn-adv-close').addEventListener('click', closeAdvModal);
   if(qs('btn-restart-once')) qs('btn-restart-once').addEventListener('click', function(){ restartProgram(false); });
   if(qs('btn-restart-save')) qs('btn-restart-save').addEventListener('click', function(){ restartProgram(true); });
   if(qs('btn-config-load')) qs('btn-config-load').addEventListener('click', loadConfigEditor);
@@ -4693,8 +4899,21 @@ function buildExtraUi(){
     if(f) toolsImportSingleTrackFromFile(f);
   });
   if(qs('btn-iface-refresh')) qs('btn-iface-refresh').addEventListener('click', function(){ loadIfaceOptions(true); });
+  if(qs('btn-save-iface-default')) qs('btn-save-iface-default').addEventListener('click', saveDefaultIfaceConfig);
   if(qs('iface-select')) qs('iface-select').addEventListener('change', function(){ this.dataset.edited='1'; });
   if(qs('scan-wifi-fast')) qs('scan-wifi-fast').addEventListener('change', function(){ this.dataset.edited='1'; });
+  if(qs('opt-realtime-track')) qs('opt-realtime-track').addEventListener('change', function(ev){
+    prefRealtimeTrack = !!(ev && ev.target && ev.target.checked);
+    saveTrackPrefs();
+    refreshAutoTrackSelection(latestDroneRows);
+    effectiveTrackSnList().forEach(function(sn){ ensureTrackLoaded(sn, false); });
+    updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+  });
+  if(qs('opt-track-2h')) qs('opt-track-2h').addEventListener('change', function(ev){
+    prefTrack2hOnly = !!(ev && ev.target && ev.target.checked);
+    saveTrackPrefs();
+    updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+  });
   if(qs('restart-args')) qs('restart-args').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-name')) qs('base-name').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-lat')) qs('base-lat').addEventListener('input', function(){ this.dataset.edited='1'; });
@@ -4730,6 +4949,8 @@ function buildExtraUi(){
   updateNotifyButton();
   loadConfigEditor();
   loadIfaceOptions(false);
+  syncTrackPrefsUi();
+  bindRadarHotkey();
   setFreezeState(false);
   updateMapFullscreenButton();
   renderMapMiniList([]);
@@ -4876,6 +5097,16 @@ function openHardwareAssistant(){
     window.open('/hardware-assistant', '_blank', 'noopener,noreferrer');
   } else {
     window.open('/hardware-assistant', 'hardware_assistant_window', 'noopener,noreferrer,width=1120,height=860');
+  }
+}
+
+function openRadarView(){
+  var mobile = false;
+  try { mobile = window.matchMedia('(max-width: 900px)').matches; } catch(_e) {}
+  if(mobile){
+    window.open('/radar', '_blank', 'noopener,noreferrer');
+  } else {
+    window.open('/radar', 'rid_radar_window', 'noopener,noreferrer,width=1260,height=860');
   }
 }
 
@@ -5142,6 +5373,39 @@ async function saveBaseConfig(){
   }
 }
 
+async function saveDefaultIfaceConfig(){
+  var st = qs('iface-status');
+  var btn = qs('btn-save-iface-default');
+  var ifaceSel = qs('iface-select');
+  var iface = ifaceSel ? String(ifaceSel.value || '').trim() : '';
+  var scanFast = !!(qs('scan-wifi-fast') && qs('scan-wifi-fast').checked);
+  if(btn) btn.disabled = true;
+  if(st) st.textContent = '保存默认网卡中...';
+  try{
+    var data = await postJson('/api/web/basic/save', {
+      iface: iface,
+      scan_wifi_fast: scanFast
+    });
+    metaState = Object.assign({}, metaState, {
+      iface_selected: data.iface_selected,
+      scan_wifi_fast: data.scan_wifi_fast
+    });
+    if(ifaceSel){ delete ifaceSel.dataset.edited; }
+    var scanFastEl = qs('scan-wifi-fast');
+    if(scanFastEl){ delete scanFastEl.dataset.edited; }
+    applyMeta(metaState);
+    if(st){
+      st.textContent = '默认网卡已保存: ' + (data.iface_selected || '(auto)') + '，WiFi快传=' + (data.scan_wifi_fast ? '开' : '关');
+    }
+    showBanner('默认网卡配置已保存', 'ok', 2200);
+  }catch(e){
+    if(st) st.textContent = '保存失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('默认网卡保存失败', 'warn', 3600);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
 function renderAps(aps, total){
   var box = qs('aplist');
   if(!box) return;
@@ -5225,6 +5489,8 @@ function onData(d){
   latestDroneMap = {};
   latestDroneRows = list.slice();
   syncSelectedFromRows(latestDroneRows);
+  refreshAutoTrackSelection(latestDroneRows);
+  effectiveTrackSnList().forEach(function(sn){ ensureTrackLoaded(sn, false); });
 
   var rows='';
   if(!list.length){
@@ -5293,7 +5559,7 @@ function onData(d){
   }
 
   latestMapRows = Array.isArray(d.map_drones) ? d.map_drones : (Array.isArray(d.drones) ? d.drones : []);
-  selectedSnList().forEach(function(sn){
+  effectiveTrackSnList().forEach(function(sn){
     var e = latestDroneMap[sn];
     if(e && Number(e.track_count || 0) !== Number((trackCache[sn] || []).length)){
       ensureTrackLoaded(sn, true);
@@ -5303,6 +5569,7 @@ function onData(d){
   updateMap(latestMapRows);
 }
 
+loadTrackPrefs();
 applyTheme(loadThemePref());
 buildExtraUi();
 connect();
@@ -5444,6 +5711,7 @@ function updateMap(drones){
   applyBaseMarker(false);
   var liveAir = drones.filter(function(e){ return e.lat!=null && e.lon!=null; });
   var selected = selectedSnList();
+  var trackSn = effectiveTrackSnList();
   var selectedSet = {};
   selected.forEach(function(sn){ selectedSet[sn] = true; });
   var livePilot = drones.filter(function(e){
@@ -5468,7 +5736,7 @@ function updateMap(drones){
   }
   map._rid_base_fitted = false;
   document.getElementById('map-hint').textContent =
-    '\u98de\u673a:' + liveAir.length + '  \u5df2\u9009:' + selected.length + '  \u98de\u624b:' + livePilot.length;
+    '\u98de\u673a:' + liveAir.length + '  \u5df2\u9009:' + selected.length + '  \u8f68\u8ff9:' + trackSn.length + '  \u98de\u624b:' + livePilot.length;
 
   // color assignment by SN
   drones.forEach(function(e){
@@ -5522,10 +5790,10 @@ function updateMap(drones){
   });
 
   var activeTrack = {};
-  selected.forEach(function(sn){
+  trackSn.forEach(function(sn){
     sn = String(sn || '');
     if(!sn) return;
-    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    var tr = filterTrackByPrefs(Array.isArray(trackCache[sn]) ? trackCache[sn] : []);
     if(tr.length < 2){
       if(trackLines[sn]){
         map.removeLayer(trackLines[sn]);
@@ -5588,6 +5856,747 @@ function updateMap(drones){
     map._rid_fitted = true;
   }
 }
+</script>
+</body></html>"""
+
+_RADAR_PAGE_HTML = """<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Light RID Scanner C+R 雷达</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+:root{
+  --bg:#05090e;
+  --bg2:#0a1119;
+  --panel:rgba(9,15,22,.78);
+  --panel-border:#2f4457;
+  --panel-edge:#5c7d9b;
+  --txt:#e5f3ff;
+  --muted:#9cb2c6;
+  --accent:#48d3ff;
+  --accent-strong:#00ffb3;
+  --warn:#ffb347;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  color:var(--txt);
+  font:16px/1.55 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  display:grid;grid-template-rows:auto minmax(0,1fr);
+  background:
+    radial-gradient(1200px 680px at 16% -12%, rgba(44,140,255,.18), transparent 55%),
+    radial-gradient(900px 560px at 104% 108%, rgba(0,255,179,.13), transparent 58%),
+    linear-gradient(160deg, var(--bg), var(--bg2));
+  position:relative;
+  overflow:hidden;
+}
+body::before{
+  content:"";
+  position:fixed;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(180deg, rgba(255,255,255,.024) 0 1px, transparent 1px 3px);
+  mix-blend-mode:screen;
+  opacity:.38;
+  z-index:0;
+}
+body::after{
+  content:"";
+  position:fixed;inset:0;pointer-events:none;
+  background:radial-gradient(circle at 50% 20%, rgba(75,163,255,.08), rgba(0,0,0,0) 58%);
+  z-index:0;
+}
+header,.wrap{position:relative;z-index:1}
+header{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:12px 16px;border-bottom:1px solid var(--panel-border);
+  background:linear-gradient(180deg, rgba(11,19,28,.94), rgba(8,14,21,.88));
+  box-shadow:0 10px 22px rgba(0,0,0,.28), inset 0 -1px 0 rgba(159,200,232,.07);
+  backdrop-filter:blur(4px);
+}
+h1{
+  margin:0;
+  font-size:22px;
+  letter-spacing:.08em;
+  color:#d6ebff;
+  text-shadow:0 0 14px rgba(72,211,255,.35);
+}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.btn{
+  border:1px solid #48617a;
+  background:linear-gradient(180deg, rgba(21,31,43,.9), rgba(12,20,29,.92));
+  color:#dff0ff;
+  border-radius:9px;
+  padding:8px 13px;
+  cursor:pointer;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  font-size:13px;
+  transition:all .2s ease;
+}
+.btn:hover{
+  border-color:#67a6d2;
+  box-shadow:0 0 14px rgba(72,211,255,.3), inset 0 0 0 1px rgba(142,206,255,.28);
+  transform:translateY(-1px);
+}
+.stat{font-size:15px;color:#c8dbef}
+.stat b{color:#f2fbff}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.wrap{
+  min-height:0;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 390px;
+  gap:12px;
+  padding:12px;
+}
+.stage{
+  min-height:0;
+  border:1px solid var(--panel-border);
+  border-radius:12px;
+  position:relative;
+  overflow:hidden;
+  background:#050b12;
+  box-shadow:0 16px 34px rgba(0,0,0,.32), inset 0 0 0 1px rgba(133,178,214,.08);
+}
+.stage::before{
+  content:"";
+  position:absolute;inset:0;pointer-events:none;z-index:405;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(72,211,255,.08), transparent 50%),
+    linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,0) 12%);
+}
+#radar-map{width:100%;height:100%}
+#radar-overlay{position:absolute;inset:0;pointer-events:none;z-index:410}
+#sphere-mask{
+  position:absolute;inset:0;pointer-events:none;z-index:420;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0, rgba(0,0,0,0) 45%, rgba(0,0,0,.43) 58%, rgba(0,0,0,.77) 75%, rgba(0,0,0,.93) 100%),
+    radial-gradient(circle at 50% 40%, rgba(63,190,255,.13), rgba(0,0,0,0) 60%);
+}
+.hud{
+  position:absolute;left:12px;top:12px;z-index:450;font-size:14px;color:#d9efff;
+  background:linear-gradient(180deg, rgba(8,15,22,.86), rgba(8,12,18,.76));
+  border:1px solid #3f5f7a;border-radius:10px;padding:8px 11px;
+  box-shadow:0 8px 20px rgba(0,0,0,.35), inset 0 0 0 1px rgba(152,214,255,.12);
+}
+.side{
+  min-height:0;
+  border:1px solid var(--panel-border);
+  border-radius:12px;
+  background:linear-gradient(180deg, rgba(10,17,25,.85), rgba(8,12,18,.86));
+  box-shadow:0 16px 28px rgba(0,0,0,.32), inset 0 0 0 1px rgba(151,195,228,.08);
+  display:grid;grid-template-rows:auto minmax(0,1fr) auto;
+  backdrop-filter:blur(4px);
+}
+.sec{padding:11px;border-bottom:1px solid #2a3b4c}
+.sec:last-child{border-bottom:none}
+.label{font-size:14px;color:var(--muted)}
+.list{min-height:0;overflow:auto;padding:8px}
+.item{
+  border:1px solid #3e5264;border-radius:10px;padding:8px 10px;margin:0 0 8px 0;
+  background:linear-gradient(180deg, rgba(32,44,57,.62), rgba(18,27,37,.66));
+  cursor:pointer;
+  transition:all .22s ease;
+}
+.item:hover{
+  border-color:#64b4ff;
+  transform:translateY(-1px);
+  box-shadow:0 10px 18px rgba(0,0,0,.28), inset 0 0 0 1px rgba(129,193,255,.18);
+}
+.item.active{
+  border-color:var(--accent-strong);
+  box-shadow:0 0 0 1px rgba(0,255,179,.44) inset, 0 0 16px rgba(0,255,179,.19);
+}
+.item .sn{color:#d7ecff;font-weight:700;word-break:break-all;font-size:16px}
+.item .sub{font-size:14px;color:#bfd0de}
+.item.lost{opacity:.62}
+.detail{
+  padding:11px;overflow:auto;max-height:34vh;border-top:1px solid #2a3b4c;
+  background:linear-gradient(180deg, rgba(9,14,20,.9), rgba(8,12,18,.95));
+}
+.drow{display:grid;grid-template-columns:112px 1fr;gap:8px;padding:3px 0;font-size:14px}
+.drow .k{color:#8ea7ba}
+.drow .v{word-break:break-all}
+input[type=range]{width:100%;accent-color:#42c8ff}
+.leaflet-control-attribution{background:rgba(4,8,11,.62)!important;color:#8fb5c2!important}
+#radar-map .leaflet-tile{
+  filter:brightness(.48) contrast(1.28) saturate(.72) hue-rotate(172deg);
+}
+@media(max-width:1024px){
+  .wrap{grid-template-columns:1fr}
+  .side{min-height:320px}
+  .detail{max-height:28vh}
+}
+</style>
+</head><body>
+<header>
+  <div class="row">
+    <h1>Light RID Scanner C+R 雷达</h1>
+    <span class="stat">WS: <b id="ws">连接中</b></span>
+    <span class="stat">时间: <b id="ts" class="mono">-</b></span>
+    <span class="stat">在线: <b id="live">0</b></span>
+    <span class="stat">离线: <b id="lost">0</b></span>
+    <span class="stat">信道: <b id="ch" class="mono">-</b></span>
+  </div>
+  <div class="row">
+    <button class="btn" id="back" type="button">返回主页</button>
+    <button class="btn" id="recenter" type="button">回基站</button>
+  </div>
+</header>
+<div class="wrap">
+  <div class="stage">
+    <div id="radar-map"></div>
+    <canvas id="radar-overlay"></canvas>
+    <div id="sphere-mask"></div>
+    <div class="hud">
+      <div>基站: <span id="base" class="mono">未设置</span></div>
+      <div>标尺: <span id="rangev" class="mono">800m</span></div>
+      <div>说明: 背景深色地图 + C+R 扫描扇区</div>
+    </div>
+  </div>
+  <div class="side">
+    <div class="sec">
+      <div class="label">雷达标尺 (米，默认 800)</div>
+      <input id="range" type="range" min="200" max="5000" step="50" value="800">
+      <div class="label" style="margin-top:8px">
+        <label><input id="show-lost" type="checkbox"> 显示离线目标</label>
+      </div>
+      <div class="label" style="margin-top:6px">
+        <label><input id="show-history" type="checkbox"> 显示历史飞机</label>
+      </div>
+    </div>
+    <div class="list" id="list"></div>
+    <div class="detail" id="detail">
+      <div class="label">追损信息</div>
+      <div style="margin-top:6px;color:#9fb0bf">点击左侧飞机目标查看详情</div>
+    </div>
+  </div>
+</div>
+<script>
+function qs(id){ return document.getElementById(id); }
+function esc(v){
+  return String(v==null?'':v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function toNum(v){
+  var n = Number(v);
+  return isFinite(n) ? n : null;
+}
+function fmt(v, dec, unit){
+  if(v==null || !isFinite(Number(v))) return 'N/A';
+  return Number(v).toFixed(dec) + String(unit || '');
+}
+function fmtDur(sec){
+  var s = Number(sec || 0);
+  if(!isFinite(s) || s <= 0) return '-';
+  s = Math.round(s);
+  if(s < 60) return s + 's';
+  if(s < 3600) return Math.floor(s/60) + 'm';
+  if(s < 86400) return Math.floor(s/3600) + 'h';
+  return Math.floor(s/86400) + 'd';
+}
+function _gcjOutOfChina(lat, lon){
+  return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
+}
+function _gcjTransformLat(x, y){
+  var ret = -100.0 + 2.0*x + 3.0*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+  ret += (20.0*Math.sin(6.0*x*Math.PI) + 20.0*Math.sin(2.0*x*Math.PI)) * 2.0 / 3.0;
+  ret += (20.0*Math.sin(y*Math.PI) + 40.0*Math.sin(y/3.0*Math.PI)) * 2.0 / 3.0;
+  ret += (160.0*Math.sin(y/12.0*Math.PI) + 320*Math.sin(y*Math.PI/30.0)) * 2.0 / 3.0;
+  return ret;
+}
+function _gcjTransformLon(x, y){
+  var ret = 300.0 + x + 2.0*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+  ret += (20.0*Math.sin(6.0*x*Math.PI) + 20.0*Math.sin(2.0*x*Math.PI)) * 2.0 / 3.0;
+  ret += (20.0*Math.sin(x*Math.PI) + 40.0*Math.sin(x/3.0*Math.PI)) * 2.0 / 3.0;
+  ret += (150.0*Math.sin(x/12.0*Math.PI) + 300.0*Math.sin(x/30.0*Math.PI)) * 2.0 / 3.0;
+  return ret;
+}
+function wgs84ToGcj02(lat, lon){
+  lat = Number(lat); lon = Number(lon);
+  if(!isFinite(lat) || !isFinite(lon)) return [lat, lon];
+  if(_gcjOutOfChina(lat, lon)) return [lat, lon];
+  var a = 6378245.0, ee = 0.00669342162296594323;
+  var dLat = _gcjTransformLat(lon - 105.0, lat - 35.0);
+  var dLon = _gcjTransformLon(lon - 105.0, lat - 35.0);
+  var radLat = lat / 180.0 * Math.PI;
+  var magic = Math.sin(radLat);
+  magic = 1 - ee * magic * magic;
+  var sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+  dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+  return [lat + dLat, lon + dLon];
+}
+function toMapLatLng(lat, lon){ return wgs84ToGcj02(lat, lon); }
+
+var map = null;
+var overlay = qs('radar-overlay');
+var octx = overlay.getContext('2d');
+var dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+var ws = null;
+var rowsAll = [];
+var rowsMap = [];
+var rowsBySn = {};
+var meta = {};
+var radarRange = 800;
+var showLost = false;
+var showHistory = false;
+var sweepA = 0;
+var selectedSn = '';
+var markers = {};
+var rangeRings = [];
+var baseMarker = null;
+var baseLatLngWgs = null;
+var baseLatLngMap = null;
+var baseFitted = false;
+var motionState = {};
+
+function initMap(){
+  if(map) return;
+  map = L.map('radar-map', {
+    zoomControl:true,
+    attributionControl:true,
+    maxZoom:18,
+    minZoom:4,
+    dragging:false,
+    boxZoom:false,
+    keyboard:false,
+    scrollWheelZoom:'center',
+    touchZoom:'center',
+    doubleClickZoom:'center'
+  });
+  L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
+    subdomains:['1','2','3','4'],
+    maxZoom:18,
+    maxNativeZoom:18,
+    attribution:'&copy; 高德地图'
+  }).addTo(map);
+  map.setView([30, 114], 11);
+  map.on('zoom move resize', function(){ drawOverlay(); });
+  setTimeout(function(){ resizeOverlay(); drawOverlay(); }, 0);
+}
+
+function resizeOverlay(){
+  if(!map) return;
+  var rect = map.getContainer().getBoundingClientRect();
+  overlay.width = Math.max(2, Math.round(rect.width * dpr));
+  overlay.height = Math.max(2, Math.round(rect.height * dpr));
+  octx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', function(){
+  if(map) map.invalidateSize(false);
+  resizeOverlay();
+  renderMapTargets();
+  renderList();
+  drawOverlay();
+});
+
+function setWs(ok){
+  var el = qs('ws');
+  if(!el) return;
+  el.textContent = ok ? '在线' : '断开';
+  el.style.color = ok ? '#00ffb3' : '#ffb680';
+}
+
+function baseFromMeta(){
+  var lat = toNum(meta.base_lat), lon = toNum(meta.base_lon);
+  if(lat==null || lon==null || lat<-90 || lat>90 || lon<-180 || lon>180) return null;
+  return {name:String(meta.base_name || '基站'), lat:lat, lon:lon, zoom:Math.max(3, Math.min(17, parseInt(meta.base_zoom || 13, 10) || 13))};
+}
+
+function baseIconHtml(){
+  return '<div style="width:18px;height:18px;border-radius:50%;background:#ffb347;border:2px solid #8e5200;box-shadow:0 0 16px rgba(255,179,71,.76);"></div>';
+}
+function markerHtml(lost, idx, headingDeg, spd, closing){
+  var bg = lost ? '#ffb347' : '#00ffb3';
+  var bd = lost ? '#8e5200' : '#008f69';
+  var txt = lost ? '#2f1a00' : '#003123';
+  var glow = lost ? 'rgba(255,179,71,.70)' : 'rgba(0,255,179,.70)';
+  var hd = Number(headingDeg);
+  var rot = isFinite(hd) ? hd : 0;
+  var spdTxt = (spd==null || !isFinite(Number(spd))) ? 'S--' : ('S' + Number(spd).toFixed(1));
+  var cVal = Number(closing);
+  var cTxt = (!isFinite(cVal)) ? 'C--' : ('C' + (cVal>=0?'+':'') + cVal.toFixed(1));
+  return '<div style="position:relative;min-width:30px;height:36px;">'
+    +'<div style="position:absolute;left:50%;top:-13px;transform:translateX(-50%);padding:1px 6px;border-radius:4px;background:rgba(7,14,20,.94);color:#dcf7ff;border:1px solid #4b7491;font:12px/16px ui-monospace;white-space:nowrap;box-shadow:0 0 12px rgba(72,211,255,.25);">'+spdTxt+' '+cTxt+'</div>'
+    +'<div style="position:absolute;left:50%;top:6px;transform:translateX(-50%) rotate('+rot.toFixed(1)+'deg);width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:14px solid '+bg+';filter:drop-shadow(0 0 8px '+glow+');"></div>'
+    +'<div style="position:absolute;left:50%;top:20px;transform:translateX(-50%);min-width:22px;height:16px;padding:0 5px;border-radius:8px;background:'+bg+';color:'+txt+';border:1px solid '+bd+';font:11px/14px ui-monospace;text-align:center;box-shadow:0 0 11px '+glow+';">'+idx+'</div>'
+    +'</div>';
+}
+
+function calcBearing(lat1, lon1, lat2, lon2){
+  var p1 = deg2rad(lat1), p2 = deg2rad(lat2);
+  var dLon = deg2rad(lon2 - lon1);
+  var y = Math.sin(dLon) * Math.cos(p2);
+  var x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dLon);
+  var b = Math.atan2(y, x) * 180 / Math.PI;
+  if(!isFinite(b)) return null;
+  if(b < 0) b += 360;
+  return b;
+}
+
+function applyBase(){
+  var b = baseFromMeta();
+  if(!b){
+    qs('base').textContent = '未设置';
+    baseLatLngWgs = null;
+    baseLatLngMap = null;
+    if(baseMarker){ map.removeLayer(baseMarker); baseMarker = null; }
+    clearRangeRings();
+    drawOverlay();
+    return;
+  }
+  baseLatLngWgs = {lat:b.lat, lon:b.lon, zoom:b.zoom, name:b.name};
+  baseLatLngMap = L.latLng(b.lat, b.lon);
+  qs('base').textContent = b.name + ' ' + b.lat.toFixed(6) + ',' + b.lon.toFixed(6);
+  if(baseMarker){
+    baseMarker.setLatLng(baseLatLngMap).setPopupContent('<b>'+esc(b.name)+'</b><br>'+b.lat.toFixed(6)+','+b.lon.toFixed(6));
+  }else{
+    baseMarker = L.marker(baseLatLngMap, {
+      icon: L.divIcon({html:baseIconHtml(), className:'', iconSize:[16,16], iconAnchor:[8,8]})
+    }).addTo(map).bindPopup('<b>'+esc(b.name)+'</b><br>'+b.lat.toFixed(6)+','+b.lon.toFixed(6));
+  }
+  updateRangeRings();
+  if(!baseFitted){
+    map.setView(baseLatLngMap, b.zoom);
+    baseFitted = true;
+  }
+  drawOverlay();
+}
+
+function clearRangeRings(){
+  for(var i=0;i<rangeRings.length;i++){
+    if(rangeRings[i]) map.removeLayer(rangeRings[i]);
+  }
+  rangeRings = [];
+}
+function updateRangeRings(){
+  clearRangeRings();
+  if(!baseLatLngMap) return;
+  var levels = [0.25, 0.5, 0.75, 1.0];
+  for(var i=0;i<levels.length;i++){
+    var lv = levels[i];
+    var r = radarRange * lv;
+    var c = L.circle(baseLatLngMap, {
+      radius:r,
+      color:(lv === 1.0 ? '#bada7b' : '#5d7349'),
+      weight:(lv === 1.0 ? 4 : 2),
+      opacity:(lv === 1.0 ? 0.7 : 0.45),
+      fill:false
+    }).addTo(map);
+    rangeRings.push(c);
+  }
+}
+
+function deg2rad(d){ return d * Math.PI / 180; }
+function destinationPoint(lat, lon, bearingDeg, distMeter){
+  var R = 6371000.0;
+  var br = deg2rad(bearingDeg);
+  var lat1 = deg2rad(lat), lon1 = deg2rad(lon);
+  var ad = distMeter / R;
+  var sinLat1 = Math.sin(lat1), cosLat1 = Math.cos(lat1);
+  var sinAd = Math.sin(ad), cosAd = Math.cos(ad);
+  var lat2 = Math.asin(sinLat1 * cosAd + cosLat1 * sinAd * Math.cos(br));
+  var lon2 = lon1 + Math.atan2(Math.sin(br) * sinAd * cosLat1, cosAd - sinLat1 * Math.sin(lat2));
+  return {lat:lat2 * 180/Math.PI, lon:lon2 * 180/Math.PI};
+}
+
+function pixelRadiusForRange(){
+  if(!baseLatLngMap) return 0;
+  var p2w = destinationPoint(baseLatLngMap.lat, baseLatLngMap.lng, 90, radarRange);
+  var c0 = map.latLngToContainerPoint(baseLatLngMap);
+  var c1 = map.latLngToContainerPoint(L.latLng(p2w.lat, p2w.lon));
+  return Math.max(8, Math.hypot(c1.x - c0.x, c1.y - c0.y));
+}
+
+function drawOverlay(){
+  if(!map) return;
+  var rect = map.getContainer().getBoundingClientRect();
+  var w = rect.width, h = rect.height;
+  octx.clearRect(0,0,w,h);
+  if(!baseLatLngMap) return;
+  var cp = map.latLngToContainerPoint(baseLatLngMap);
+  var px = cp.x, py = cp.y;
+  var pr = pixelRadiusForRange();
+  if(!isFinite(pr) || pr <= 0) return;
+
+  octx.strokeStyle = 'rgba(186,218,123,.78)';
+  octx.lineWidth = 2.8;
+  octx.beginPath(); octx.arc(px, py, pr, 0, Math.PI*2); octx.stroke();
+  octx.strokeStyle = 'rgba(135,160,102,.44)';
+  octx.lineWidth = 2.0;
+  for(var i=1;i<=3;i++){
+    octx.beginPath(); octx.arc(px, py, pr * i / 4, 0, Math.PI*2); octx.stroke();
+  }
+  octx.strokeStyle = 'rgba(166,196,124,.52)';
+  octx.lineWidth = 2.2;
+  octx.beginPath(); octx.moveTo(px-pr, py); octx.lineTo(px+pr, py); octx.stroke();
+  octx.beginPath(); octx.moveTo(px, py-pr); octx.lineTo(px, py+pr); octx.stroke();
+
+  sweepA += 0.018;
+  if(sweepA > Math.PI*2) sweepA -= Math.PI*2;
+  octx.save();
+  octx.beginPath(); octx.arc(px, py, pr, 0, Math.PI*2); octx.clip();
+  for(var k=0;k<16;k++){
+    var a2 = sweepA - k*0.048;
+    var a1 = a2 - 0.041;
+    var alpha = 0.26 * (1 - k/16);
+    octx.fillStyle = 'rgba(151,226,127,' + alpha.toFixed(4) + ')';
+    octx.beginPath();
+    octx.moveTo(px, py);
+    octx.arc(px, py, pr, a1, a2);
+    octx.closePath();
+    octx.fill();
+  }
+  octx.restore();
+}
+
+function connect(){
+  var wsProto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
+  ws = new WebSocket(wsProto + location.host + '/ws');
+  ws.onopen = function(){ setWs(true); };
+  ws.onclose = function(){ setWs(false); setTimeout(connect, 1800); };
+  ws.onerror = function(){ try{ ws.close(); }catch(_e){} };
+  ws.onmessage = function(ev){
+    try{
+      var d = JSON.parse(ev.data);
+      meta = (d && typeof d.meta === 'object') ? d.meta : {};
+      rowsAll = Array.isArray(d.drones) ? d.drones : [];
+      rowsMap = Array.isArray(d.map_drones) ? d.map_drones : rowsAll;
+      rowsBySn = {};
+      rowsAll.forEach(function(r){ if(r && r.sn) rowsBySn[String(r.sn)] = r; });
+      qs('ts').textContent = String(d.ts || '-');
+      qs('ch').textContent = String(d.ch || '-');
+      var liveCount = rowsAll.filter(function(x){ return x && !x.lost && !x.archived; }).length;
+      var lostCount = rowsAll.filter(function(x){ return x && x.lost && !x.archived; }).length;
+      qs('live').textContent = String(liveCount);
+      qs('lost').textContent = String(lostCount);
+      applyBase();
+      renderMapTargets();
+      renderList();
+      drawOverlay();
+    }catch(_e){}
+  };
+}
+
+function visibleRows(){
+  var arr = showHistory ? (Array.isArray(rowsAll) ? rowsAll : []) : (Array.isArray(rowsMap) ? rowsMap : []);
+  var out = [];
+  for(var i=0;i<arr.length;i++){
+    var e = arr[i] || {};
+    if(e.archived && !showHistory) continue;
+    if(!showLost && e.lost && !e.archived) continue;
+    if(toNum(e.lat)==null || toNum(e.lon)==null) continue;
+    out.push(e);
+  }
+  return out;
+}
+
+function renderMapTargets(){
+  if(!map) return;
+  var vis = visibleRows();
+  vis.sort(function(a,b){
+    var ar = (a.rssi==null) ? -9999 : Number(a.rssi);
+    var br = (b.rssi==null) ? -9999 : Number(b.rssi);
+    return br - ar;
+  });
+  var nowSec = Date.now() / 1000;
+  var active = {};
+  for(var i=0;i<vis.length;i++){
+    var e = vis[i] || {};
+    var sn = String(e.sn || '');
+    if(!sn) continue;
+    active[sn] = true;
+    var latRaw = Number(e.lat), lonRaw = Number(e.lon);
+    var m = toMapLatLng(latRaw, lonRaw);
+    var latlng = L.latLng(m[0], m[1]);
+    var dist = distanceToBase(e);
+    var prev = motionState[sn] || {};
+    var heading = null;
+    if(isFinite(Number(prev.lat)) && isFinite(Number(prev.lon))){
+      var hd = calcBearing(Number(prev.lat), Number(prev.lon), latRaw, lonRaw);
+      if(hd!=null) heading = hd;
+    }
+    if(heading == null && isFinite(Number(prev.heading))) heading = Number(prev.heading);
+    var dt = (isFinite(Number(prev.ts)) ? (nowSec - Number(prev.ts)) : 0);
+    var closing = null;
+    if(dt > 0.35 && isFinite(Number(prev.dist)) && isFinite(Number(dist))){
+      closing = (Number(prev.dist) - Number(dist)) / dt;
+      if(isFinite(Number(prev.closing))){
+        closing = Number(prev.closing) * 0.55 + closing * 0.45;
+      }
+    }else if(isFinite(Number(prev.closing))){
+      closing = Number(prev.closing);
+    }
+    motionState[sn] = {
+      lat: latRaw, lon: lonRaw, ts: nowSec,
+      dist: dist, heading: heading, closing: closing
+    };
+    var spd = (e.spd==null ? null : Number(e.spd));
+    var icon = L.divIcon({html: markerHtml(!!e.lost, i+1, heading, spd, closing), className:'', iconSize:[108,44], iconAnchor:[54,28]});
+    var popup = '<b>'+esc(sn)+'</b><br>'+esc(String(e.model||'N/A'))+'<br>'
+      +'RSSI: '+esc(String(e.rssi==null?'N/A':(e.rssi+'dBm')))+'<br>'
+      +'更新时间: '+esc(String(e.age_text || '-'))+'<br>'
+      +'速度: '+esc(spd==null?'N/A':(spd.toFixed(1)+'m/s'))+'<br>'
+      +'接近率: '+esc((closing==null||!isFinite(closing))?'N/A':((closing>=0?'+':'')+closing.toFixed(1)+'m/s'));
+    if(markers[sn]){
+      markers[sn].setLatLng(latlng).setIcon(icon).setPopupContent(popup);
+    }else{
+      markers[sn] = L.marker(latlng, {icon:icon}).addTo(map).bindPopup(popup);
+      (function(snLocal){
+        markers[snLocal].on('click', function(){
+          selectedSn = snLocal;
+          renderList();
+          renderDetail();
+        });
+      })(sn);
+    }
+  }
+  Object.keys(motionState).forEach(function(sn){
+    if(!active[sn]) delete motionState[sn];
+  });
+  Object.keys(markers).forEach(function(sn){
+    if(!active[sn]){
+      map.removeLayer(markers[sn]);
+      delete markers[sn];
+    }
+  });
+}
+
+function distanceToBase(e){
+  if(!baseLatLngMap || !map) return null;
+  var lat = toNum(e.lat), lon = toNum(e.lon);
+  if(lat==null || lon==null) return null;
+  var m = toMapLatLng(lat, lon);
+  return map.distance(baseLatLngMap, L.latLng(m[0], m[1]));
+}
+
+function renderList(){
+  var box = qs('list');
+  var vis = visibleRows();
+  vis.sort(function(a,b){
+    var ad = distanceToBase(a), bd = distanceToBase(b);
+    ad = (ad==null) ? 9e12 : ad;
+    bd = (bd==null) ? 9e12 : bd;
+    return ad - bd;
+  });
+  if(selectedSn && !vis.some(function(e){ return String((e&&e.sn)||'') === selectedSn; })){
+    selectedSn = '';
+  }
+  if(!selectedSn && vis.length){
+    selectedSn = String(vis[0].sn || '');
+  }
+  var html = '';
+  if(!vis.length){
+    html = '<div class="item"><div class="sub">暂无目标</div></div>';
+  }else{
+    for(var i=0;i<vis.length;i++){
+      var e = vis[i] || {};
+      var sn = String(e.sn || '');
+      var dist = distanceToBase(e);
+      var dtxt = (dist==null) ? '-' : (dist.toFixed(0) + 'm');
+      var ms = motionState[sn] || {};
+      var cl = Number(ms.closing);
+      var cTxt = isFinite(cl) ? ((cl>=0?'+':'') + cl.toFixed(1) + 'm/s') : 'N/A';
+      var st = e.archived ? '历史' : (e.lost ? '离线' : '在线');
+      var cls = 'item' + (e.lost ? ' lost' : '') + (sn === selectedSn ? ' active' : '');
+      html += '<div class="'+cls+'" data-sn="'+esc(sn)+'">'+
+        '<div class="sn">'+(i+1)+'. '+esc(sn)+'</div>'+
+        '<div class="sub">'+esc(String(e.model || 'N/A'))+' | '+esc(st)+' | '+esc(dtxt)+' | '+esc(String(e.age_text || '-'))+' | 接近 '+esc(cTxt)+'</div>'+
+        '</div>';
+    }
+  }
+  box.innerHTML = html;
+  var nodes = box.querySelectorAll('.item[data-sn]');
+  for(var j=0;j<nodes.length;j++){
+    nodes[j].addEventListener('click', function(ev){
+      var sn = String(ev.currentTarget.getAttribute('data-sn') || '');
+      if(!sn) return;
+      selectedSn = sn;
+      renderList();
+      renderDetail();
+      if(markers[sn]){
+        markers[sn].openPopup();
+      }
+    });
+  }
+  renderDetail();
+}
+
+function detailRow(k, v){
+  return '<div class="drow"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v==null?'':v)+'</div></div>';
+}
+function renderDetail(){
+  var box = qs('detail');
+  var e = rowsBySn[selectedSn] || null;
+  if(!e){
+    box.innerHTML = '<div class="label">追损信息</div><div style="margin-top:6px;color:#9fb0bf">点击左侧飞机目标查看详情</div>';
+    return;
+  }
+  var html = '<div class="label">追损信息</div>';
+  var ms = motionState[selectedSn] || {};
+  var hd = Number(ms.heading);
+  var cl = Number(ms.closing);
+  html += detailRow('SN', String(e.sn || '-'));
+  html += detailRow('机型', String(e.model || 'N/A'));
+  html += detailRow('状态', e.archived ? '历史归档' : (e.lost ? '离线' : '在线'));
+  html += detailRow('信号', e.rssi==null ? 'N/A' : (String(e.rssi) + 'dBm'));
+  html += detailRow('包数', String(e.pkts==null?0:e.pkts));
+  html += detailRow('纬度', fmt(e.lat, 6, ''));
+  html += detailRow('经度', fmt(e.lon, 6, ''));
+  html += detailRow('高度', fmt(e.alt, 1, 'm'));
+  html += detailRow('速度', fmt(e.spd, 2, 'm/s'));
+  html += detailRow('接近率', (isFinite(cl) ? ((cl>=0?'+':'') + cl.toFixed(2) + 'm/s') : 'N/A'));
+  html += detailRow('航向', (isFinite(hd) ? (hd.toFixed(1) + '°') : String(e.dir || '-')));
+  html += detailRow('垂直速度', fmt(e.vspd, 2, 'm/s'));
+  html += detailRow('方向', String(e.dir || '-'));
+  html += detailRow('数据更新时间', String(e.age_text || fmtDur(e.age)));
+  html += detailRow('最后发现', String(e.last_seen || '-'));
+  html += detailRow('最后数据包', String(e.last_pkt_time || '-'));
+  html += detailRow('扫描类型', String(e.scan_type || '-'));
+  html += detailRow('来源', String(e.sn_src || '-'));
+  html += detailRow('ID类型', String(e.id_type || '-'));
+  box.innerHTML = html;
+}
+
+function radarTick(){
+  drawOverlay();
+  requestAnimationFrame(radarTick);
+}
+
+qs('back').addEventListener('click', function(){ location.href = '/'; });
+qs('recenter').addEventListener('click', function(){
+  if(baseLatLngMap && baseLatLngWgs){
+    map.setView(baseLatLngMap, baseLatLngWgs.zoom || 13);
+  }
+});
+qs('range').addEventListener('input', function(ev){
+  radarRange = Number((ev && ev.target && ev.target.value) || 800);
+  if(!isFinite(radarRange) || radarRange < 200) radarRange = 800;
+  qs('rangev').textContent = String(Math.round(radarRange)) + 'm';
+  updateRangeRings();
+  renderList();
+  drawOverlay();
+});
+qs('show-lost').addEventListener('change', function(ev){
+  showLost = !!(ev && ev.target && ev.target.checked);
+  renderMapTargets();
+  renderList();
+  drawOverlay();
+});
+qs('show-history').addEventListener('change', function(ev){
+  showHistory = !!(ev && ev.target && ev.target.checked);
+  renderMapTargets();
+  renderList();
+  drawOverlay();
+});
+
+qs('rangev').textContent = '800m';
+initMap();
+resizeOverlay();
+connect();
+radarTick();
 </script>
 </body></html>"""
 
@@ -5817,6 +6826,13 @@ def http_server_thread() -> None:
                 self.wfile.write(body)
             elif path in ("/hardware-assistant", "/hardware-assistant.html"):
                 body = _HW_PAGE_HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path in ("/radar", "/radar.html"):
+                body = _RADAR_PAGE_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -6186,6 +7202,49 @@ def http_server_thread() -> None:
                         "base_lat": WEB_CFG.get("base_lat"),
                         "base_lon": WEB_CFG.get("base_lon"),
                         "base_zoom": WEB_CFG.get("base_zoom"),
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/web/basic/save":
+                body = self._read_json_body()
+                if not APP_CONFIG_PATH:
+                    self._send_json({"ok": False, "error": "config path missing"}, 500)
+                    return
+                iface_raw = body.get("iface")
+                iface = None if iface_raw in (None, "") else str(iface_raw).strip()
+                if iface:
+                    safe_iface = _hw_safe_iface(iface)
+                    if not safe_iface:
+                        self._send_json({"ok": False, "error": "invalid iface"}, 400)
+                        return
+                    iface = safe_iface
+                scan_wifi_fast = _to_bool(body.get("scan_wifi_fast"), False)
+                try:
+                    cfg = load_app_config(APP_CONFIG_PATH)
+                    basic_cfg = cfg.get("basic")
+                    if not isinstance(basic_cfg, dict):
+                        basic_cfg = {}
+                    basic_cfg["iface"] = iface
+                    basic_cfg["scan_wifi_fast"] = bool(scan_wifi_fast)
+                    cfg["basic"] = basic_cfg
+                    ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
+                    if not ok:
+                        self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
+                        return
+                    cfg_loaded = load_app_config(APP_CONFIG_PATH)
+                    r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                    if iface:
+                        _sniff_recover_iface(iface, "web apply default iface", force=True)
+                    basic_now = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+                    if not isinstance(basic_now, dict):
+                        basic_now = {}
+                    self._send_json({
+                        "ok": True,
+                        "saved_to": APP_CONFIG_PATH,
+                        "reloaded": bool(r_ok),
+                        "reload_msg": r_msg,
+                        "iface_selected": (None if basic_now.get("iface") in (None, "") else str(basic_now.get("iface"))),
+                        "scan_wifi_fast": bool(basic_now.get("scan_wifi_fast")),
                     }, 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
@@ -6863,7 +7922,7 @@ def main() -> None:
 
         def note_recover_failure(reason: str, allow_restart: bool = True) -> None:
             nonlocal recover_fail_count
-            if not allow_restart:
+            if (not allow_restart) or (not _cfg_auto_self_heal()):
                 recover_fail_count = 0
                 return
             recover_fail_count += 1
@@ -6879,8 +7938,9 @@ def main() -> None:
             nonlocal recover_fail_count
             recover_fail_count = 0
         while True:
+            prefer_iface = _cfg_preferred_iface()
             if not iface_cur:
-                iface_cur = _sniff_pick_iface()
+                iface_cur = _sniff_pick_iface(prefer=prefer_iface)
                 if iface_cur:
                     with sniff_health_lock:
                         sniff_iface_name = iface_cur
@@ -6903,7 +7963,7 @@ def main() -> None:
                             run_cmd(f"iw dev {iface_cur} set channel {current_channel}")
                 else:
                     _sniff_note_error(NO_IFACE_DEGRADE_HINT)
-                    note_recover_failure("no iface available", allow_restart=False)
+                    note_recover_failure("no iface available", allow_restart=True)
                     _log(f"[WARN] sniff no available iface, retry in {retry_delay:.0f}s")
                     time.sleep(retry_delay)
                     continue
@@ -6918,7 +7978,7 @@ def main() -> None:
                 if idle is not None and idle >= SNIFF_STALL_RECOVER_SEC:
                     ok = _sniff_recover_iface(iface_cur, f"idle {idle:.0f}s without management frame")
                     if not ok:
-                        new_iface = _sniff_pick_iface(prefer=iface_cur)
+                        new_iface = _sniff_pick_iface(prefer=(prefer_iface or iface_cur))
                         if new_iface and new_iface != iface_cur:
                             _log(f"[WARN] sniff iface switch: {iface_cur} -> {new_iface}")
                             iface_cur = new_iface
@@ -6931,8 +7991,8 @@ def main() -> None:
                 ex_msg = str(ex or "")
                 _sniff_note_error(f"sniff exception#{fail_count}: {ex_msg}")
                 no_dev_err = _sniff_is_no_device_error(ex)
-                note_recover_failure(ex_msg, allow_restart=(not no_dev_err))
-                if (not no_dev_err) and fail_count >= SNIFF_RESTART_AFTER_FAILS:
+                note_recover_failure(ex_msg, allow_restart=True)
+                if _cfg_auto_self_heal() and (not no_dev_err) and fail_count >= SNIFF_RESTART_AFTER_FAILS:
                     _log(f"[WARN] sniff exception count reached {SNIFF_RESTART_AFTER_FAILS}, scheduling self-restart")
                     ok, msg = _schedule_self_restart(list(sys.argv[1:]))
                     if not ok:
@@ -6941,7 +8001,7 @@ def main() -> None:
 
                 if no_dev_err:
                     fail_count = 0
-                    new_iface = _sniff_pick_iface(prefer=iface_cur)
+                    new_iface = _sniff_pick_iface(prefer=(prefer_iface or iface_cur))
                     if new_iface and new_iface != iface_cur:
                         _log(f"[WARN] sniff iface unavailable, switch {iface_cur} -> {new_iface}")
                         iface_cur = new_iface

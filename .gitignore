@@ -4,10 +4,12 @@ __pycache__/
 *.pyo
 .venv/
 venv/
-
+build
 # Runtime config (contains secrets)
 rid_config.json
 rid_config.json.rollback
+*.rollback
+*.rollback.*
 rid_config.local.json
 *.secrets.json
 
@@ -15,11 +17,16 @@ rid_config.local.json
 rid_history_cache.json
 *_history_cache.json
 oui.txt
-
+rid-n/client/config.json
+rid-n/server/config.json
+rid-n/**/data/*.json
+rid-n
 # Local temporary / backup artifacts
+backups/
 *.tmp
 *.broken.*
 run.py.bak_*
+*.bak_*
 _remote_*.sh
 _page_extracted.*
 memory.txt

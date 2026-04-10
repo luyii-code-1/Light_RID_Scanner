@@ -28,6 +28,7 @@ import os
 import queue
 import random
 import re
+import secrets
 import shlex
 import shutil
 import struct
@@ -89,6 +90,9 @@ TUI_REFRESH  = 0.5    # Forced TUI refresh interval (seconds)
 CONFIG_FILE_DEFAULT = "rid_config.json"
 HISTORY_STORE_DEFAULT = "rid_history_cache.json"
 HISTORY_SAVE_INTERVAL = 5.0
+HTTP_JSON_MAX_BYTES = 1024 * 1024
+API_NAME = "Light RID Scanner API"
+API_VERSION = "v1"
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 AP_LIST_MAX_DEFAULT = 80
@@ -131,6 +135,7 @@ APP_CONFIG: dict = {}
 APP_CONFIG_PATH: str | None = None
 APP_CONFIG_PATH_IS_DEFAULT: bool = True
 APP_START_CWD: str = os.getcwd()
+APP_START_WALL: float = time.time()
 WEB_CFG: dict = {
     "dji_lookup_url": DJI_LOOKUP_URL_DEFAULT,
     "allow_restart": True,
@@ -143,6 +148,8 @@ WEB_CFG: dict = {
     "base_lat": None,
     "base_lon": None,
     "base_zoom": 13,
+    "heading_ref_deg": 0.0,
+    "map_auto_center_idle_sec": 20,
 }
 AP_CFG: dict = {
     "list_max": AP_LIST_MAX_DEFAULT,
@@ -155,6 +162,11 @@ AUTH_CFG: dict = {
     "password_sha256": "",
     "realm": "Light RID Scanner",
 }
+AUTH_SESSION_COOKIE = "rid_auth"
+AUTH_SESSION_TTL_SEC = 12 * 3600
+auth_session_lock = Lock()
+auth_sessions: dict[str, float] = {}
+auth_session_secret = secrets.token_hex(16)
 NOTIFY_CFG: dict = {
     "enabled": False,
     "only_online": True,
@@ -345,7 +357,7 @@ def _history_disk_items_locked() -> list[dict]:
             "sn": sn,
             "src_mac": e.get("src_mac"),
             "id_type": e.get("id_type"),
-            "model": e.get("model"),
+            "model": _resolve_model_name(sn, e.get("scan_type"), e.get("model")),
             "last_ch": e.get("last_ch"),
             "ch_assumed": bool(e.get("ch_assumed")),
             "lat": e.get("lat"),
@@ -390,6 +402,7 @@ def load_history_store(path: str | None) -> None:
             _log(f"[WARN] history cache format invalid: {path}")
             return
         loaded = 0
+        repaired_model = 0
         with state_lock:
             for raw in items:
                 if not isinstance(raw, dict):
@@ -403,6 +416,11 @@ def load_history_store(path: str | None) -> None:
                     if k in raw:
                         h[k] = raw.get(k)
                 h["scan_type"] = _scan_type_key(h.get("scan_type"))
+                old_model = str(h.get("model") or "").strip()
+                new_model = _resolve_model_name(sn, h.get("scan_type"), h.get("model"))
+                if new_model != (old_model if old_model else "N/A"):
+                    h["model"] = new_model
+                    repaired_model += 1
                 h["raw_packets"] = list(h.get("raw_packets") or [])[-3:]
                 h["track"] = _sanitize_track(h.get("track") or [])
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
@@ -414,6 +432,9 @@ def load_history_store(path: str | None) -> None:
             history_persist_dirty = False
             history_persist_last_save_wall = time.time()
         _log(f"[INFO] history cache loaded: {path} ({loaded} items)")
+        if repaired_model:
+            _history_mark_dirty()
+            _log(f"[INFO] history model repaired from SN map: {repaired_model}")
     except Exception as e:
         _log(f"[WARN] history cache load failed: {e}")
 
@@ -570,6 +591,7 @@ def _history_apply_raw_locked(raw: dict) -> tuple[bool, bool]:
         else:
             h[k] = raw.get(k)
     h["scan_type"] = _scan_type_key(h.get("scan_type"))
+    h["model"] = _resolve_model_name(sn, h.get("scan_type"), h.get("model"))
     h["track"] = _sanitize_track(h.get("track") or [])
     if h.get("track") and h.get("track_updated_wall_ts") is None:
         try:
@@ -683,6 +705,8 @@ def default_app_config() -> dict:
             "base_lat": None,
             "base_lon": None,
             "base_zoom": 13,
+            "heading_ref_deg": 0.0,
+            "map_auto_center_idle_sec": 20,
         },
         "ap": {
             "list_max": AP_LIST_MAX_DEFAULT,
@@ -944,7 +968,20 @@ def _normalize_web_cfg(cfg: dict | None) -> dict:
         base_zoom = int(base.get("base_zoom") if base.get("base_zoom") is not None else 13)
     except Exception:
         base_zoom = 13
-    base["base_zoom"] = max(3, min(19, base_zoom))
+    base["base_zoom"] = max(3, min(30, base_zoom))
+    try:
+        heading_ref = float(base.get("heading_ref_deg") if base.get("heading_ref_deg") is not None else 0.0)
+    except Exception:
+        heading_ref = 0.0
+    heading_ref = heading_ref % 360.0
+    if heading_ref < 0:
+        heading_ref += 360.0
+    base["heading_ref_deg"] = round(heading_ref, 2)
+    try:
+        idle_sec = int(base.get("map_auto_center_idle_sec") if base.get("map_auto_center_idle_sec") is not None else 20)
+    except Exception:
+        idle_sec = 20
+    base["map_auto_center_idle_sec"] = max(5, min(600, idle_sec))
     return base
 
 def _normalize_ap_cfg(cfg: dict | None) -> dict:
@@ -969,16 +1006,26 @@ def _sha256_hex(text: str) -> str:
 
 def _normalize_auth_cfg(cfg: dict | None) -> dict:
     base = dict(AUTH_CFG)
+    plain_user = ""
+    plain_pass = ""
     if isinstance(cfg, dict):
         auth = cfg.get("auth")
         if isinstance(auth, dict):
             for k in base.keys():
                 if k in auth:
                     base[k] = auth.get(k)
+            plain_user = str(auth.get("username") or "").strip()
+            plain_pass = str(auth.get("password") or "")
     base["enabled"] = bool(base.get("enabled"))
     base["realm"] = str(base.get("realm") or "Light RID Scanner").strip() or "Light RID Scanner"
     u = str(base.get("username_sha256") or "").strip().lower()
     p = str(base.get("password_sha256") or "").strip().lower()
+    if (not u) and plain_user:
+        u = _sha256_hex(plain_user)
+        _log("[WARN] auth.username detected in plain text; converted to SHA-256 in memory")
+    if (not p) and plain_pass:
+        p = _sha256_hex(plain_pass)
+        _log("[WARN] auth.password detected in plain text; converted to SHA-256 in memory")
     if not re.fullmatch(r"[0-9a-f]{64}", u or ""):
         u = ""
     if not re.fullmatch(r"[0-9a-f]{64}", p or ""):
@@ -1490,6 +1537,48 @@ def _model_from_sn(sn: str) -> str:
             return model
     return "N/A"
 
+def _resolve_model_name(sn: str, scan_type: str | None = None, current_model: str | None = None) -> str:
+    if _scan_type_key(scan_type) == "phone":
+        return "WiFi快传"
+    mapped = _model_from_sn(sn)
+    if mapped != "N/A":
+        return mapped
+    cur = str(current_model or "").strip()
+    return cur if (cur and cur.upper() != "N/A") else "N/A"
+
+def _refresh_models_locked(*, only_na: bool = False) -> tuple[int, int]:
+    """Refresh model names from SN mapping for both history/state tables.
+    Must be called with `state_lock` held.
+    Returns (history_changed, state_changed).
+    """
+    history_changed = 0
+    state_changed = 0
+    for sn, h in history_table.items():
+        if not isinstance(h, dict):
+            continue
+        old = str(h.get("model") or "").strip()
+        if only_na and old and old.upper() != "N/A":
+            continue
+        sn_key = str(h.get("sn") or sn or "")
+        new = _resolve_model_name(sn_key, h.get("scan_type"), old)
+        old_norm = old if old else "N/A"
+        if new != old_norm:
+            h["model"] = new
+            history_changed += 1
+    for sn, e in state_table.items():
+        if not isinstance(e, dict):
+            continue
+        old = str(e.get("model") or "").strip()
+        if only_na and old and old.upper() != "N/A":
+            continue
+        sn_key = str(e.get("sn") or sn or "")
+        new = _resolve_model_name(sn_key, e.get("scan_type"), old)
+        old_norm = old if old else "N/A"
+        if new != old_norm:
+            e["model"] = new
+            state_changed += 1
+    return history_changed, state_changed
+
 def load_model_map(path: str) -> None:
     global MODEL_MAP
     try:
@@ -1498,6 +1587,12 @@ def load_model_map(path: str) -> None:
         if isinstance(obj, dict):
             MODEL_MAP = {str(k): str(v) for k, v in obj.items()}
             _log(f"[INFO] model map loaded: {path} ({len(MODEL_MAP)} entries)")
+            with state_lock:
+                h_changed, s_changed = _refresh_models_locked(only_na=False)
+                if h_changed:
+                    _history_mark_dirty()
+            if h_changed or s_changed:
+                _log(f"[INFO] model remap applied: history={h_changed}, live={s_changed}")
         else:
             _log(f"[WARN] model map format invalid: {path}")
     except FileNotFoundError:
@@ -2217,7 +2312,7 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h["sn"] = sn
     h["src_mac"] = e.get("src_mac")
     h["id_type"] = e.get("id_type")
-    h["model"] = e.get("model")
+    h["model"] = _resolve_model_name(sn, e.get("scan_type"), e.get("model"))
     h["last_ch"] = e.get("last_ch")
     h["ch_assumed"] = e.get("ch_assumed")
     h["lat"] = e.get("lat")
@@ -2284,7 +2379,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         sn, it = mac_key, "unknown"
 
     scan_type_key = _scan_type_key(scan_type)
-    model = ("WiFi快传" if scan_type_key == "phone" else _model_from_sn(sn))
+    model = _resolve_model_name(sn, scan_type_key, None)
     now   = time.monotonic()
     now_wall = time.time()
 
@@ -2344,7 +2439,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             e["rx_avg"] = 0.3*iv + 0.7*(e["rx_avg"] or iv)
         e["last_pkt_ts"] = now
         e["id_type"] = it or e.get("id_type")
-        e["model"]   = model
+        e["model"]   = _resolve_model_name(sn, scan_type_key, e.get("model"))
         e["scan_type"] = scan_type_key
         if ssid is not None:
             e["ssid"] = str(ssid)
@@ -2609,6 +2704,7 @@ def _state_snapshot() -> dict:
             scan_type_key = _scan_type_key(cur.get("scan_type", hist.get("scan_type", "rid")))
             if scan_type_key != "phone" and (len(sn) != 20 or (not sn.isalnum())):
                 continue
+            model_name = _resolve_model_name(sn, scan_type_key, cur.get("model", hist.get("model")))
             if cur:
                 last_seen_ts = cur.get("last_seen_ts")
                 if last_seen_ts is None:
@@ -2658,7 +2754,7 @@ def _state_snapshot() -> dict:
                 "sn": sn,
                 "sn_src": sn_src,
                 "scan_type": scan_type,
-                "model": cur.get("model", hist.get("model","N/A")),
+                "model": model_name,
                 "lost": lost,
                 "archived": sn not in live_by_sn,
                 "mac": cur.get("src_mac", hist.get("src_mac","")),
@@ -2720,6 +2816,8 @@ def _state_snapshot() -> dict:
             "base_lat": WEB_CFG.get("base_lat"),
             "base_lon": WEB_CFG.get("base_lon"),
             "base_zoom": WEB_CFG.get("base_zoom"),
+            "heading_ref_deg": WEB_CFG.get("heading_ref_deg"),
+            "map_auto_center_idle_sec": WEB_CFG.get("map_auto_center_idle_sec"),
             "config_path": APP_CONFIG_PATH or "",
             "iface_selected": (None if basic_cfg.get("iface") in (None, "") else str(basic_cfg.get("iface"))),
             "scan_wifi_fast": bool(basic_cfg.get("scan_wifi_fast")),
@@ -2733,6 +2831,44 @@ def _state_snapshot() -> dict:
             "sniff_last_err_at": sniff_meta.get("last_err_at"),
         },
     }
+
+def _api_iso_now(ts: float | None = None) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts if ts is not None else time.time()))
+    except Exception:
+        return ""
+
+def _api_meta() -> dict:
+    configured = bool(AUTH_CFG.get("username_sha256")) and bool(AUTH_CFG.get("password_sha256"))
+    return {
+        "name": API_NAME,
+        "version": API_VERSION,
+        "time": _api_iso_now(),
+        "auth": {
+            "type": "http_basic",
+            "enabled": bool(_auth_enabled()),
+            "configured": bool(configured),
+            "realm": str(AUTH_CFG.get("realm") or "Light RID Scanner"),
+        },
+    }
+
+def _api_endpoint_index() -> list[dict]:
+    return [
+        {"method": "GET", "path": "/api", "desc": "API index"},
+        {"method": "GET", "path": "/api/health", "desc": "Service health"},
+        {"method": "GET", "path": "/api/v1/snapshot", "desc": "Full runtime snapshot"},
+        {"method": "GET", "path": "/api/v1/auth/status", "desc": "Auth status"},
+        {"method": "POST", "path": "/api/v1/auth/logout", "desc": "Clear auth session"},
+        {"method": "GET", "path": "/api/v1/drones", "desc": "Drone list"},
+        {"method": "GET", "path": "/api/v1/drones/{sn}", "desc": "Drone detail"},
+        {"method": "GET", "path": "/api/v1/tracks/{sn}", "desc": "Track by SN"},
+        {"method": "GET", "path": "/api/v1/aps", "desc": "Realtime AP list"},
+        {"method": "GET", "path": "/api/v1/logs?type=event|scan|ap&limit=200", "desc": "Logs"},
+        {"method": "POST", "path": "/api/v1/history/clear", "desc": "Clear history cache"},
+        {"method": "POST", "path": "/api/v1/history/delete", "desc": "Delete one history item"},
+        {"method": "POST", "path": "/api/v1/tracks/clear", "desc": "Clear tracks"},
+        {"method": "POST", "path": "/api/v1/config/reload", "desc": "Reload config file"},
+    ]
 
 def _auth_enabled() -> bool:
     return bool(AUTH_CFG.get("enabled"))
@@ -2765,6 +2901,60 @@ def _auth_check_basic_header(header_value: str | None) -> bool:
         return False
     user, pwd = text.split(":", 1)
     return _auth_check_userpass(user, pwd)
+
+def _auth_cookie_parse(cookie_header: str | None, key: str) -> str:
+    raw = str(cookie_header or "")
+    if not raw:
+        return ""
+    for part in raw.split(";"):
+        p = str(part or "").strip()
+        if not p or "=" not in p:
+            continue
+        k, v = p.split("=", 1)
+        if k.strip() == key:
+            return v.strip()
+    return ""
+
+def _auth_cleanup_sessions(now_wall: float | None = None) -> None:
+    now_wall = float(now_wall or time.time())
+    with auth_session_lock:
+        stale = [tok for tok, exp in auth_sessions.items() if float(exp or 0.0) <= now_wall]
+        for tok in stale:
+            auth_sessions.pop(tok, None)
+
+def _auth_issue_session() -> str:
+    now_wall = time.time()
+    tok_src = f"{now_wall}:{random.random()}:{auth_session_secret}:{os.getpid()}"
+    token = hashlib.sha256(tok_src.encode("utf-8", errors="ignore")).hexdigest().lower()
+    exp = now_wall + float(AUTH_SESSION_TTL_SEC)
+    with auth_session_lock:
+        auth_sessions[token] = exp
+        if len(auth_sessions) > 4096:
+            stale = [tok for tok, ts in auth_sessions.items() if float(ts or 0.0) <= now_wall]
+            for tok in stale:
+                auth_sessions.pop(tok, None)
+            if len(auth_sessions) > 4096:
+                # keep most recently expiring sessions
+                keep = sorted(auth_sessions.items(), key=lambda kv: float(kv[1]), reverse=True)[:2048]
+                auth_sessions.clear()
+                auth_sessions.update({k: v for k, v in keep})
+    return token
+
+def _auth_check_session_cookie(cookie_header: str | None, *, refresh: bool = True) -> bool:
+    if not _auth_enabled():
+        return True
+    token = _auth_cookie_parse(cookie_header, AUTH_SESSION_COOKIE)
+    if not token:
+        return False
+    now_wall = time.time()
+    with auth_session_lock:
+        exp = auth_sessions.get(token)
+        if not exp or float(exp) <= now_wall:
+            auth_sessions.pop(token, None)
+            return False
+        if refresh:
+            auth_sessions[token] = now_wall + float(AUTH_SESSION_TTL_SEC)
+    return True
 
 def _hw_safe_iface(iface: str) -> str | None:
     name = str(iface or "").strip()
@@ -2917,17 +3107,20 @@ def _hw_submit_task(task: dict, timeout_sec: float = 12.0) -> dict:
 _PAGE_HTML = """<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RID Monitor</title>
+<title>Light RID Scanner</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 :root{
-  --font-ui:"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
-  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;
-  --bg:#070b12;--bg2:#0d1117;--border:#1e2a38;--txt:#c5cdd9;
-  --green:#3fb950;--yellow:#d29922;--dim:#6e7681;--blue:#58a6ff;
+  --font-ui:"Rajdhani","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Share Tech Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;
+  --bg:#060b13;--bg2:#0d1522;--border:#20344f;--txt:#d2deee;
+  --green:#43d59b;--yellow:#e3ad38;--dim:#7a8a9d;--blue:#61b7ff;
   --purple:#d2a8ff;--cyan:#79c0ff;--glow:rgba(88,166,255,.12)
 }
 body{background:var(--bg);color:var(--txt);font-family:var(--font-ui);font-size:16px;
@@ -2962,7 +3155,7 @@ header{background:linear-gradient(180deg, rgba(16,23,33,.96), rgba(13,17,23,.96)
        box-shadow:0 8px 24px rgba(0,0,0,.22), inset 0 1px 0 rgba(121,192,255,.06)}
 header .head-stats{display:flex;align-items:center;justify-content:flex-end;
        gap:8px 16px;flex-wrap:wrap;min-width:0}
-header h1{font-size:20px;font-weight:700;color:var(--blue);letter-spacing:.04em}
+header h1{font-size:21px;font-weight:700;color:var(--blue);letter-spacing:.06em;text-transform:uppercase}
 .adv-modal{
   position:fixed;inset:0;z-index:10006;background:rgba(3,8,14,.62);
   display:none;align-items:center;justify-content:center;padding:12px;
@@ -3055,8 +3248,8 @@ header h1{font-size:20px;font-weight:700;color:var(--blue);letter-spacing:.04em}
 
 /* -- Table -- */
 .tbl-wrap{margin:0 12px;min-height:0;overflow:auto;
-          border:1px solid var(--border);border-radius:8px;background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(10,14,20,.98));
-          box-shadow:0 10px 28px rgba(0,0,0,.20), 0 0 0 1px rgba(88,166,255,.03) inset}
+          border:1px solid var(--border);border-radius:12px;background:linear-gradient(180deg, rgba(13,20,32,.98), rgba(10,14,22,.98));
+          box-shadow:0 14px 30px rgba(0,0,0,.24), 0 0 0 1px rgba(97,183,255,.05) inset}
 table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:980px}
 thead tr{background:var(--bg2);position:sticky;top:0;z-index:9}
 thead th{padding:9px 10px;text-align:left;font-size:14px;color:#8b949e;
@@ -3199,7 +3392,7 @@ body.bottom-all-collapsed{
 
 .panel{border:1px solid var(--border);border-radius:8px;overflow:hidden;
        display:flex;flex-direction:column;min-height:0;
-       box-shadow:0 10px 24px rgba(0,0,0,.18), 0 0 0 1px rgba(88,166,255,.02) inset}
+       box-shadow:0 12px 26px rgba(0,0,0,.22), 0 0 0 1px rgba(97,183,255,.04) inset}
 .panel-hdr{background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(12,18,27,.95));padding:8px 14px;font-size:14px;
            color:var(--blue);font-weight:700;border-bottom:1px solid var(--border);
            display:flex;justify-content:space-between;align-items:center}
@@ -3252,11 +3445,12 @@ body.bottom-all-collapsed{
 .panel-hdr label{display:flex;align-items:center;gap:6px;cursor:pointer;
                  color:#8b949e;font-weight:400;font-size:13px}
 .btn-mini{
-  border:1px solid #334556;background:linear-gradient(180deg,#121b27,#0f1721);color:#c5cdd9;
+  border:1px solid #3c5572;background:linear-gradient(180deg,#142033,#111a2b);color:#d2deee;
   padding:5px 9px;border-radius:6px;font:inherit;font-size:13px;cursor:pointer;
-  transition:background .12s,border-color .12s,box-shadow .12s,color .12s;
+  letter-spacing:.03em;
+  transition:background .12s,border-color .12s,box-shadow .12s,color .12s,transform .12s;
 }
-.btn-mini:hover{background:linear-gradient(180deg,#182334,#152131);border-color:#4f6a85;box-shadow:0 0 0 2px rgba(88,166,255,.08)}
+.btn-mini:hover{background:linear-gradient(180deg,#1a2940,#17253b);border-color:#6ea8dc;box-shadow:0 0 0 2px rgba(97,183,255,.14);transform:translateY(-1px)}
 .btn-mini:disabled{opacity:.55;cursor:wait}
 .btn-mini.warn{border-color:#7f3f3f;color:#ffb4b4}
 .btn-mini.warn:hover{background:#2a1717}
@@ -3454,7 +3648,7 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 </style>
 </head><body>
 <header>
-  <h1>&#x2708; RID Monitor</h1>
+  <h1>&#x2708; Light RID Scanner</h1>
   <div class="head-stats">
   <span class="stat">&#x5728;&#x7EBF; <b id="n-live">-</b></span>
   <span class="stat ls">&#x79BB;&#x7EBF; <b id="n-lost">-</b></span>
@@ -3515,6 +3709,7 @@ var latestMapRows = [];
 var latestApsRows = [];
 var latestApsTotal = 0;
 var selectedSnSet = {};
+var selectedMacSet = {};
 var autoTrackSnSet = {};
 var trackCache = {};
 var trackLoading = {};
@@ -3534,9 +3729,9 @@ var sniffBannerPrevState = '';
 var mapCollapsedBeforeFullscreen = null;
 var mapFsUiTimer = null;
 var miniListRenderSig = '';
-var keyCDown = false;
-var keyRDown = false;
-var radarHotkeyArmed = false;
+var mapLastUserInputTs = 0;
+var mapHeadingRefDeg = 0;
+var mapAutoCenterIdleSec = 20;
 
 function qs(id){ return document.getElementById(id); }
 function fmt(v,dec,unit){ return v==null?'N/A':Number(v).toFixed(dec)+unit; }
@@ -3551,6 +3746,34 @@ function intOrDefault(v, defv){
   if(v==null || v==='') return defv;
   var n = parseInt(v, 10);
   return isFinite(n) ? n : defv;
+}
+function normDeg(v){
+  var d = Number(v);
+  if(!isFinite(d)) return 0;
+  d = d % 360;
+  if(d < 0) d += 360;
+  return d;
+}
+function headingDeltaDeg(nowDeg, refDeg){
+  var a = normDeg(nowDeg);
+  var b = normDeg(refDeg);
+  var d = a - b;
+  if(d > 180) d -= 360;
+  if(d < -180) d += 360;
+  return d;
+}
+function mapAutoState(){
+  var cd = Number(mapAutoCenterIdleSec);
+  if(!isFinite(cd) || cd < 5) cd = 20;
+  if(!mapLastUserInputTs) return {allow:true, remain:0};
+  var now = Date.now() / 1000;
+  var elapsed = now - Number(mapLastUserInputTs);
+  if(elapsed >= cd) return {allow:true, remain:0};
+  return {allow:false, remain:Math.max(0, cd - elapsed)};
+}
+function markMapUserInteracted(){
+  mapLastUserInputTs = Date.now() / 1000;
+  if(map) map._rid_user_moved = true;
 }
 function cookieGet(name){
   var key = String(name || '').trim();
@@ -3642,7 +3865,7 @@ function baseFromMeta(meta){
   var lat = numOrNull(meta.base_lat);
   var lon = numOrNull(meta.base_lon);
   var zoom = intOrDefault(meta.base_zoom, 13);
-  zoom = Math.max(3, Math.min(19, zoom));
+  zoom = Math.max(3, Math.min(30, zoom));
   var name = String(meta.base_name || '\u57fa\u7ad9').trim() || '\u57fa\u7ad9';
   if(lat==null || lon==null) return {ok:false, name:name, lat:null, lon:null, zoom:zoom};
   if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return {ok:false, name:name, lat:null, lon:null, zoom:zoom};
@@ -3754,7 +3977,7 @@ async function ensureTrackLoaded(sn, force){
     var tr = Array.isArray(data.track) ? data.track : [];
     trackCache[sn] = tr;
     if(isSnSelected(sn) || (prefRealtimeTrack && autoTrackSnSet[sn])){
-      updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+      updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
   }catch(_e){
     if(!trackCache[sn]) trackCache[sn] = [];
@@ -3763,37 +3986,61 @@ async function ensureTrackLoaded(sn, force){
   }
 }
 function syncSelectedFromRows(rows){
-  // Keep historical selections across realtime updates.
-  // Selected items are removed explicitly on user delete/clear actions.
-  void(rows);
+  var arr = Array.isArray(rows) ? rows : [];
+  var nextMac = {};
+  for(var i=0;i<arr.length;i++){
+    var e = arr[i] || {};
+    var sn = String(e.sn || '');
+    var mac = String(e.mac || e.src_mac || '').toLowerCase();
+    if(!sn) continue;
+    if(selectedSnSet[sn]){
+      if(mac) nextMac[mac] = true;
+      continue;
+    }
+    if(mac && selectedMacSet[mac]){
+      selectedSnSet[sn] = true;
+      nextMac[mac] = true;
+    }
+  }
+  selectedMacSet = nextMac;
 }
 function setSnSelected(sn, on){
   sn = String(sn || '');
   if(!sn) return;
-  if(on) selectedSnSet[sn] = true;
-  else delete selectedSnSet[sn];
+  var e = latestDroneMap[sn] || null;
+  var mac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
+  if(on){
+    selectedSnSet[sn] = true;
+    if(mac) selectedMacSet[mac] = true;
+  }else{
+    delete selectedSnSet[sn];
+    if(mac) delete selectedMacSet[mac];
+  }
   if(on) ensureTrackLoaded(sn, false);
   syncTableSelectionUi();
   renderMapMiniList(latestDroneRows);
   refreshTrackMgrOptions(latestDroneRows);
-  updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
 function setAllVisibleSelected(on){
   var rows = Array.isArray(latestDroneRows) ? latestDroneRows : [];
   rows.forEach(function(e){
     var sn = String((e && e.sn) || '');
+    var mac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
     if(!sn) return;
     if(on){
       selectedSnSet[sn] = true;
+      if(mac) selectedMacSet[mac] = true;
       ensureTrackLoaded(sn, false);
     }else{
       delete selectedSnSet[sn];
+      if(mac) delete selectedMacSet[mac];
     }
   });
   syncTableSelectionUi();
   renderMapMiniList(latestDroneRows);
   refreshTrackMgrOptions(latestDroneRows);
-  updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
 function esc(v){
   return String(v==null?'':v)
@@ -3812,28 +4059,6 @@ function isTypingTarget(el){
   var tag = String(t.tagName || '').toLowerCase();
   if(tag === 'input' || tag === 'textarea' || tag === 'select') return true;
   return !!t.isContentEditable;
-}
-function bindRadarHotkey(){
-  if(window.__ridRadarHotkeyBound) return;
-  window.__ridRadarHotkeyBound = true;
-  document.addEventListener('keydown', function(ev){
-    if(!ev) return;
-    if(isTypingTarget(ev.target)) return;
-    var k = String(ev.key || '').toLowerCase();
-    if(k === 'c') keyCDown = true;
-    if(k === 'r') keyRDown = true;
-    if(keyCDown && keyRDown && !radarHotkeyArmed){
-      radarHotkeyArmed = true;
-      openRadarView();
-    }
-  });
-  document.addEventListener('keyup', function(ev){
-    if(!ev) return;
-    var k = String(ev.key || '').toLowerCase();
-    if(k === 'c') keyCDown = false;
-    if(k === 'r') keyRDown = false;
-    if(!keyCDown || !keyRDown) radarHotkeyArmed = false;
-  });
 }
 function openAdvModal(){
   var m = qs('adv-modal');
@@ -4012,7 +4237,7 @@ async function requestWebNotifyPermission(){
     updateNotifyButton();
     if(webNotifyEnabled){
       try{
-        new Notification('RID Monitor 通知已启用', {body:'将推送飞机上下线事件'});
+        new Notification('Light RID Scanner 通知已启用', {body:'将推送飞机上下线事件'});
       }catch(_e){}
       showBanner('网页通知权限已授权', 'ok', 2400);
     } else if(perm === 'denied'){
@@ -4631,14 +4856,6 @@ function buildExtraUi(){
     hwBtn.textContent = '\u786c\u4ef6\u52a9\u624b';
     clearBtn.parentNode.insertBefore(hwBtn, clearBtn);
   }
-  if(clearBtn && !qs('btn-radar-view')){
-    var radarBtn = document.createElement('button');
-    radarBtn.className = 'btn-mini';
-    radarBtn.id = 'btn-radar-view';
-    radarBtn.type = 'button';
-    radarBtn.textContent = '\u7403\u5f62\u96f7\u8fbe';
-    clearBtn.parentNode.insertBefore(radarBtn, clearBtn);
-  }
   if(clearBtn && !qs('btn-adv-open')){
     var advBtn = document.createElement('button');
     advBtn.className = 'btn-mini';
@@ -4697,8 +4914,16 @@ function buildExtraUi(){
       '    </div>'+
       '    <div class="adv-row">'+
       '      <label for="base-zoom">\u57fa\u7ad9\u7f29\u653e</label>'+
-      '      <input id="base-zoom" class="adv-input" type="number" min="3" max="19" step="1" placeholder="13">'+
+      '      <input id="base-zoom" class="adv-input" type="number" min="3" max="30" step="1" placeholder="13">'+
       '      <button class="btn-mini" id="btn-base-save" type="button">\u4fdd\u5b58\u57fa\u7ad9</button>'+
+      '    </div>'+
+      '    <div class="adv-row">'+
+      '      <label for="heading-ref">\u53c2\u8003\u822a\u5411(\u00b0)</label>'+
+      '      <input id="heading-ref" class="adv-input" type="number" min="0" max="359.99" step="0.1" placeholder="0">'+
+      '    </div>'+
+      '    <div class="adv-row">'+
+      '      <label for="map-idle-sec">\u81ea\u52a8\u56de\u4e2d\u51b7\u5374(s)</label>'+
+      '      <input id="map-idle-sec" class="adv-input" type="number" min="5" max="600" step="1" placeholder="20">'+
       '    </div>'+
       '    <div class="adv-note" id="base-status">-</div>'+
       '    <div class="adv-note" id="iface-status">-</div>'+
@@ -4876,7 +5101,6 @@ function buildExtraUi(){
   if(qs('btn-freeze')) qs('btn-freeze').addEventListener('click', toggleFreeze);
   if(qs('btn-web-notify')) qs('btn-web-notify').addEventListener('click', requestWebNotifyPermission);
   if(qs('btn-hw-assistant')) qs('btn-hw-assistant').addEventListener('click', openHardwareAssistant);
-  if(qs('btn-radar-view')) qs('btn-radar-view').addEventListener('click', openRadarView);
   if(qs('btn-adv-open')) qs('btn-adv-open').addEventListener('click', openAdvModal);
   if(qs('btn-adv-close')) qs('btn-adv-close').addEventListener('click', closeAdvModal);
   if(qs('btn-restart-once')) qs('btn-restart-once').addEventListener('click', function(){ restartProgram(false); });
@@ -4907,18 +5131,20 @@ function buildExtraUi(){
     saveTrackPrefs();
     refreshAutoTrackSelection(latestDroneRows);
     effectiveTrackSnList().forEach(function(sn){ ensureTrackLoaded(sn, false); });
-    updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
   });
   if(qs('opt-track-2h')) qs('opt-track-2h').addEventListener('change', function(ev){
     prefTrack2hOnly = !!(ev && ev.target && ev.target.checked);
     saveTrackPrefs();
-    updateMap(latestMapRows.length ? latestMapRows : (latestDroneRows || []));
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
   });
   if(qs('restart-args')) qs('restart-args').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-name')) qs('base-name').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-lat')) qs('base-lat').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-lon')) qs('base-lon').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-zoom')) qs('base-zoom').addEventListener('input', function(){ this.dataset.edited='1'; });
+  if(qs('heading-ref')) qs('heading-ref').addEventListener('input', function(){ this.dataset.edited='1'; });
+  if(qs('map-idle-sec')) qs('map-idle-sec').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('btn-base-save')) qs('btn-base-save').addEventListener('click', saveBaseConfig);
   if(qs('sel-all')) qs('sel-all').addEventListener('change', function(ev){ setAllVisibleSelected(!!(ev && ev.target && ev.target.checked)); });
   if(qs('tbody')) qs('tbody').addEventListener('click', function(ev){
@@ -4950,7 +5176,6 @@ function buildExtraUi(){
   loadConfigEditor();
   loadIfaceOptions(false);
   syncTrackPrefsUi();
-  bindRadarHotkey();
   setFreezeState(false);
   updateMapFullscreenButton();
   renderMapMiniList([]);
@@ -4996,15 +5221,28 @@ function applyMeta(meta){
   var baseZoomInput = qs('base-zoom');
   if(baseZoomInput && !baseZoomInput.dataset.edited){
     var bz = intOrDefault(metaState.base_zoom, 13);
-    baseZoomInput.value = String(Math.max(3, Math.min(19, bz)));
+    baseZoomInput.value = String(Math.max(3, Math.min(30, bz)));
   }
+  var headingRefInput = qs('heading-ref');
+  if(headingRefInput && !headingRefInput.dataset.edited){
+    var hr = Number(metaState.heading_ref_deg);
+    if(!isFinite(hr)) hr = 0;
+    headingRefInput.value = String(normDeg(hr).toFixed(1));
+  }
+  var mapIdleInput = qs('map-idle-sec');
+  if(mapIdleInput && !mapIdleInput.dataset.edited){
+    var mi = intOrDefault(metaState.map_auto_center_idle_sec, 20);
+    mapIdleInput.value = String(Math.max(5, Math.min(600, mi)));
+  }
+  mapHeadingRefDeg = normDeg(metaState.heading_ref_deg);
+  mapAutoCenterIdleSec = Math.max(5, Math.min(600, intOrDefault(metaState.map_auto_center_idle_sec, 20)));
   var baseCfg = baseFromMeta(metaState);
   var baseStatus = qs('base-status');
   if(baseStatus){
     if(baseCfg.ok){
-      baseStatus.textContent = '\u57fa\u7ad9: ' + baseCfg.name + ' (' + baseCfg.lat.toFixed(6) + ', ' + baseCfg.lon.toFixed(6) + ') z' + baseCfg.zoom;
+      baseStatus.textContent = '\u57fa\u7ad9: ' + baseCfg.name + ' (' + baseCfg.lat.toFixed(6) + ', ' + baseCfg.lon.toFixed(6) + ') z' + baseCfg.zoom + ' | \u53c2\u8003\u822a\u5411 ' + mapHeadingRefDeg.toFixed(1) + '\u00b0 | \u56de\u4e2d\u51b7\u5374 ' + mapAutoCenterIdleSec + 's';
     } else {
-      baseStatus.textContent = '\u57fa\u7ad9\u672a\u914d\u7f6e';
+      baseStatus.textContent = '\u57fa\u7ad9\u672a\u914d\u7f6e | \u53c2\u8003\u822a\u5411 ' + mapHeadingRefDeg.toFixed(1) + '\u00b0 | \u56de\u4e2d\u51b7\u5374 ' + mapAutoCenterIdleSec + 's';
     }
   }
   var newBaseSig = baseSignature(metaState);
@@ -5100,16 +5338,6 @@ function openHardwareAssistant(){
   }
 }
 
-function openRadarView(){
-  var mobile = false;
-  try { mobile = window.matchMedia('(max-width: 900px)').matches; } catch(_e) {}
-  if(mobile){
-    window.open('/radar', '_blank', 'noopener,noreferrer');
-  } else {
-    window.open('/radar', 'rid_radar_window', 'noopener,noreferrer,width=1260,height=860');
-  }
-}
-
 function openDjiLookup(){
   var url = String(metaState.dji_lookup_url || '');
   if(!url){
@@ -5176,6 +5404,7 @@ async function clearHistory(){
   try{
     var data = await postJson('/api/history/clear', {});
     selectedSnSet = {};
+    selectedMacSet = {};
     trackCache = {};
     showBanner('历史已清空' + (typeof data.cleared==='number' ? ('（'+data.cleared+'架）') : ''), 'ok', 2600);
   }catch(e){
@@ -5198,7 +5427,10 @@ async function deleteHistoryBySelect(){
   if(st) st.textContent = '删除中...';
   try{
     var data = await postJson('/api/history/delete', {sn: sn});
+    var e = latestDroneMap[sn] || null;
+    var mac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
     delete selectedSnSet[sn];
+    if(mac) delete selectedMacSet[mac];
     delete trackCache[sn];
     if(st) st.textContent = data.removed ? ('已删除: ' + sn) : ('未找到: ' + sn);
     showBanner('已删除历史: ' + sn, 'ok', 2400);
@@ -5316,16 +5548,28 @@ async function saveBaseConfig(){
   var latInput = qs('base-lat');
   var lonInput = qs('base-lon');
   var zoomInput = qs('base-zoom');
+  var headingInput = qs('heading-ref');
+  var idleInput = qs('map-idle-sec');
   var name = nameInput ? String(nameInput.value || '').trim() : '';
   var latRaw = latInput ? String(latInput.value || '').trim() : '';
   var lonRaw = lonInput ? String(lonInput.value || '').trim() : '';
   var zoomRaw = zoomInput ? String(zoomInput.value || '').trim() : '';
+  var headingRaw = headingInput ? String(headingInput.value || '').trim() : '';
+  var idleRaw = idleInput ? String(idleInput.value || '').trim() : '';
   if(!name) name = '\u57fa\u7ad9';
 
   var lat = (latRaw === '') ? null : numOrNull(latRaw);
   var lon = (lonRaw === '') ? null : numOrNull(lonRaw);
   var zoom = intOrDefault(zoomRaw, 13);
-  zoom = Math.max(3, Math.min(19, zoom));
+  var headingRef = (headingRaw === '') ? 0 : numOrNull(headingRaw);
+  var idleSec = intOrDefault(idleRaw, 20);
+  zoom = Math.max(3, Math.min(30, zoom));
+  idleSec = Math.max(5, Math.min(600, idleSec));
+  if(headingRef == null || !isFinite(Number(headingRef))){
+    if(st) st.textContent = '\u53c2\u8003\u822a\u5411\u9700\u4e3a\u6570\u5b57';
+    return;
+  }
+  headingRef = normDeg(headingRef);
 
   if((lat === null) !== (lon === null)){
     if(st) st.textContent = '\u57fa\u7ad9\u5750\u6807\u9700\u8981\u540c\u65f6\u586b\u5199\u7ecf\u7eac\u5ea6';
@@ -5347,18 +5591,24 @@ async function saveBaseConfig(){
       base_name: name,
       base_lat: lat,
       base_lon: lon,
-      base_zoom: zoom
+      base_zoom: zoom,
+      heading_ref_deg: headingRef,
+      map_auto_center_idle_sec: idleSec
     });
     metaState = Object.assign({}, metaState, {
       base_name: data.base_name,
       base_lat: data.base_lat,
       base_lon: data.base_lon,
-      base_zoom: data.base_zoom
+      base_zoom: data.base_zoom,
+      heading_ref_deg: data.heading_ref_deg,
+      map_auto_center_idle_sec: data.map_auto_center_idle_sec
     });
     if(nameInput){ delete nameInput.dataset.edited; }
     if(latInput){ delete latInput.dataset.edited; }
     if(lonInput){ delete lonInput.dataset.edited; }
     if(zoomInput){ delete zoomInput.dataset.edited; }
+    if(headingInput){ delete headingInput.dataset.edited; }
+    if(idleInput){ delete idleInput.dataset.edited; }
     applyMeta(metaState);
     applyBaseMarker(true);
     if(st){
@@ -5566,7 +5816,7 @@ function onData(d){
     }
   });
   initMap();
-  updateMap(latestMapRows);
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
 
 loadTrackPrefs();
@@ -5574,7 +5824,8 @@ applyTheme(loadThemePref());
 buildExtraUi();
 connect();
 
-var map = null, markers = {}, pilotMarkers = {}, trackLines = {}, baseMarker = null;
+var map = null, markers = {}, pilotMarkers = {}, trackLines = {}, twsLines = {}, baseMarker = null;
+var motionState = {};
 var COLORS = ['#58a6ff','#3fb950','#d29922','#d2a8ff','#79c0ff','#ff7b72'];
 var TRACK_COLORS = ['#1f9dff','#12b886','#ff8f1f','#ff4d6d','#8b5cf6','#06b6d4','#84cc16','#eab308'];
 var colorIdx = {};
@@ -5625,18 +5876,71 @@ function toMapLatLng(lat, lon){
   return wgs84ToGcj02(lat, lon);
 }
 
+function _deg2rad(d){ return d * Math.PI / 180; }
+function calcDistanceMeters(lat1, lon1, lat2, lon2){
+  var p1 = _deg2rad(lat1), p2 = _deg2rad(lat2);
+  var dLat = p2 - p1;
+  var dLon = _deg2rad(lon2 - lon1);
+  var sa = Math.sin(dLat / 2.0);
+  var sb = Math.sin(dLon / 2.0);
+  var a = sa * sa + Math.cos(p1) * Math.cos(p2) * sb * sb;
+  var c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1.0 - a)));
+  return 6371000.0 * c;
+}
+function calcBearing(lat1, lon1, lat2, lon2){
+  var p1 = _deg2rad(lat1), p2 = _deg2rad(lat2);
+  var dLon = _deg2rad(lon2 - lon1);
+  var y = Math.sin(dLon) * Math.cos(p2);
+  var x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dLon);
+  var b = Math.atan2(y, x) * 180 / Math.PI;
+  if(!isFinite(b)) return null;
+  if(b < 0) b += 360;
+  return b;
+}
+function calcHeadingByLatLon(prevLat, prevLon, curLat, curLon, minMoveMeters){
+  var dist = calcDistanceMeters(prevLat, prevLon, curLat, curLon);
+  var mm = Number(minMoveMeters);
+  if(!isFinite(mm) || mm < 0.1) mm = 2.0;
+  if(!isFinite(dist) || dist < mm){
+    return {ok:false, heading:null, dist:isFinite(dist)?dist:0};
+  }
+  var b = calcBearing(prevLat, prevLon, curLat, curLon);
+  if(!isFinite(Number(b))){
+    return {ok:false, heading:null, dist:dist};
+  }
+  return {ok:true, heading:normDeg(b), dist:dist};
+}
+function destinationPoint(lat, lon, bearingDeg, distMeter){
+  var R = 6371000.0;
+  var br = _deg2rad(bearingDeg);
+  var lat1 = _deg2rad(lat), lon1 = _deg2rad(lon);
+  var ad = distMeter / R;
+  var sinLat1 = Math.sin(lat1), cosLat1 = Math.cos(lat1);
+  var sinAd = Math.sin(ad), cosAd = Math.cos(ad);
+  var lat2 = Math.asin(sinLat1 * cosAd + cosLat1 * sinAd * Math.cos(br));
+  var lon2 = lon1 + Math.atan2(Math.sin(br) * sinAd * cosLat1, cosAd - sinLat1 * Math.sin(lat2));
+  return {lat:lat2 * 180/Math.PI, lon:lon2 * 180/Math.PI};
+}
+
 function initMap(){
   if(map) return;
-  map = L.map('map', {zoomControl:true, attributionControl:true, maxZoom:18});
+  map = L.map('map', {zoomControl:true, attributionControl:true, maxZoom:30});
   L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
     subdomains:['1','2','3','4'],
-    maxZoom:18,
+    maxZoom:30,
     maxNativeZoom:18,
     attribution:'&copy; \u9ad8\u5fb7\u5730\u56fe'
   }).addTo(map);
   var b = baseFromMeta(metaState);
   if(b.ok) map.setView([b.lat, b.lon], b.zoom);
   else map.setView([30, 114], 5);
+  map._rid_user_moved = false;
+  var mapEl = map.getContainer ? map.getContainer() : null;
+  if(mapEl){
+    mapEl.addEventListener('wheel', markMapUserInteracted, {passive:true});
+    mapEl.addEventListener('pointerdown', markMapUserInteracted, {passive:true});
+    mapEl.addEventListener('touchstart', markMapUserInteracted, {passive:true});
+  }
   applyBaseMarker(false);
   setTimeout(function(){ if(map) map.invalidateSize(false); }, 0);
 }
@@ -5683,14 +5987,26 @@ function trackColorForSn(sn){
   return TRACK_COLORS[h % TRACK_COLORS.length];
 }
 
-function droneIcon(color, lost){
-  var op = lost ? 0.4 : 1.0;
-  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">'
-    +'<circle cx="14" cy="14" r="10" fill="'+color+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.5"/>'
-    +'<text x="14" y="19" text-anchor="middle" font-size="13" fill="#fff" font-family="monospace" font-weight="bold">&#x2708;</text>'
+function droneIcon(color, lost, headingDeg, selected, indexNo){
+  var op = lost ? 0.34 : 1.0;
+  var rot = Number(headingDeg);
+  if(!isFinite(rot)) rot = 0;
+  var idx = Number(indexNo);
+  if(!isFinite(idx) || idx <= 0) idx = 0;
+  var idxTxt = idx > 99 ? '99+' : String(Math.round(idx));
+  var glow = selected ? '0 0 8px rgba(255,255,255,.48)' : 'none';
+  var lineOp = selected ? 0.96 : 0.68;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 34 34">'
+    +'<circle cx="17" cy="17" r="12.5" fill="'+color+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.5"/>'
+    +'<text x="17" y="19.7" text-anchor="middle" font-size="10.5" fill="#04131d" font-family="ui-monospace,Consolas" font-weight="700">'+esc(idxTxt)+'</text>'
+    +'<line x1="17" y1="17" x2="17" y2="4.5" stroke="#fff" stroke-opacity="'+lineOp+'" stroke-width="'+(selected?2.3:1.6)+'"/>'
+    +'<g transform="translate(17,17) rotate('+rot.toFixed(1)+') translate(-17,-17)" style="filter:'+glow+'">'
+    +'<polygon points="17,6.4 20.4,16.4 17,14.8 13.6,16.4" fill="#ffffff" fill-opacity="'+(lost?0.68:0.98)+'"/>'
+    +'<rect x="16.2" y="14.2" width="1.6" height="8.8" fill="#ffffff" fill-opacity="'+(lost?0.62:0.94)+'"/>'
+    +'</g>'
     +'</svg>';
   return L.divIcon({
-    html: svg, className:'', iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14]
+    html: svg, className:'', iconSize:[34,34], iconAnchor:[17,17], popupAnchor:[0,-17]
   });
 }
 
@@ -5709,37 +6025,34 @@ function pilotIcon(color, lost){
 function updateMap(drones){
   if(!map) return;
   applyBaseMarker(false);
-  var liveAir = drones.filter(function(e){ return e.lat!=null && e.lon!=null; });
+  var autoState = mapAutoState();
+  var rows = Array.isArray(drones) ? drones : [];
   var selected = selectedSnList();
-  var trackSn = effectiveTrackSnList();
   var selectedSet = {};
   selected.forEach(function(sn){ selectedSet[sn] = true; });
-  var livePilot = drones.filter(function(e){
+  var trackSn = effectiveTrackSnList();
+  var liveAir = rows.filter(function(e){
     var sn = String((e && e.sn) || '');
-    return !!selectedSet[sn] && e.pilot_lat!=null && e.pilot_lon!=null;
+    if(!sn) return false;
+    if(!selectedSet[sn]) return false;
+    if(e.lat==null || e.lon==null) return false;
+    return true;
   });
-  if(!liveAir.length){
-    Object.keys(markers).forEach(function(sn){ map.removeLayer(markers[sn]); delete markers[sn]; });
-    Object.keys(pilotMarkers).forEach(function(sn){ map.removeLayer(pilotMarkers[sn]); delete pilotMarkers[sn]; });
-    Object.keys(trackLines).forEach(function(sn){ map.removeLayer(trackLines[sn]); delete trackLines[sn]; });
-    var b = baseFromMeta(metaState);
-    if(b.ok){
-      if(!map._rid_base_fitted){
-        map.setView([b.lat, b.lon], b.zoom);
-        map._rid_base_fitted = true;
-      }
-      document.getElementById('map-hint').textContent='\u65e0\u98de\u673a\u5750\u6807\uff0c\u5df2\u5b9a\u4f4d\u5230\u57fa\u7ad9';
-    } else {
-      document.getElementById('map-hint').textContent='\u65e0\u5750\u6807\u6570\u636e';
-    }
-    return;
+  var livePilot = rows.filter(function(e){
+    var sn = String((e && e.sn) || '');
+    if(!selectedSet[sn]) return false;
+    if(e.pilot_lat==null || e.pilot_lon==null) return false;
+    return true;
+  });
+  var mapHintTxt =
+    '\u663e\u793a\u98de\u673a:' + liveAir.length + '  \u5df2\u9009:' + selected.length + '  \u8f68\u8ff9:' + trackSn.length + '  \u98de\u624b:' + livePilot.length;
+  if(!autoState.allow){
+    mapHintTxt += '  |  \u81ea\u52a8\u56de\u4e2d\u51b7\u5374 ' + Math.ceil(autoState.remain) + 's';
   }
-  map._rid_base_fitted = false;
-  document.getElementById('map-hint').textContent =
-    '\u98de\u673a:' + liveAir.length + '  \u5df2\u9009:' + selected.length + '  \u8f68\u8ff9:' + trackSn.length + '  \u98de\u624b:' + livePilot.length;
+  document.getElementById('map-hint').textContent = mapHintTxt;
 
   // color assignment by SN
-  drones.forEach(function(e){
+  rows.forEach(function(e){
     if(!colorIdx[e.sn]){
       var n = Object.keys(colorIdx).length;
       colorIdx[e.sn] = COLORS[n % COLORS.length];
@@ -5747,24 +6060,86 @@ function updateMap(drones){
   });
 
   var activeAir = {};
-  liveAir.forEach(function(e){
-    activeAir[e.sn] = true;
-    var col = colorIdx[e.sn];
-    var popup = '<b>'+e.sn+'</b><br>'+e.model+'<br>'
+  var activeTws = {};
+  var nowSec = Date.now() / 1000;
+  var headingMinMove = 2.0;
+  var headingMaxGapSec = 90.0;
+  liveAir.forEach(function(e, idx){
+    var sn = String(e.sn || '');
+    if(!sn) return;
+    activeAir[sn] = true;
+    var col = colorIdx[sn];
+    var isSel = !!selectedSet[sn];
+    var latRaw = Number(e.lat), lonRaw = Number(e.lon);
+    var prev = motionState[sn] || {};
+    var heading = null;
+    var headingDelta = null;
+    if(isFinite(Number(prev.lat)) && isFinite(Number(prev.lon))){
+      var dt = nowSec - Number(prev.ts || 0);
+      if(isFinite(dt) && dt >= 0 && dt <= headingMaxGapSec){
+        var hs = calcHeadingByLatLon(Number(prev.lat), Number(prev.lon), latRaw, lonRaw, headingMinMove);
+        if(hs.ok) heading = hs.heading;
+      }
+    }
+    if(heading == null && isFinite(Number(prev.heading))){
+      heading = Number(prev.heading);
+    }
+    if(heading != null && isFinite(Number(heading))){
+      heading = normDeg(heading);
+      headingDelta = headingDeltaDeg(heading, mapHeadingRefDeg);
+    }else{
+      heading = null;
+      headingDelta = null;
+    }
+    motionState[sn] = {lat:latRaw, lon:lonRaw, heading:heading, ts:nowSec};
+
+    var popup = '<b>'+sn+'</b><br>'+e.model+'<br>'
       +(e.lat!=null?e.lat.toFixed(5):'-')+', '+(e.lon!=null?e.lon.toFixed(5):'-')
       +'<br>\u9ad8\u5ea6: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
       +'<br>\u901f\u5ea6: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
       +'<br>\u4fe1\u53f7: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
+      +'<br>\u822a\u5411: '+(isFinite(Number(heading))?Number(heading).toFixed(1)+'°':'N/A')
+      +'<br>\u822a\u5411\u5dee: '+(isFinite(Number(headingDelta))?((headingDelta>=0?'+':'')+Number(headingDelta).toFixed(1)+'°'):'N/A')
       +'<br>\u6570\u636e\u66f4\u65b0: '+esc(String(e.age_text || fmtAge(e.age)));
 
-    var airPos = toMapLatLng(e.lat, e.lon);
-    if(markers[e.sn]){
-      markers[e.sn].setLatLng(airPos)
-                   .setIcon(droneIcon(col, e.lost))
+    var airPos = toMapLatLng(latRaw, lonRaw);
+    var dispNo = idx + 1;
+    if(markers[sn]){
+      markers[sn].setLatLng(airPos)
+                   .setIcon(droneIcon(col, e.lost, heading, isSel, dispNo))
                    .setPopupContent(popup);
     } else {
-      markers[e.sn] = L.marker(airPos, {icon: droneIcon(col, e.lost)})
+      markers[sn] = L.marker(airPos, {icon: droneIcon(col, e.lost, heading, isSel, dispNo)})
         .addTo(map).bindPopup(popup);
+      (function(snLocal){
+        markers[snLocal].on('click', function(){
+          setSnSelected(snLocal, true);
+        });
+      })(sn);
+    }
+
+    if(isSel && isFinite(Number(heading))){
+      var spd = Number(e.spd);
+      var refSpd = (isFinite(spd) && spd > 0) ? spd : 8.0;
+      var startOffset = 22;
+      var refLen = Math.max(45, Math.min(260, refSpd * 10.0));
+      var p1w = destinationPoint(latRaw, lonRaw, Number(heading), startOffset);
+      var p2w = destinationPoint(latRaw, lonRaw, Number(heading), startOffset + refLen);
+      var p1 = toMapLatLng(p1w.lat, p1w.lon);
+      var p2 = toMapLatLng(p2w.lat, p2w.lon);
+      var twsPts = [p1, p2];
+      if(twsLines[sn]){
+        twsLines[sn].setLatLngs(twsPts).setStyle({color:col, weight:2.1, opacity:0.95, dashArray:'3 5'});
+      }else{
+        twsLines[sn] = L.polyline(twsPts, {
+          color:col,
+          weight:2.1,
+          opacity:0.95,
+          dashArray:'3 5',
+          lineCap:'round'
+        }).addTo(map);
+      }
+      activeTws[sn] = true;
     }
   });
 
@@ -5786,6 +6161,11 @@ function updateMap(drones){
     }else{
       pilotMarkers[sn] = L.marker(pilotPos, {icon: pilotIcon(col, e.lost)})
         .addTo(map).bindPopup(popup);
+      (function(snLocal){
+        pilotMarkers[snLocal].on('click', function(){
+          setSnSelected(snLocal, true);
+        });
+      })(sn);
     }
   });
 
@@ -5841,762 +6221,49 @@ function updateMap(drones){
       map.removeLayer(pilotMarkers[sn]); delete pilotMarkers[sn];
     }
   });
+  Object.keys(twsLines).forEach(function(sn){
+    if(!activeTws[sn]){
+      map.removeLayer(twsLines[sn]); delete twsLines[sn];
+    }
+  });
   // remove stale or unselected tracks
   Object.keys(trackLines).forEach(function(sn){
     if(!activeTrack[sn]){
       map.removeLayer(trackLines[sn]); delete trackLines[sn];
     }
   });
+  Object.keys(motionState).forEach(function(sn){
+    if(!activeAir[sn]) delete motionState[sn];
+  });
 
-  // first-time fit bounds for aircraft only
+  if(!liveAir.length){
+    var b = baseFromMeta(metaState);
+    if(b.ok){
+      if(autoState.allow && (!map._rid_base_fitted || !!map._rid_user_moved)){
+        map.setView([b.lat, b.lon], b.zoom);
+        map._rid_base_fitted = true;
+        map._rid_user_moved = false;
+      }
+      if(autoState.allow){
+        document.getElementById('map-hint').textContent='\u672a\u52fe\u9009\u98de\u673a\u6216\u65e0\u53ef\u663e\u793a\u5750\u6807';
+      }else{
+        document.getElementById('map-hint').textContent='\u672a\u52fe\u9009\u98de\u673a\u6216\u65e0\u53ef\u663e\u793a\u5750\u6807 | \u81ea\u52a8\u56de\u4e2d\u51b7\u5374 ' + Math.ceil(autoState.remain) + 's';
+      }
+    } else {
+      document.getElementById('map-hint').textContent='\u65e0\u5750\u6807\u6570\u636e';
+    }
+    return;
+  }
+
+  // first-time fit bounds for visible aircraft only
   var latlngs = liveAir.map(function(e){ return toMapLatLng(e.lat, e.lon); });
-  if(latlngs.length && !map._rid_fitted){
+  if(latlngs.length && autoState.allow && (!map._rid_fitted || !!map._rid_user_moved)){
     if(latlngs.length === 1) map.setView(latlngs[0], 14);
     else map.fitBounds(L.latLngBounds(latlngs).pad(0.3));
     map._rid_fitted = true;
+    map._rid_user_moved = false;
   }
 }
-</script>
-</body></html>"""
-
-_RADAR_PAGE_HTML = """<!doctype html><html lang="zh"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Light RID Scanner C+R 雷达</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<style>
-:root{
-  --bg:#05090e;
-  --bg2:#0a1119;
-  --panel:rgba(9,15,22,.78);
-  --panel-border:#2f4457;
-  --panel-edge:#5c7d9b;
-  --txt:#e5f3ff;
-  --muted:#9cb2c6;
-  --accent:#48d3ff;
-  --accent-strong:#00ffb3;
-  --warn:#ffb347;
-}
-*{box-sizing:border-box}
-html,body{height:100%}
-body{
-  margin:0;
-  color:var(--txt);
-  font:16px/1.55 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-  display:grid;grid-template-rows:auto minmax(0,1fr);
-  background:
-    radial-gradient(1200px 680px at 16% -12%, rgba(44,140,255,.18), transparent 55%),
-    radial-gradient(900px 560px at 104% 108%, rgba(0,255,179,.13), transparent 58%),
-    linear-gradient(160deg, var(--bg), var(--bg2));
-  position:relative;
-  overflow:hidden;
-}
-body::before{
-  content:"";
-  position:fixed;inset:0;pointer-events:none;
-  background:repeating-linear-gradient(180deg, rgba(255,255,255,.024) 0 1px, transparent 1px 3px);
-  mix-blend-mode:screen;
-  opacity:.38;
-  z-index:0;
-}
-body::after{
-  content:"";
-  position:fixed;inset:0;pointer-events:none;
-  background:radial-gradient(circle at 50% 20%, rgba(75,163,255,.08), rgba(0,0,0,0) 58%);
-  z-index:0;
-}
-header,.wrap{position:relative;z-index:1}
-header{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
-  padding:12px 16px;border-bottom:1px solid var(--panel-border);
-  background:linear-gradient(180deg, rgba(11,19,28,.94), rgba(8,14,21,.88));
-  box-shadow:0 10px 22px rgba(0,0,0,.28), inset 0 -1px 0 rgba(159,200,232,.07);
-  backdrop-filter:blur(4px);
-}
-h1{
-  margin:0;
-  font-size:22px;
-  letter-spacing:.08em;
-  color:#d6ebff;
-  text-shadow:0 0 14px rgba(72,211,255,.35);
-}
-.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.btn{
-  border:1px solid #48617a;
-  background:linear-gradient(180deg, rgba(21,31,43,.9), rgba(12,20,29,.92));
-  color:#dff0ff;
-  border-radius:9px;
-  padding:8px 13px;
-  cursor:pointer;
-  text-transform:uppercase;
-  letter-spacing:.08em;
-  font-size:13px;
-  transition:all .2s ease;
-}
-.btn:hover{
-  border-color:#67a6d2;
-  box-shadow:0 0 14px rgba(72,211,255,.3), inset 0 0 0 1px rgba(142,206,255,.28);
-  transform:translateY(-1px);
-}
-.stat{font-size:15px;color:#c8dbef}
-.stat b{color:#f2fbff}
-.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.wrap{
-  min-height:0;
-  display:grid;
-  grid-template-columns:minmax(0,1fr) 390px;
-  gap:12px;
-  padding:12px;
-}
-.stage{
-  min-height:0;
-  border:1px solid var(--panel-border);
-  border-radius:12px;
-  position:relative;
-  overflow:hidden;
-  background:#050b12;
-  box-shadow:0 16px 34px rgba(0,0,0,.32), inset 0 0 0 1px rgba(133,178,214,.08);
-}
-.stage::before{
-  content:"";
-  position:absolute;inset:0;pointer-events:none;z-index:405;
-  background:
-    radial-gradient(circle at 50% 45%, rgba(72,211,255,.08), transparent 50%),
-    linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,0) 12%);
-}
-#radar-map{width:100%;height:100%}
-#radar-overlay{position:absolute;inset:0;pointer-events:none;z-index:410}
-#sphere-mask{
-  position:absolute;inset:0;pointer-events:none;z-index:420;
-  background:
-    radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0, rgba(0,0,0,0) 45%, rgba(0,0,0,.43) 58%, rgba(0,0,0,.77) 75%, rgba(0,0,0,.93) 100%),
-    radial-gradient(circle at 50% 40%, rgba(63,190,255,.13), rgba(0,0,0,0) 60%);
-}
-.hud{
-  position:absolute;left:12px;top:12px;z-index:450;font-size:14px;color:#d9efff;
-  background:linear-gradient(180deg, rgba(8,15,22,.86), rgba(8,12,18,.76));
-  border:1px solid #3f5f7a;border-radius:10px;padding:8px 11px;
-  box-shadow:0 8px 20px rgba(0,0,0,.35), inset 0 0 0 1px rgba(152,214,255,.12);
-}
-.side{
-  min-height:0;
-  border:1px solid var(--panel-border);
-  border-radius:12px;
-  background:linear-gradient(180deg, rgba(10,17,25,.85), rgba(8,12,18,.86));
-  box-shadow:0 16px 28px rgba(0,0,0,.32), inset 0 0 0 1px rgba(151,195,228,.08);
-  display:grid;grid-template-rows:auto minmax(0,1fr) auto;
-  backdrop-filter:blur(4px);
-}
-.sec{padding:11px;border-bottom:1px solid #2a3b4c}
-.sec:last-child{border-bottom:none}
-.label{font-size:14px;color:var(--muted)}
-.list{min-height:0;overflow:auto;padding:8px}
-.item{
-  border:1px solid #3e5264;border-radius:10px;padding:8px 10px;margin:0 0 8px 0;
-  background:linear-gradient(180deg, rgba(32,44,57,.62), rgba(18,27,37,.66));
-  cursor:pointer;
-  transition:all .22s ease;
-}
-.item:hover{
-  border-color:#64b4ff;
-  transform:translateY(-1px);
-  box-shadow:0 10px 18px rgba(0,0,0,.28), inset 0 0 0 1px rgba(129,193,255,.18);
-}
-.item.active{
-  border-color:var(--accent-strong);
-  box-shadow:0 0 0 1px rgba(0,255,179,.44) inset, 0 0 16px rgba(0,255,179,.19);
-}
-.item .sn{color:#d7ecff;font-weight:700;word-break:break-all;font-size:16px}
-.item .sub{font-size:14px;color:#bfd0de}
-.item.lost{opacity:.62}
-.detail{
-  padding:11px;overflow:auto;max-height:34vh;border-top:1px solid #2a3b4c;
-  background:linear-gradient(180deg, rgba(9,14,20,.9), rgba(8,12,18,.95));
-}
-.drow{display:grid;grid-template-columns:112px 1fr;gap:8px;padding:3px 0;font-size:14px}
-.drow .k{color:#8ea7ba}
-.drow .v{word-break:break-all}
-input[type=range]{width:100%;accent-color:#42c8ff}
-.leaflet-control-attribution{background:rgba(4,8,11,.62)!important;color:#8fb5c2!important}
-#radar-map .leaflet-tile{
-  filter:brightness(.48) contrast(1.28) saturate(.72) hue-rotate(172deg);
-}
-@media(max-width:1024px){
-  .wrap{grid-template-columns:1fr}
-  .side{min-height:320px}
-  .detail{max-height:28vh}
-}
-</style>
-</head><body>
-<header>
-  <div class="row">
-    <h1>Light RID Scanner C+R 雷达</h1>
-    <span class="stat">WS: <b id="ws">连接中</b></span>
-    <span class="stat">时间: <b id="ts" class="mono">-</b></span>
-    <span class="stat">在线: <b id="live">0</b></span>
-    <span class="stat">离线: <b id="lost">0</b></span>
-    <span class="stat">信道: <b id="ch" class="mono">-</b></span>
-  </div>
-  <div class="row">
-    <button class="btn" id="back" type="button">返回主页</button>
-    <button class="btn" id="recenter" type="button">回基站</button>
-  </div>
-</header>
-<div class="wrap">
-  <div class="stage">
-    <div id="radar-map"></div>
-    <canvas id="radar-overlay"></canvas>
-    <div id="sphere-mask"></div>
-    <div class="hud">
-      <div>基站: <span id="base" class="mono">未设置</span></div>
-      <div>标尺: <span id="rangev" class="mono">800m</span></div>
-      <div>说明: 背景深色地图 + C+R 扫描扇区</div>
-    </div>
-  </div>
-  <div class="side">
-    <div class="sec">
-      <div class="label">雷达标尺 (米，默认 800)</div>
-      <input id="range" type="range" min="200" max="5000" step="50" value="800">
-      <div class="label" style="margin-top:8px">
-        <label><input id="show-lost" type="checkbox"> 显示离线目标</label>
-      </div>
-      <div class="label" style="margin-top:6px">
-        <label><input id="show-history" type="checkbox"> 显示历史飞机</label>
-      </div>
-    </div>
-    <div class="list" id="list"></div>
-    <div class="detail" id="detail">
-      <div class="label">追损信息</div>
-      <div style="margin-top:6px;color:#9fb0bf">点击左侧飞机目标查看详情</div>
-    </div>
-  </div>
-</div>
-<script>
-function qs(id){ return document.getElementById(id); }
-function esc(v){
-  return String(v==null?'':v)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
-function toNum(v){
-  var n = Number(v);
-  return isFinite(n) ? n : null;
-}
-function fmt(v, dec, unit){
-  if(v==null || !isFinite(Number(v))) return 'N/A';
-  return Number(v).toFixed(dec) + String(unit || '');
-}
-function fmtDur(sec){
-  var s = Number(sec || 0);
-  if(!isFinite(s) || s <= 0) return '-';
-  s = Math.round(s);
-  if(s < 60) return s + 's';
-  if(s < 3600) return Math.floor(s/60) + 'm';
-  if(s < 86400) return Math.floor(s/3600) + 'h';
-  return Math.floor(s/86400) + 'd';
-}
-function _gcjOutOfChina(lat, lon){
-  return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
-}
-function _gcjTransformLat(x, y){
-  var ret = -100.0 + 2.0*x + 3.0*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
-  ret += (20.0*Math.sin(6.0*x*Math.PI) + 20.0*Math.sin(2.0*x*Math.PI)) * 2.0 / 3.0;
-  ret += (20.0*Math.sin(y*Math.PI) + 40.0*Math.sin(y/3.0*Math.PI)) * 2.0 / 3.0;
-  ret += (160.0*Math.sin(y/12.0*Math.PI) + 320*Math.sin(y*Math.PI/30.0)) * 2.0 / 3.0;
-  return ret;
-}
-function _gcjTransformLon(x, y){
-  var ret = 300.0 + x + 2.0*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
-  ret += (20.0*Math.sin(6.0*x*Math.PI) + 20.0*Math.sin(2.0*x*Math.PI)) * 2.0 / 3.0;
-  ret += (20.0*Math.sin(x*Math.PI) + 40.0*Math.sin(x/3.0*Math.PI)) * 2.0 / 3.0;
-  ret += (150.0*Math.sin(x/12.0*Math.PI) + 300.0*Math.sin(x/30.0*Math.PI)) * 2.0 / 3.0;
-  return ret;
-}
-function wgs84ToGcj02(lat, lon){
-  lat = Number(lat); lon = Number(lon);
-  if(!isFinite(lat) || !isFinite(lon)) return [lat, lon];
-  if(_gcjOutOfChina(lat, lon)) return [lat, lon];
-  var a = 6378245.0, ee = 0.00669342162296594323;
-  var dLat = _gcjTransformLat(lon - 105.0, lat - 35.0);
-  var dLon = _gcjTransformLon(lon - 105.0, lat - 35.0);
-  var radLat = lat / 180.0 * Math.PI;
-  var magic = Math.sin(radLat);
-  magic = 1 - ee * magic * magic;
-  var sqrtMagic = Math.sqrt(magic);
-  dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
-  dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
-  return [lat + dLat, lon + dLon];
-}
-function toMapLatLng(lat, lon){ return wgs84ToGcj02(lat, lon); }
-
-var map = null;
-var overlay = qs('radar-overlay');
-var octx = overlay.getContext('2d');
-var dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-var ws = null;
-var rowsAll = [];
-var rowsMap = [];
-var rowsBySn = {};
-var meta = {};
-var radarRange = 800;
-var showLost = false;
-var showHistory = false;
-var sweepA = 0;
-var selectedSn = '';
-var markers = {};
-var rangeRings = [];
-var baseMarker = null;
-var baseLatLngWgs = null;
-var baseLatLngMap = null;
-var baseFitted = false;
-var motionState = {};
-
-function initMap(){
-  if(map) return;
-  map = L.map('radar-map', {
-    zoomControl:true,
-    attributionControl:true,
-    maxZoom:18,
-    minZoom:4,
-    dragging:false,
-    boxZoom:false,
-    keyboard:false,
-    scrollWheelZoom:'center',
-    touchZoom:'center',
-    doubleClickZoom:'center'
-  });
-  L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
-    subdomains:['1','2','3','4'],
-    maxZoom:18,
-    maxNativeZoom:18,
-    attribution:'&copy; 高德地图'
-  }).addTo(map);
-  map.setView([30, 114], 11);
-  map.on('zoom move resize', function(){ drawOverlay(); });
-  setTimeout(function(){ resizeOverlay(); drawOverlay(); }, 0);
-}
-
-function resizeOverlay(){
-  if(!map) return;
-  var rect = map.getContainer().getBoundingClientRect();
-  overlay.width = Math.max(2, Math.round(rect.width * dpr));
-  overlay.height = Math.max(2, Math.round(rect.height * dpr));
-  octx.setTransform(dpr,0,0,dpr,0,0);
-}
-window.addEventListener('resize', function(){
-  if(map) map.invalidateSize(false);
-  resizeOverlay();
-  renderMapTargets();
-  renderList();
-  drawOverlay();
-});
-
-function setWs(ok){
-  var el = qs('ws');
-  if(!el) return;
-  el.textContent = ok ? '在线' : '断开';
-  el.style.color = ok ? '#00ffb3' : '#ffb680';
-}
-
-function baseFromMeta(){
-  var lat = toNum(meta.base_lat), lon = toNum(meta.base_lon);
-  if(lat==null || lon==null || lat<-90 || lat>90 || lon<-180 || lon>180) return null;
-  return {name:String(meta.base_name || '基站'), lat:lat, lon:lon, zoom:Math.max(3, Math.min(17, parseInt(meta.base_zoom || 13, 10) || 13))};
-}
-
-function baseIconHtml(){
-  return '<div style="width:18px;height:18px;border-radius:50%;background:#ffb347;border:2px solid #8e5200;box-shadow:0 0 16px rgba(255,179,71,.76);"></div>';
-}
-function markerHtml(lost, idx, headingDeg, spd, closing){
-  var bg = lost ? '#ffb347' : '#00ffb3';
-  var bd = lost ? '#8e5200' : '#008f69';
-  var txt = lost ? '#2f1a00' : '#003123';
-  var glow = lost ? 'rgba(255,179,71,.70)' : 'rgba(0,255,179,.70)';
-  var hd = Number(headingDeg);
-  var rot = isFinite(hd) ? hd : 0;
-  var spdTxt = (spd==null || !isFinite(Number(spd))) ? 'S--' : ('S' + Number(spd).toFixed(1));
-  var cVal = Number(closing);
-  var cTxt = (!isFinite(cVal)) ? 'C--' : ('C' + (cVal>=0?'+':'') + cVal.toFixed(1));
-  return '<div style="position:relative;min-width:30px;height:36px;">'
-    +'<div style="position:absolute;left:50%;top:-13px;transform:translateX(-50%);padding:1px 6px;border-radius:4px;background:rgba(7,14,20,.94);color:#dcf7ff;border:1px solid #4b7491;font:12px/16px ui-monospace;white-space:nowrap;box-shadow:0 0 12px rgba(72,211,255,.25);">'+spdTxt+' '+cTxt+'</div>'
-    +'<div style="position:absolute;left:50%;top:6px;transform:translateX(-50%) rotate('+rot.toFixed(1)+'deg);width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:14px solid '+bg+';filter:drop-shadow(0 0 8px '+glow+');"></div>'
-    +'<div style="position:absolute;left:50%;top:20px;transform:translateX(-50%);min-width:22px;height:16px;padding:0 5px;border-radius:8px;background:'+bg+';color:'+txt+';border:1px solid '+bd+';font:11px/14px ui-monospace;text-align:center;box-shadow:0 0 11px '+glow+';">'+idx+'</div>'
-    +'</div>';
-}
-
-function calcBearing(lat1, lon1, lat2, lon2){
-  var p1 = deg2rad(lat1), p2 = deg2rad(lat2);
-  var dLon = deg2rad(lon2 - lon1);
-  var y = Math.sin(dLon) * Math.cos(p2);
-  var x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dLon);
-  var b = Math.atan2(y, x) * 180 / Math.PI;
-  if(!isFinite(b)) return null;
-  if(b < 0) b += 360;
-  return b;
-}
-
-function applyBase(){
-  var b = baseFromMeta();
-  if(!b){
-    qs('base').textContent = '未设置';
-    baseLatLngWgs = null;
-    baseLatLngMap = null;
-    if(baseMarker){ map.removeLayer(baseMarker); baseMarker = null; }
-    clearRangeRings();
-    drawOverlay();
-    return;
-  }
-  baseLatLngWgs = {lat:b.lat, lon:b.lon, zoom:b.zoom, name:b.name};
-  baseLatLngMap = L.latLng(b.lat, b.lon);
-  qs('base').textContent = b.name + ' ' + b.lat.toFixed(6) + ',' + b.lon.toFixed(6);
-  if(baseMarker){
-    baseMarker.setLatLng(baseLatLngMap).setPopupContent('<b>'+esc(b.name)+'</b><br>'+b.lat.toFixed(6)+','+b.lon.toFixed(6));
-  }else{
-    baseMarker = L.marker(baseLatLngMap, {
-      icon: L.divIcon({html:baseIconHtml(), className:'', iconSize:[16,16], iconAnchor:[8,8]})
-    }).addTo(map).bindPopup('<b>'+esc(b.name)+'</b><br>'+b.lat.toFixed(6)+','+b.lon.toFixed(6));
-  }
-  updateRangeRings();
-  if(!baseFitted){
-    map.setView(baseLatLngMap, b.zoom);
-    baseFitted = true;
-  }
-  drawOverlay();
-}
-
-function clearRangeRings(){
-  for(var i=0;i<rangeRings.length;i++){
-    if(rangeRings[i]) map.removeLayer(rangeRings[i]);
-  }
-  rangeRings = [];
-}
-function updateRangeRings(){
-  clearRangeRings();
-  if(!baseLatLngMap) return;
-  var levels = [0.25, 0.5, 0.75, 1.0];
-  for(var i=0;i<levels.length;i++){
-    var lv = levels[i];
-    var r = radarRange * lv;
-    var c = L.circle(baseLatLngMap, {
-      radius:r,
-      color:(lv === 1.0 ? '#bada7b' : '#5d7349'),
-      weight:(lv === 1.0 ? 4 : 2),
-      opacity:(lv === 1.0 ? 0.7 : 0.45),
-      fill:false
-    }).addTo(map);
-    rangeRings.push(c);
-  }
-}
-
-function deg2rad(d){ return d * Math.PI / 180; }
-function destinationPoint(lat, lon, bearingDeg, distMeter){
-  var R = 6371000.0;
-  var br = deg2rad(bearingDeg);
-  var lat1 = deg2rad(lat), lon1 = deg2rad(lon);
-  var ad = distMeter / R;
-  var sinLat1 = Math.sin(lat1), cosLat1 = Math.cos(lat1);
-  var sinAd = Math.sin(ad), cosAd = Math.cos(ad);
-  var lat2 = Math.asin(sinLat1 * cosAd + cosLat1 * sinAd * Math.cos(br));
-  var lon2 = lon1 + Math.atan2(Math.sin(br) * sinAd * cosLat1, cosAd - sinLat1 * Math.sin(lat2));
-  return {lat:lat2 * 180/Math.PI, lon:lon2 * 180/Math.PI};
-}
-
-function pixelRadiusForRange(){
-  if(!baseLatLngMap) return 0;
-  var p2w = destinationPoint(baseLatLngMap.lat, baseLatLngMap.lng, 90, radarRange);
-  var c0 = map.latLngToContainerPoint(baseLatLngMap);
-  var c1 = map.latLngToContainerPoint(L.latLng(p2w.lat, p2w.lon));
-  return Math.max(8, Math.hypot(c1.x - c0.x, c1.y - c0.y));
-}
-
-function drawOverlay(){
-  if(!map) return;
-  var rect = map.getContainer().getBoundingClientRect();
-  var w = rect.width, h = rect.height;
-  octx.clearRect(0,0,w,h);
-  if(!baseLatLngMap) return;
-  var cp = map.latLngToContainerPoint(baseLatLngMap);
-  var px = cp.x, py = cp.y;
-  var pr = pixelRadiusForRange();
-  if(!isFinite(pr) || pr <= 0) return;
-
-  octx.strokeStyle = 'rgba(186,218,123,.78)';
-  octx.lineWidth = 2.8;
-  octx.beginPath(); octx.arc(px, py, pr, 0, Math.PI*2); octx.stroke();
-  octx.strokeStyle = 'rgba(135,160,102,.44)';
-  octx.lineWidth = 2.0;
-  for(var i=1;i<=3;i++){
-    octx.beginPath(); octx.arc(px, py, pr * i / 4, 0, Math.PI*2); octx.stroke();
-  }
-  octx.strokeStyle = 'rgba(166,196,124,.52)';
-  octx.lineWidth = 2.2;
-  octx.beginPath(); octx.moveTo(px-pr, py); octx.lineTo(px+pr, py); octx.stroke();
-  octx.beginPath(); octx.moveTo(px, py-pr); octx.lineTo(px, py+pr); octx.stroke();
-
-  sweepA += 0.018;
-  if(sweepA > Math.PI*2) sweepA -= Math.PI*2;
-  octx.save();
-  octx.beginPath(); octx.arc(px, py, pr, 0, Math.PI*2); octx.clip();
-  for(var k=0;k<16;k++){
-    var a2 = sweepA - k*0.048;
-    var a1 = a2 - 0.041;
-    var alpha = 0.26 * (1 - k/16);
-    octx.fillStyle = 'rgba(151,226,127,' + alpha.toFixed(4) + ')';
-    octx.beginPath();
-    octx.moveTo(px, py);
-    octx.arc(px, py, pr, a1, a2);
-    octx.closePath();
-    octx.fill();
-  }
-  octx.restore();
-}
-
-function connect(){
-  var wsProto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
-  ws = new WebSocket(wsProto + location.host + '/ws');
-  ws.onopen = function(){ setWs(true); };
-  ws.onclose = function(){ setWs(false); setTimeout(connect, 1800); };
-  ws.onerror = function(){ try{ ws.close(); }catch(_e){} };
-  ws.onmessage = function(ev){
-    try{
-      var d = JSON.parse(ev.data);
-      meta = (d && typeof d.meta === 'object') ? d.meta : {};
-      rowsAll = Array.isArray(d.drones) ? d.drones : [];
-      rowsMap = Array.isArray(d.map_drones) ? d.map_drones : rowsAll;
-      rowsBySn = {};
-      rowsAll.forEach(function(r){ if(r && r.sn) rowsBySn[String(r.sn)] = r; });
-      qs('ts').textContent = String(d.ts || '-');
-      qs('ch').textContent = String(d.ch || '-');
-      var liveCount = rowsAll.filter(function(x){ return x && !x.lost && !x.archived; }).length;
-      var lostCount = rowsAll.filter(function(x){ return x && x.lost && !x.archived; }).length;
-      qs('live').textContent = String(liveCount);
-      qs('lost').textContent = String(lostCount);
-      applyBase();
-      renderMapTargets();
-      renderList();
-      drawOverlay();
-    }catch(_e){}
-  };
-}
-
-function visibleRows(){
-  var arr = showHistory ? (Array.isArray(rowsAll) ? rowsAll : []) : (Array.isArray(rowsMap) ? rowsMap : []);
-  var out = [];
-  for(var i=0;i<arr.length;i++){
-    var e = arr[i] || {};
-    if(e.archived && !showHistory) continue;
-    if(!showLost && e.lost && !e.archived) continue;
-    if(toNum(e.lat)==null || toNum(e.lon)==null) continue;
-    out.push(e);
-  }
-  return out;
-}
-
-function renderMapTargets(){
-  if(!map) return;
-  var vis = visibleRows();
-  vis.sort(function(a,b){
-    var ar = (a.rssi==null) ? -9999 : Number(a.rssi);
-    var br = (b.rssi==null) ? -9999 : Number(b.rssi);
-    return br - ar;
-  });
-  var nowSec = Date.now() / 1000;
-  var active = {};
-  for(var i=0;i<vis.length;i++){
-    var e = vis[i] || {};
-    var sn = String(e.sn || '');
-    if(!sn) continue;
-    active[sn] = true;
-    var latRaw = Number(e.lat), lonRaw = Number(e.lon);
-    var m = toMapLatLng(latRaw, lonRaw);
-    var latlng = L.latLng(m[0], m[1]);
-    var dist = distanceToBase(e);
-    var prev = motionState[sn] || {};
-    var heading = null;
-    if(isFinite(Number(prev.lat)) && isFinite(Number(prev.lon))){
-      var hd = calcBearing(Number(prev.lat), Number(prev.lon), latRaw, lonRaw);
-      if(hd!=null) heading = hd;
-    }
-    if(heading == null && isFinite(Number(prev.heading))) heading = Number(prev.heading);
-    var dt = (isFinite(Number(prev.ts)) ? (nowSec - Number(prev.ts)) : 0);
-    var closing = null;
-    if(dt > 0.35 && isFinite(Number(prev.dist)) && isFinite(Number(dist))){
-      closing = (Number(prev.dist) - Number(dist)) / dt;
-      if(isFinite(Number(prev.closing))){
-        closing = Number(prev.closing) * 0.55 + closing * 0.45;
-      }
-    }else if(isFinite(Number(prev.closing))){
-      closing = Number(prev.closing);
-    }
-    motionState[sn] = {
-      lat: latRaw, lon: lonRaw, ts: nowSec,
-      dist: dist, heading: heading, closing: closing
-    };
-    var spd = (e.spd==null ? null : Number(e.spd));
-    var icon = L.divIcon({html: markerHtml(!!e.lost, i+1, heading, spd, closing), className:'', iconSize:[108,44], iconAnchor:[54,28]});
-    var popup = '<b>'+esc(sn)+'</b><br>'+esc(String(e.model||'N/A'))+'<br>'
-      +'RSSI: '+esc(String(e.rssi==null?'N/A':(e.rssi+'dBm')))+'<br>'
-      +'更新时间: '+esc(String(e.age_text || '-'))+'<br>'
-      +'速度: '+esc(spd==null?'N/A':(spd.toFixed(1)+'m/s'))+'<br>'
-      +'接近率: '+esc((closing==null||!isFinite(closing))?'N/A':((closing>=0?'+':'')+closing.toFixed(1)+'m/s'));
-    if(markers[sn]){
-      markers[sn].setLatLng(latlng).setIcon(icon).setPopupContent(popup);
-    }else{
-      markers[sn] = L.marker(latlng, {icon:icon}).addTo(map).bindPopup(popup);
-      (function(snLocal){
-        markers[snLocal].on('click', function(){
-          selectedSn = snLocal;
-          renderList();
-          renderDetail();
-        });
-      })(sn);
-    }
-  }
-  Object.keys(motionState).forEach(function(sn){
-    if(!active[sn]) delete motionState[sn];
-  });
-  Object.keys(markers).forEach(function(sn){
-    if(!active[sn]){
-      map.removeLayer(markers[sn]);
-      delete markers[sn];
-    }
-  });
-}
-
-function distanceToBase(e){
-  if(!baseLatLngMap || !map) return null;
-  var lat = toNum(e.lat), lon = toNum(e.lon);
-  if(lat==null || lon==null) return null;
-  var m = toMapLatLng(lat, lon);
-  return map.distance(baseLatLngMap, L.latLng(m[0], m[1]));
-}
-
-function renderList(){
-  var box = qs('list');
-  var vis = visibleRows();
-  vis.sort(function(a,b){
-    var ad = distanceToBase(a), bd = distanceToBase(b);
-    ad = (ad==null) ? 9e12 : ad;
-    bd = (bd==null) ? 9e12 : bd;
-    return ad - bd;
-  });
-  if(selectedSn && !vis.some(function(e){ return String((e&&e.sn)||'') === selectedSn; })){
-    selectedSn = '';
-  }
-  if(!selectedSn && vis.length){
-    selectedSn = String(vis[0].sn || '');
-  }
-  var html = '';
-  if(!vis.length){
-    html = '<div class="item"><div class="sub">暂无目标</div></div>';
-  }else{
-    for(var i=0;i<vis.length;i++){
-      var e = vis[i] || {};
-      var sn = String(e.sn || '');
-      var dist = distanceToBase(e);
-      var dtxt = (dist==null) ? '-' : (dist.toFixed(0) + 'm');
-      var ms = motionState[sn] || {};
-      var cl = Number(ms.closing);
-      var cTxt = isFinite(cl) ? ((cl>=0?'+':'') + cl.toFixed(1) + 'm/s') : 'N/A';
-      var st = e.archived ? '历史' : (e.lost ? '离线' : '在线');
-      var cls = 'item' + (e.lost ? ' lost' : '') + (sn === selectedSn ? ' active' : '');
-      html += '<div class="'+cls+'" data-sn="'+esc(sn)+'">'+
-        '<div class="sn">'+(i+1)+'. '+esc(sn)+'</div>'+
-        '<div class="sub">'+esc(String(e.model || 'N/A'))+' | '+esc(st)+' | '+esc(dtxt)+' | '+esc(String(e.age_text || '-'))+' | 接近 '+esc(cTxt)+'</div>'+
-        '</div>';
-    }
-  }
-  box.innerHTML = html;
-  var nodes = box.querySelectorAll('.item[data-sn]');
-  for(var j=0;j<nodes.length;j++){
-    nodes[j].addEventListener('click', function(ev){
-      var sn = String(ev.currentTarget.getAttribute('data-sn') || '');
-      if(!sn) return;
-      selectedSn = sn;
-      renderList();
-      renderDetail();
-      if(markers[sn]){
-        markers[sn].openPopup();
-      }
-    });
-  }
-  renderDetail();
-}
-
-function detailRow(k, v){
-  return '<div class="drow"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v==null?'':v)+'</div></div>';
-}
-function renderDetail(){
-  var box = qs('detail');
-  var e = rowsBySn[selectedSn] || null;
-  if(!e){
-    box.innerHTML = '<div class="label">追损信息</div><div style="margin-top:6px;color:#9fb0bf">点击左侧飞机目标查看详情</div>';
-    return;
-  }
-  var html = '<div class="label">追损信息</div>';
-  var ms = motionState[selectedSn] || {};
-  var hd = Number(ms.heading);
-  var cl = Number(ms.closing);
-  html += detailRow('SN', String(e.sn || '-'));
-  html += detailRow('机型', String(e.model || 'N/A'));
-  html += detailRow('状态', e.archived ? '历史归档' : (e.lost ? '离线' : '在线'));
-  html += detailRow('信号', e.rssi==null ? 'N/A' : (String(e.rssi) + 'dBm'));
-  html += detailRow('包数', String(e.pkts==null?0:e.pkts));
-  html += detailRow('纬度', fmt(e.lat, 6, ''));
-  html += detailRow('经度', fmt(e.lon, 6, ''));
-  html += detailRow('高度', fmt(e.alt, 1, 'm'));
-  html += detailRow('速度', fmt(e.spd, 2, 'm/s'));
-  html += detailRow('接近率', (isFinite(cl) ? ((cl>=0?'+':'') + cl.toFixed(2) + 'm/s') : 'N/A'));
-  html += detailRow('航向', (isFinite(hd) ? (hd.toFixed(1) + '°') : String(e.dir || '-')));
-  html += detailRow('垂直速度', fmt(e.vspd, 2, 'm/s'));
-  html += detailRow('方向', String(e.dir || '-'));
-  html += detailRow('数据更新时间', String(e.age_text || fmtDur(e.age)));
-  html += detailRow('最后发现', String(e.last_seen || '-'));
-  html += detailRow('最后数据包', String(e.last_pkt_time || '-'));
-  html += detailRow('扫描类型', String(e.scan_type || '-'));
-  html += detailRow('来源', String(e.sn_src || '-'));
-  html += detailRow('ID类型', String(e.id_type || '-'));
-  box.innerHTML = html;
-}
-
-function radarTick(){
-  drawOverlay();
-  requestAnimationFrame(radarTick);
-}
-
-qs('back').addEventListener('click', function(){ location.href = '/'; });
-qs('recenter').addEventListener('click', function(){
-  if(baseLatLngMap && baseLatLngWgs){
-    map.setView(baseLatLngMap, baseLatLngWgs.zoom || 13);
-  }
-});
-qs('range').addEventListener('input', function(ev){
-  radarRange = Number((ev && ev.target && ev.target.value) || 800);
-  if(!isFinite(radarRange) || radarRange < 200) radarRange = 800;
-  qs('rangev').textContent = String(Math.round(radarRange)) + 'm';
-  updateRangeRings();
-  renderList();
-  drawOverlay();
-});
-qs('show-lost').addEventListener('change', function(ev){
-  showLost = !!(ev && ev.target && ev.target.checked);
-  renderMapTargets();
-  renderList();
-  drawOverlay();
-});
-qs('show-history').addEventListener('change', function(ev){
-  showHistory = !!(ev && ev.target && ev.target.checked);
-  renderMapTargets();
-  renderList();
-  drawOverlay();
-});
-
-qs('rangev').textContent = '800m';
-initMap();
-resizeOverlay();
-connect();
-radarTick();
 </script>
 </body></html>"""
 
@@ -6748,6 +6415,29 @@ def http_server_thread() -> None:
         allow_reuse_address = True
 
     class Handler(BaseHTTPRequestHandler):
+        server_version = "LightRID/1.0"
+        sys_version = ""
+
+        def end_headers(self):
+            set_tok = getattr(self, "_auth_set_cookie_token", "")
+            if set_tok:
+                self.send_header(
+                    "Set-Cookie",
+                    f"{AUTH_SESSION_COOKIE}={set_tok}; Max-Age={int(AUTH_SESSION_TTL_SEC)}; Path=/; HttpOnly; SameSite=Lax",
+                )
+                self._auth_set_cookie_token = ""
+            if getattr(self, "_auth_clear_cookie", False):
+                self.send_header(
+                    "Set-Cookie",
+                    f"{AUTH_SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+                )
+                self._auth_clear_cookie = False
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+            self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+            super().end_headers()
+
         def handle(self):
             try:
                 return super().handle()
@@ -6775,6 +6465,12 @@ def http_server_thread() -> None:
                 n = int(self.headers.get("Content-Length", "0") or "0")
             except Exception:
                 n = 0
+            if n > HTTP_JSON_MAX_BYTES:
+                try:
+                    self.rfile.read(min(n, 4096))
+                except Exception:
+                    pass
+                return {}
             raw = b""
             if n > 0:
                 try:
@@ -6805,17 +6501,154 @@ def http_server_thread() -> None:
         def _require_auth(self) -> bool:
             if not _auth_enabled():
                 return True
-            if _auth_check_basic_header(self.headers.get("Authorization")):
+            if _auth_check_session_cookie(self.headers.get("Cookie"), refresh=True):
                 return True
+            if _auth_check_basic_header(self.headers.get("Authorization")):
+                self._auth_set_cookie_token = _auth_issue_session()
+                return True
+            req_path = str(self.path or "").split("?", 1)[0]
+            if req_path == "/ws":
+                # Avoid Safari repeatedly showing Basic-Auth dialog on websocket reconnect.
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
             self._auth_fail()
             return False
 
         def do_GET(self):
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import urlparse, parse_qs, unquote
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
             if not self._require_auth():
+                return
+            if path in ("/api", "/api/"):
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "endpoints": _api_endpoint_index(),
+                }, 200)
+                return
+            if path == "/api/health":
+                now_mono = time.monotonic()
+                now_wall = time.time()
+                sniff = _sniff_health_meta(now_mono, now_wall)
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "service": {
+                        "uptime_sec": int(max(0.0, now_wall - APP_START_WALL)),
+                        "sniff_state": sniff.get("state"),
+                        "sniff_msg": sniff.get("msg"),
+                        "sniff_iface": sniff.get("iface"),
+                        "current_channel": int(current_channel or 0),
+                    },
+                }, 200)
+                return
+            if path == "/api/v1/snapshot":
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "data": _state_snapshot(),
+                }, 200)
+                return
+            if path == "/api/v1/auth/status":
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                }, 200)
+                return
+            if path == "/api/v1/drones":
+                online_only = _to_bool((query.get("online_only") or ["0"])[0], False)
+                include_archived = _to_bool((query.get("include_archived") or ["1"])[0], True)
+                snap = _state_snapshot()
+                items = list(snap.get("drones") or [])
+                if online_only:
+                    items = [x for x in items if not bool(x.get("lost")) and not bool(x.get("archived"))]
+                elif not include_archived:
+                    items = [x for x in items if not bool(x.get("archived"))]
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "count": len(items),
+                    "items": items,
+                }, 200)
+                return
+            if path.startswith("/api/v1/drones/"):
+                sn = unquote(path[len("/api/v1/drones/"):]).strip()
+                if not sn:
+                    self._send_json({"ok": False, "error": "sn required"}, 400)
+                    return
+                snap = _state_snapshot()
+                item = None
+                for x in (snap.get("drones") or []):
+                    if str(x.get("sn") or "") == sn:
+                        item = x
+                        break
+                if not item:
+                    self._send_json({"ok": False, "error": "sn not found"}, 404)
+                    return
+                with state_lock:
+                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    track = _sanitize_track(src.get("track") or [])
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "item": item,
+                    "track_count": len(track),
+                    "track": track,
+                }, 200)
+                return
+            if path == "/api/v1/aps":
+                aps, aps_seq, aps_total = _ap_snapshot()
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "seq": aps_seq,
+                    "total": aps_total,
+                    "count": len(aps),
+                    "items": aps,
+                }, 200)
+                return
+            if path == "/api/v1/logs":
+                log_type = str((query.get("type") or ["event"])[0] or "event").strip().lower()
+                try:
+                    limit = int((query.get("limit") or ["200"])[0] or "200")
+                except Exception:
+                    limit = 200
+                limit = max(1, min(2000, limit))
+                with log_lock:
+                    if log_type == "scan":
+                        rows = list(scan_buf)[-limit:]
+                    elif log_type == "ap":
+                        rows = list(ap_buf)[-limit:]
+                    else:
+                        log_type = "event"
+                        rows = list(log_buf)[-limit:]
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "type": log_type,
+                    "count": len(rows),
+                    "items": rows,
+                }, 200)
+                return
+            if path.startswith("/api/v1/tracks/"):
+                sn = unquote(path[len("/api/v1/tracks/"):]).strip()
+                if not sn:
+                    self._send_json({"ok": False, "error": "sn required"}, 400)
+                    return
+                with state_lock:
+                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    track = _sanitize_track(src.get("track") or [])
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "sn": sn,
+                    "count": len(track),
+                    "track": track,
+                }, 200)
                 return
             if path in ("/", "/index.html"):
                 body = _PAGE_HTML.encode("utf-8")
@@ -6826,13 +6659,6 @@ def http_server_thread() -> None:
                 self.wfile.write(body)
             elif path in ("/hardware-assistant", "/hardware-assistant.html"):
                 body = _HW_PAGE_HTML.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            elif path in ("/radar", "/radar.html"):
-                body = _RADAR_PAGE_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -6928,6 +6754,18 @@ def http_server_thread() -> None:
                 }, 200)
             elif path == "/ws":
                 # Headers are already parsed by BaseHTTPRequestHandler; read key directly.
+                origin = str(self.headers.get("Origin") or "").strip()
+                host = str(self.headers.get("Host") or "").strip()
+                if origin and host:
+                    try:
+                        from urllib.parse import urlparse as _urlparse
+                        o = _urlparse(origin)
+                        if o.netloc and o.netloc.lower() != host.lower():
+                            self.send_response(403)
+                            self.end_headers()
+                            return
+                    except Exception:
+                        pass
                 key = self.headers.get("Sec-WebSocket-Key","").strip()
                 if not key:
                     self.send_response(400); self.end_headers(); return
@@ -6980,6 +6818,76 @@ def http_server_thread() -> None:
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if not self._require_auth():
+                return
+            try:
+                body_len = int(self.headers.get("Content-Length", "0") or "0")
+            except Exception:
+                body_len = 0
+            if body_len > HTTP_JSON_MAX_BYTES:
+                self._send_json({"ok": False, "error": f"request too large (>{HTTP_JSON_MAX_BYTES} bytes)"}, 413)
+                return
+            if path == "/api/v1/auth/logout":
+                tok = _auth_cookie_parse(self.headers.get("Cookie"), AUTH_SESSION_COOKIE)
+                if tok:
+                    with auth_session_lock:
+                        auth_sessions.pop(tok, None)
+                self._auth_clear_cookie = True
+                self._send_json({"ok": True, "api": _api_meta(), "logout": True}, 200)
+                return
+            if path == "/api/v1/history/clear":
+                try:
+                    cleared, removed = clear_history_store(delete_file=True)
+                    self._send_json({
+                        "ok": True,
+                        "api": _api_meta(),
+                        "cleared": cleared,
+                        "file_removed": removed,
+                        "history_file": HISTORY_STORE_PATH,
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+                return
+            if path == "/api/v1/history/delete":
+                body = self._read_json_body()
+                sn = str(body.get("sn") or "").strip()
+                if not sn:
+                    self._send_json({"ok": False, "error": "sn required"}, 400)
+                    return
+                removed = delete_history_item(sn)
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "sn": sn,
+                    "removed": bool(removed),
+                }, 200)
+                return
+            if path == "/api/v1/tracks/clear":
+                body = self._read_json_body()
+                sn = str(body.get("sn") or "").strip()
+                affected = clear_track_store(sn if sn else None)
+                self._send_json({
+                    "ok": True,
+                    "api": _api_meta(),
+                    "sn": (sn or None),
+                    "affected": int(affected),
+                }, 200)
+                return
+            if path == "/api/v1/config/reload":
+                if not APP_CONFIG_PATH:
+                    self._send_json({"ok": False, "error": "config path missing"}, 500)
+                    return
+                try:
+                    cfg_loaded = load_app_config(APP_CONFIG_PATH)
+                    r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                    self._send_json({
+                        "ok": True,
+                        "api": _api_meta(),
+                        "reloaded": bool(r_ok),
+                        "reload_msg": str(r_msg or ""),
+                        "config_path": APP_CONFIG_PATH,
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
                 return
             if path == "/api/history/clear":
                 self._read_json_body()
@@ -7153,6 +7061,8 @@ def http_server_thread() -> None:
                 lat_raw = body.get("base_lat")
                 lon_raw = body.get("base_lon")
                 zoom_raw = body.get("base_zoom")
+                heading_ref_raw = body.get("heading_ref_deg")
+                map_idle_raw = body.get("map_auto_center_idle_sec")
                 try:
                     base_lat = None if lat_raw in (None, "") else float(lat_raw)
                 except Exception:
@@ -7176,7 +7086,21 @@ def http_server_thread() -> None:
                     base_zoom = int(zoom_raw if zoom_raw not in (None, "") else 13)
                 except Exception:
                     base_zoom = 13
-                base_zoom = max(3, min(19, base_zoom))
+                base_zoom = max(3, min(30, base_zoom))
+                try:
+                    heading_ref_deg = float(heading_ref_raw if heading_ref_raw not in (None, "") else 0.0)
+                except Exception:
+                    self._send_json({"ok": False, "error": "invalid heading_ref_deg"}, 400)
+                    return
+                heading_ref_deg = heading_ref_deg % 360.0
+                if heading_ref_deg < 0:
+                    heading_ref_deg += 360.0
+                try:
+                    map_auto_center_idle_sec = int(map_idle_raw if map_idle_raw not in (None, "") else 20)
+                except Exception:
+                    self._send_json({"ok": False, "error": "invalid map_auto_center_idle_sec"}, 400)
+                    return
+                map_auto_center_idle_sec = max(5, min(600, map_auto_center_idle_sec))
                 try:
                     cfg = load_app_config(APP_CONFIG_PATH)
                     web_cfg = cfg.get("web")
@@ -7186,6 +7110,8 @@ def http_server_thread() -> None:
                     web_cfg["base_lat"] = base_lat
                     web_cfg["base_lon"] = base_lon
                     web_cfg["base_zoom"] = base_zoom
+                    web_cfg["heading_ref_deg"] = round(float(heading_ref_deg), 2)
+                    web_cfg["map_auto_center_idle_sec"] = int(map_auto_center_idle_sec)
                     cfg["web"] = web_cfg
                     ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
                     if not ok:
@@ -7202,6 +7128,8 @@ def http_server_thread() -> None:
                         "base_lat": WEB_CFG.get("base_lat"),
                         "base_lon": WEB_CFG.get("base_lon"),
                         "base_zoom": WEB_CFG.get("base_zoom"),
+                        "heading_ref_deg": WEB_CFG.get("heading_ref_deg"),
+                        "map_auto_center_idle_sec": WEB_CFG.get("map_auto_center_idle_sec"),
                     }, 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
@@ -7261,6 +7189,8 @@ def http_server_thread() -> None:
 
     _threading.Thread(target=_ws_push_loop, daemon=True).start()
     _log(f"[INFO] HTTP+WS service started: http://0.0.0.0:{HTTP_PORT}/")
+    if not _auth_enabled():
+        _log("[WARN] Web auth disabled: API is exposed to LAN; enable auth in config for safety")
     try:
         srv.serve_forever()
     except Exception as e:
@@ -8049,3 +7979,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

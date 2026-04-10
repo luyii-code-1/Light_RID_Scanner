@@ -41,7 +41,9 @@
     "base_name": "RID Station",
     "base_lat": null,
     "base_lon": null,
-    "base_zoom": 18
+    "base_zoom": 18,
+    "heading_ref_deg": 0.0,
+    "map_auto_center_idle_sec": 20
   },
   "ap": {
     "list_max": 80,

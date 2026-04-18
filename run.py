@@ -1,30 +1,15 @@
-﻿#!/usr/bin/env python3
-"""run.py - OpenDroneID (Remote ID) WiFi monitor/parser (WLAN-only).
-
-Features:
-1) More robust parsing: looser BasicID validation and more complete IE/NAN search.
-2) Better CJK alignment in TUI without third-party width libraries.
-3) `--debug` logs are written into the TUI scan buffer instead of `stderr`.
-4) Press `d` to view full scan logs (including raw debug frame info).
-5) Table is force-refreshed every 0.5s.
-
-Usage:
-  sudo python3 run.py --channel 6 --time 2
-  sudo python3 run.py --hop --time 2
-  sudo python3 run.py --no-tui --debug
-"""
-
-from __future__ import annotations
-
+﻿from __future__ import annotations
 import argparse
 import base64
 import curses
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import math
 import os
+import platform
 import queue
 import random
 import re
@@ -150,6 +135,15 @@ WEB_CFG: dict = {
     "base_zoom": 13,
     "heading_ref_deg": 0.0,
     "map_auto_center_idle_sec": 20,
+    "alarm_zones": [],
+    "alarm_zone": {
+        "enabled": False,
+        "lat1": None,
+        "lon1": None,
+        "lat2": None,
+        "lon2": None,
+        "name": "报警区域",
+    },
 }
 AP_CFG: dict = {
     "list_max": AP_LIST_MAX_DEFAULT,
@@ -167,12 +161,22 @@ AUTH_SESSION_TTL_SEC = 12 * 3600
 auth_session_lock = Lock()
 auth_sessions: dict[str, float] = {}
 auth_session_secret = secrets.token_hex(16)
+API_CFG: dict = {
+    "enabled": False,
+    "token": "",
+    "token_sha256": "",
+    "whitelist_enabled": False,
+    "whitelist": [],
+}
+PAGE_API_HEADER = "X-LightRID-Page"
+PAGE_API_HEADER_VALUE = "1"
 NOTIFY_CFG: dict = {
     "enabled": False,
     "only_online": True,
     "notify_reonline": True,
     "reonline_cooldown_sec": NOTIFY_REONLINE_COOLDOWN_DEFAULT,
     "skip_mac_only": True,
+    "wecom_webhooks": [],
     "wecom_webhook_key": "",
     "send_timeout_sec": 8,
 }
@@ -681,7 +685,7 @@ def default_app_config() -> dict:
             "change_on_payload": False,
             "model_map": os.path.join(os.getcwd(), "rid_models.json"),
             "history_file": os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-            "no_tui": False,
+            "no_tui": True,
             "debug": False,
         },
         "notify": {
@@ -691,6 +695,7 @@ def default_app_config() -> dict:
             "reonline_cooldown_sec": int(NOTIFY_REONLINE_COOLDOWN_DEFAULT),
             "skip_mac_only": True,
             "send_timeout_sec": 8,
+            "wecom_webhooks": [],
             "wecom_webhook_key": "",
         },
         "web": {
@@ -707,6 +712,15 @@ def default_app_config() -> dict:
             "base_zoom": 13,
             "heading_ref_deg": 0.0,
             "map_auto_center_idle_sec": 20,
+            "alarm_zones": [],
+            "alarm_zone": {
+                "enabled": False,
+                "lat1": None,
+                "lon1": None,
+                "lat2": None,
+                "lon2": None,
+                "name": "报警区域",
+            },
         },
         "ap": {
             "list_max": AP_LIST_MAX_DEFAULT,
@@ -718,6 +732,13 @@ def default_app_config() -> dict:
             "username_sha256": "",
             "password_sha256": "",
             "realm": "Light RID Scanner",
+        },
+        "api": {
+            "enabled": False,
+            "token": "",
+            "token_sha256": "",
+            "whitelist_enabled": False,
+            "whitelist": [],
         },
     }
 
@@ -846,6 +867,486 @@ def save_app_config(path: str | None, cfg: dict) -> tuple[bool, str]:
             pass
         return False, str(e)
 
+def create_config_backup(path: str | None, tag: str = "save") -> tuple[bool, str]:
+    if not path:
+        return False, "missing config path"
+    if not os.path.exists(path):
+        return True, ""
+    try:
+        parent = os.path.dirname(path) or os.getcwd()
+        backup_dir = os.path.join(parent, "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base = os.path.basename(path)
+        dst = os.path.join(backup_dir, f"{base}.{tag}.{ts}.bak")
+        shutil.copy2(path, dst)
+        return True, dst
+    except Exception as e:
+        return False, str(e)
+
+def restore_config_backup(path: str | None, backup_path: str | None) -> tuple[bool, str]:
+    if not path or not backup_path:
+        return False, "backup path missing"
+    if not os.path.exists(backup_path):
+        return False, "backup not found"
+    try:
+        shutil.copy2(backup_path, path)
+        return True, path
+    except Exception as e:
+        return False, str(e)
+
+def _settings_secret_update(new_value, current_hash: str | None) -> tuple[str, bool]:
+    raw = str(new_value or "").strip()
+    cur = str(current_hash or "").strip().lower()
+    if raw in ("", "********", "__KEEP__"):
+        return cur, False
+    if raw.lower() == "__CLEAR__":
+        return "", True
+    return _sha256_hex(raw), True
+
+def _settings_secret_text_update(new_value, current_value: str | None) -> tuple[str, bool]:
+    raw = str(new_value or "").strip()
+    cur = str(current_value or "").strip()
+    if raw in ("", "********", "__KEEP__"):
+        return cur, False
+    if raw.lower() == "__clear__":
+        return "", True
+    return raw, True
+
+def _settings_view_payload() -> dict:
+    cfg = load_app_config(APP_CONFIG_PATH) if APP_CONFIG_PATH else default_app_config()
+    basic = cfg.get("basic") if isinstance(cfg, dict) else {}
+    if not isinstance(basic, dict):
+        basic = {}
+    notify = cfg.get("notify") if isinstance(cfg, dict) else {}
+    if not isinstance(notify, dict):
+        notify = {}
+    web = cfg.get("web") if isinstance(cfg, dict) else {}
+    if not isinstance(web, dict):
+        web = {}
+    api = cfg.get("api") if isinstance(cfg, dict) else {}
+    if not isinstance(api, dict):
+        api = {}
+    auth = cfg.get("auth") if isinstance(cfg, dict) else {}
+    if not isinstance(auth, dict):
+        auth = {}
+    api_prepared = _prepare_api_cfg_for_save(api)
+    auth_prepared = _prepare_auth_cfg_for_save(auth)
+    notify_norm = _normalize_notify_cfg({"notify": notify})
+    web_norm = _normalize_web_cfg({"web": web})
+    zones = list(web_norm.get("alarm_zones") or [])
+    hooks = list(notify_norm.get("wecom_webhooks") or [])
+    channel_raw = basic.get("channel")
+    try:
+        channel_effective = int(channel_raw) if channel_raw not in (None, "") else 6
+    except Exception:
+        channel_effective = 6
+    host = _host_resource_snapshot()
+    host["active_iface"] = str(sniff_iface_name or basic.get("iface") or "")
+    host["current_channel"] = int(current_channel or channel_effective or 6)
+    host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
+    api_mask = ""
+    if str(api_prepared.get("token") or "").strip():
+        api_mask = _mask_secret(str(api_prepared.get("token") or ""), keep=4)
+    elif str(api_prepared.get("token_sha256") or "").strip():
+        api_mask = "********"
+    return {
+        "ok": True,
+        "path": APP_CONFIG_PATH or "",
+        "visual": {
+            "basic": {
+                "iface": None if basic.get("iface") in (None, "") else str(basic.get("iface")),
+                "channel": channel_raw,
+                "channel_effective": channel_effective,
+                "channel_custom": channel_raw not in (None, ""),
+                "hop": bool(basic.get("hop")),
+                "hop_5g": bool(basic.get("hop_5g")),
+                "scan_wifi_fast": bool(basic.get("scan_wifi_fast")),
+                "auto_self_heal": bool(basic.get("auto_self_heal", True)),
+                "dwell_2g": basic.get("dwell_2g", DWELL_2G_DEFAULT),
+                "dwell_5g": basic.get("dwell_5g", DWELL_5G_DEFAULT),
+                "settle": basic.get("settle", SETTLE_DEFAULT),
+                "dwell_on_hit": basic.get("dwell_on_hit", 2500),
+                "hit_cap": basic.get("hit_cap", 6000),
+                "time": basic.get("time", DEFAULT_PRINT_INTERVAL),
+                "min_gap": basic.get("min_gap", DEFAULT_MIN_GAP),
+                "rssi_delta": basic.get("rssi_delta", 3),
+                "change_on_rssi": bool(basic.get("change_on_rssi")),
+                "change_on_payload": bool(basic.get("change_on_payload")),
+                "debug": bool(basic.get("debug")),
+                "model_map": str(basic.get("model_map") or os.path.join(os.getcwd(), "rid_models.json")),
+                "history_file": str(basic.get("history_file") or os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT)),
+            },
+            "notify": {
+                "enabled": bool(notify_norm.get("enabled")),
+                "notify_reonline": bool(notify_norm.get("notify_reonline", True)),
+                "reonline_cooldown_sec": int(notify_norm.get("reonline_cooldown_sec") or NOTIFY_REONLINE_COOLDOWN_DEFAULT),
+                "send_timeout_sec": int(notify_norm.get("send_timeout_sec") or 8),
+                "wecom_webhook_key_masked": (_mask_secret(str(hooks[0].get("key") or "")) if hooks else ""),
+                "wecom_webhooks": [
+                    {
+                        "index": idx,
+                        "name": str(item.get("name") or f"通道 {idx + 1}"),
+                        "enabled": bool(item.get("enabled", True)),
+                        "key_masked": _mask_secret(str(item.get("key") or "")),
+                    }
+                    for idx, item in enumerate(hooks)
+                ],
+            },
+            "web": {
+                "dji_lookup_url": str(web_norm.get("dji_lookup_url") or DJI_LOOKUP_URL_DEFAULT),
+                "base_name": str(web_norm.get("base_name") or "基站"),
+                "base_lat": web_norm.get("base_lat"),
+                "base_lon": web_norm.get("base_lon"),
+                "base_zoom": web_norm.get("base_zoom", 13),
+                "heading_ref_deg": web_norm.get("heading_ref_deg", 0.0),
+                "map_auto_center_idle_sec": web_norm.get("map_auto_center_idle_sec", 20),
+                "alarm_zones": zones,
+            },
+            "api": {
+                "enabled": bool(api_prepared.get("enabled")),
+                "configured": bool(api_prepared.get("token_sha256")),
+                "token_masked": api_mask,
+                "token_copy_supported": bool(api_prepared.get("token")),
+                "whitelist_enabled": bool(api_prepared.get("whitelist_enabled")),
+                "whitelist": list(api_prepared.get("whitelist") or []),
+            },
+            "auth": {
+                "enabled": bool(auth_prepared.get("enabled")),
+                "configured": _auth_hashes_present(auth_prepared),
+                "username_masked": ("已设置" if str(auth_prepared.get("username_sha256") or "").strip() else ""),
+                "password_masked": ("********" if str(auth_prepared.get("password_sha256") or "").strip() else ""),
+                "realm": str(auth_prepared.get("realm") or "Light RID Scanner"),
+            },
+        },
+        "host": host,
+        "interfaces": _iface_options_snapshot(),
+        "hardware_link": "/hardware-assistant",
+    }
+
+def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, str | None]:
+    if not APP_CONFIG_PATH:
+        return None, "config path missing"
+    payload = body if isinstance(body, dict) else {}
+    cfg = load_app_config(APP_CONFIG_PATH)
+    basic = cfg.setdefault("basic", {})
+    notify = cfg.setdefault("notify", {})
+    web = cfg.setdefault("web", {})
+    api = cfg.setdefault("api", {})
+    auth = cfg.setdefault("auth", {})
+    if not isinstance(basic, dict): basic = {}; cfg["basic"] = basic
+    if not isinstance(notify, dict): notify = {}; cfg["notify"] = notify
+    if not isinstance(web, dict): web = {}; cfg["web"] = web
+    if not isinstance(api, dict): api = {}; cfg["api"] = api
+    if not isinstance(auth, dict): auth = {}; cfg["auth"] = auth
+
+    p_basic = payload.get("basic") if isinstance(payload.get("basic"), dict) else {}
+    p_notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
+    p_web = payload.get("web") if isinstance(payload.get("web"), dict) else {}
+    p_api = payload.get("api") if isinstance(payload.get("api"), dict) else {}
+    p_auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
+
+    iface_raw = p_basic.get("iface")
+    iface = None if iface_raw in (None, "") else str(iface_raw).strip()
+    if iface:
+        safe_iface = _hw_safe_iface(iface)
+        if not safe_iface:
+            return {"ok": False, "error": "invalid iface"}
+        iface = safe_iface
+    basic["iface"] = iface
+    if bool(p_basic.get("channel_use_default")):
+        basic["channel"] = None
+    else:
+        try:
+            basic["channel"] = None if p_basic.get("channel") in (None, "") else int(p_basic.get("channel"))
+        except Exception:
+            return {"ok": False, "error": "invalid channel"}
+    for k in ("hop", "hop_5g", "scan_wifi_fast", "auto_self_heal", "change_on_rssi", "change_on_payload", "debug", "no_tui"):
+        if k in p_basic:
+            basic[k] = bool(p_basic.get(k))
+    for k, default_v in (
+        ("time", DEFAULT_PRINT_INTERVAL),
+        ("min_gap", DEFAULT_MIN_GAP),
+        ("dwell_2g", DWELL_2G_DEFAULT),
+        ("dwell_5g", DWELL_5G_DEFAULT),
+        ("settle", SETTLE_DEFAULT),
+        ("dwell_on_hit", 2500),
+        ("hit_cap", 6000),
+    ):
+        if k in p_basic:
+            try:
+                basic[k] = max(0.0, float(p_basic.get(k)))
+            except Exception:
+                return {"ok": False, "error": f"invalid {k}"}
+            if k not in ("time", "min_gap"):
+                basic[k] = int(round(float(basic[k])))
+    if "rssi_delta" in p_basic:
+        try:
+            basic["rssi_delta"] = max(1, int(p_basic.get("rssi_delta")))
+        except Exception:
+            return {"ok": False, "error": "invalid rssi_delta"}
+    for k in ("model_map", "history_file"):
+        if k in p_basic:
+            basic[k] = str(p_basic.get(k) or "").strip()
+
+    for k in ("enabled", "notify_reonline"):
+        if k in p_notify:
+            notify[k] = bool(p_notify.get(k))
+    for k, min_v in (("reonline_cooldown_sec", 0), ("send_timeout_sec", 2)):
+        if k in p_notify:
+            try:
+                notify[k] = max(min_v, int(p_notify.get(k)))
+            except Exception:
+                return {"ok": False, "error": f"invalid {k}"}
+    hooks_payload = p_notify.get("wecom_webhooks")
+    if isinstance(hooks_payload, list):
+        existing_hooks = _normalize_notify_cfg({"notify": notify}).get("wecom_webhooks") or []
+        hooks_next: list[dict] = []
+        for idx, item in enumerate(hooks_payload):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or f"通道 {idx + 1}").strip() or f"通道 {idx + 1}"
+            enabled = bool(item.get("enabled", True))
+            cur_key = ""
+            try:
+                src_idx = int(item.get("index"))
+                if 0 <= src_idx < len(existing_hooks):
+                    cur_key = str(existing_hooks[src_idx].get("key") or "").strip()
+            except Exception:
+                cur_key = ""
+            raw = str(item.get("key") or "").strip()
+            if raw in ("", "********", "__KEEP__"):
+                raw = cur_key
+            if not raw:
+                continue
+            hooks_next.append({"name": name, "enabled": enabled, "key": raw})
+        notify["wecom_webhooks"] = _normalize_wecom_webhooks(hooks_next, "")
+        notify["wecom_webhook_key"] = str((notify["wecom_webhooks"][0]["key"] if notify["wecom_webhooks"] else "") or "")
+    else:
+        new_wecom = p_notify.get("wecom_webhook_key")
+        if new_wecom is not None:
+            raw = str(new_wecom or "").strip()
+            if raw not in ("", "********", "__KEEP__"):
+                notify["wecom_webhook_key"] = raw
+        notify["wecom_webhooks"] = _normalize_wecom_webhooks(notify.get("wecom_webhooks"), notify.get("wecom_webhook_key") or "")
+        notify["wecom_webhook_key"] = str((notify["wecom_webhooks"][0]["key"] if notify["wecom_webhooks"] else notify.get("wecom_webhook_key") or "") or "")
+
+    for k in ("dji_lookup_url", "base_name"):
+        if k in p_web:
+            web[k] = str(p_web.get(k) or "").strip()
+    for k, lo, hi in (("base_lat", -90.0, 90.0), ("base_lon", -180.0, 180.0)):
+        if k in p_web:
+            try:
+                raw_v = p_web.get(k)
+                web[k] = None if raw_v in (None, "") else float(raw_v)
+            except Exception:
+                return {"ok": False, "error": f"invalid {k}"}
+            if web[k] is not None and not (lo <= float(web[k]) <= hi):
+                return {"ok": False, "error": f"{k} out of range"}
+    for k, mn, mx in (("base_zoom", 3, 30), ("map_auto_center_idle_sec", 5, 600)):
+        if k in p_web:
+            try:
+                web[k] = max(mn, min(mx, int(p_web.get(k))))
+            except Exception:
+                return {"ok": False, "error": f"invalid {k}"}
+    if "heading_ref_deg" in p_web:
+        try:
+            hd = float(p_web.get("heading_ref_deg") if p_web.get("heading_ref_deg") not in (None, "") else 0.0)
+            hd = hd % 360.0
+            if hd < 0:
+                hd += 360.0
+            web["heading_ref_deg"] = round(hd, 2)
+        except Exception:
+            return {"ok": False, "error": "invalid heading_ref_deg"}
+    zones_payload = p_web.get("alarm_zones")
+    if isinstance(zones_payload, list):
+        zones_next: list[dict] = []
+        for idx, zone in enumerate(zones_payload):
+            if not isinstance(zone, dict):
+                continue
+            zone_cfg = {
+                "enabled": bool(zone.get("enabled", False)),
+                "name": str(zone.get("name") or f"报警区域 {idx + 1}").strip() or f"报警区域 {idx + 1}",
+            }
+            provided = 0
+            for k, lo, hi in (("lat1", -90.0, 90.0), ("lat2", -90.0, 90.0), ("lon1", -180.0, 180.0), ("lon2", -180.0, 180.0)):
+                try:
+                    raw_v = zone.get(k)
+                    zone_cfg[k] = None if raw_v in (None, "") else float(raw_v)
+                except Exception:
+                    return {"ok": False, "error": f"invalid alarm_zones[{idx}].{k}"}
+                if zone_cfg[k] is not None:
+                    provided += 1
+                    if not (lo <= float(zone_cfg[k]) <= hi):
+                        return {"ok": False, "error": f"alarm_zones[{idx}].{k} out of range"}
+            if provided == 0:
+                zone_cfg["enabled"] = False
+            elif provided != 4:
+                return {"ok": False, "error": f"alarm_zones[{idx}] incomplete"}
+            zones_next.append(zone_cfg)
+        web["alarm_zones"] = zones_next
+        web["alarm_zone"] = zones_next[0] if zones_next else _normalize_alarm_zone_item({}, idx=1)
+    else:
+        zone = p_web.get("alarm_zone") if isinstance(p_web.get("alarm_zone"), dict) else {}
+        zone_cfg = dict(web.get("alarm_zone") or {})
+        zone_cfg["enabled"] = bool(zone.get("enabled", zone_cfg.get("enabled", False)))
+        zone_cfg["name"] = str(zone.get("name") or zone_cfg.get("name") or "报警区域").strip() or "报警区域"
+        for k, lo, hi in (("lat1", -90.0, 90.0), ("lat2", -90.0, 90.0), ("lon1", -180.0, 180.0), ("lon2", -180.0, 180.0)):
+            if k in zone:
+                try:
+                    raw_v = zone.get(k)
+                    zone_cfg[k] = None if raw_v in (None, "") else float(raw_v)
+                except Exception:
+                    return {"ok": False, "error": f"invalid alarm_zone.{k}"}
+                if zone_cfg[k] is not None and not (lo <= float(zone_cfg[k]) <= hi):
+                    return {"ok": False, "error": f"alarm_zone.{k} out of range"}
+        web["alarm_zone"] = zone_cfg
+        web["alarm_zones"] = _normalize_alarm_zones([], zone_cfg)
+
+    if "enabled" in p_api:
+        api["enabled"] = bool(p_api.get("enabled"))
+    if "whitelist_enabled" in p_api:
+        api["whitelist_enabled"] = bool(p_api.get("whitelist_enabled"))
+    if "whitelist" in p_api:
+        api["whitelist"] = _parse_whitelist_entries(p_api.get("whitelist"))
+    if "token" in p_api:
+        token_value, changed = _settings_secret_text_update(p_api.get("token"), api.get("token"))
+        if changed:
+            api["token"] = token_value
+            api["token_sha256"] = (_sha256_hex(token_value) if token_value else "")
+
+    if "enabled" in p_auth:
+        auth["enabled"] = bool(p_auth.get("enabled"))
+    if "realm" in p_auth:
+        auth["realm"] = str(p_auth.get("realm") or "Light RID Scanner").strip() or "Light RID Scanner"
+    if "username" in p_auth:
+        raw_user = str(p_auth.get("username") or "").strip()
+        if raw_user not in ("", "__KEEP__", "已设置"):
+            auth["username_sha256"] = _sha256_hex(raw_user)
+        elif raw_user.lower() == "__clear__":
+            auth["username_sha256"] = ""
+    if "password" in p_auth:
+        raw_pass = str(p_auth.get("password") or "")
+        raw_pass_trim = raw_pass.strip()
+        if raw_pass_trim not in ("", "__KEEP__", "********"):
+            auth["password_sha256"] = _sha256_hex(raw_pass)
+        elif raw_pass_trim.lower() == "__clear__":
+            auth["password_sha256"] = ""
+
+    cfg, guard_err = _prepare_security_cfg_for_save(cfg)
+    if guard_err:
+        return None, guard_err
+
+    return cfg, None
+
+def _run_visual_settings_test(candidate_cfg: dict, previous_cfg: dict | None = None, notify_test: bool = True, keep_runtime: bool = False) -> tuple[bool, str, str]:
+    prev_cfg = _deep_merge_dict(default_app_config(), previous_cfg if isinstance(previous_cfg, dict) else APP_CONFIG)
+    notify_msg = ""
+    r_ok, r_msg = reload_runtime_config(candidate_cfg)
+    if not r_ok:
+        try:
+            reload_runtime_config(prev_cfg)
+        except Exception:
+            pass
+        return False, str(r_msg or "runtime config reload failed"), notify_msg
+    try:
+        if notify_test:
+            notify_norm = _normalize_notify_cfg(candidate_cfg)
+            if bool(notify_norm.get("enabled")) and _notify_wecom_targets(notify_norm):
+                n_ok, notify_msg = send_test_notification_from_config(candidate_cfg)
+                if not n_ok:
+                    raise RuntimeError(str(notify_msg or "notify test failed"))
+            else:
+                notify_msg = "skip"
+        if not keep_runtime:
+            rb_ok, rb_msg = reload_runtime_config(prev_cfg)
+            if not rb_ok:
+                return False, f"测试结束但运行时回滚失败: {rb_msg}", notify_msg
+        return True, "test ok", notify_msg
+    except Exception as e:
+        try:
+            reload_runtime_config(prev_cfg)
+        except Exception as rb_e:
+            return False, f"{e}; rollback failed: {rb_e}", notify_msg
+        return False, str(e), notify_msg
+
+def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
+    if not APP_CONFIG_PATH:
+        return {"ok": False, "error": "config path missing"}
+    prev_cfg = load_app_config(APP_CONFIG_PATH)
+    candidate_cfg, build_err = _build_visual_settings_candidate(body)
+    if build_err or not isinstance(candidate_cfg, dict):
+        return {"ok": False, "error": str(build_err or "invalid candidate config")}
+
+    test_ok, test_msg, notify_msg = _run_visual_settings_test(
+        candidate_cfg,
+        previous_cfg=prev_cfg,
+        notify_test=True,
+        keep_runtime=not test_only,
+    )
+    if not test_ok:
+        return {"ok": False, "error": test_msg, "notify_test": notify_msg}
+
+    if test_only:
+        return {
+            "ok": True,
+            "tested": True,
+            "saved": False,
+            "reload_msg": "draft tested and rolled back",
+            "notify_test": notify_msg,
+            "settings": _settings_view_payload().get("visual"),
+        }
+
+    backup_path = ""
+    b_ok, b_msg = create_config_backup(APP_CONFIG_PATH, tag="settings")
+    if not b_ok:
+        try:
+            reload_runtime_config(prev_cfg)
+        except Exception:
+            pass
+        return {"ok": False, "error": f"backup failed: {b_msg}"}
+    backup_path = b_msg
+
+    ok, msg = save_app_config(APP_CONFIG_PATH, candidate_cfg)
+    if not ok:
+        try:
+            restore_config_backup(APP_CONFIG_PATH, backup_path)
+            reload_runtime_config(prev_cfg)
+        except Exception:
+            pass
+        return {"ok": False, "error": f"save failed: {msg}"}
+
+    cfg_loaded = load_app_config(APP_CONFIG_PATH)
+    r_ok, r_msg = reload_runtime_config(cfg_loaded)
+    if not r_ok:
+        restore_ok, restore_msg = restore_config_backup(APP_CONFIG_PATH, backup_path)
+        try:
+            reload_runtime_config(prev_cfg)
+        except Exception:
+            pass
+        if restore_ok:
+            return {"ok": False, "error": f"reload failed: {r_msg}; rolled back from backup", "backup_path": backup_path}
+        return {"ok": False, "error": f"reload failed: {r_msg}; restore failed: {restore_msg}", "backup_path": backup_path}
+
+    iface = None
+    payload = body if isinstance(body, dict) else {}
+    p_basic = payload.get("basic") if isinstance(payload.get("basic"), dict) else {}
+    iface_raw = p_basic.get("iface")
+    iface = None if iface_raw in (None, "") else str(iface_raw).strip()
+    if iface:
+        _sniff_recover_iface(iface, "settings apply default iface", force=True)
+    return {
+        "ok": True,
+        "saved_to": APP_CONFIG_PATH,
+        "backup_path": backup_path,
+        "tested": True,
+        "saved": True,
+        "reloaded": bool(r_ok),
+        "reload_msg": r_msg,
+        "notify_test": notify_msg,
+        "settings": _settings_view_payload().get("visual"),
+    }
+
 def _parser_explicit_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
     explicit: set[str] = set()
     opt_to_dest: dict[str, str] = {}
@@ -931,7 +1432,10 @@ def _normalize_notify_cfg(cfg: dict | None) -> dict:
     base["only_online"] = bool(base.get("only_online", True))
     base["notify_reonline"] = bool(base.get("notify_reonline", True))
     base["skip_mac_only"] = bool(base.get("skip_mac_only", True))
-    base["wecom_webhook_key"] = str(base.get("wecom_webhook_key") or "").strip()
+    legacy_key = str(base.get("wecom_webhook_key") or "").strip()
+    hooks = _normalize_wecom_webhooks(base.get("wecom_webhooks"), legacy_key)
+    base["wecom_webhooks"] = hooks
+    base["wecom_webhook_key"] = str((hooks[0]["key"] if hooks else legacy_key) or "").strip()
     return base
 
 def _normalize_web_cfg(cfg: dict | None) -> dict:
@@ -982,6 +1486,9 @@ def _normalize_web_cfg(cfg: dict | None) -> dict:
     except Exception:
         idle_sec = 20
     base["map_auto_center_idle_sec"] = max(5, min(600, idle_sec))
+    zones = _normalize_alarm_zones(base.get("alarm_zones"), base.get("alarm_zone"))
+    base["alarm_zones"] = zones
+    base["alarm_zone"] = zones[0] if zones else _normalize_alarm_zone_item({}, idx=1)
     return base
 
 def _normalize_ap_cfg(cfg: dict | None) -> dict:
@@ -1003,6 +1510,116 @@ def _normalize_ap_cfg(cfg: dict | None) -> dict:
 
 def _sha256_hex(text: str) -> str:
     return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest().lower()
+
+def _auth_hashes_present(auth_cfg: dict | None = None) -> bool:
+    source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
+    return bool(str(source.get("username_sha256") or "").strip()) and bool(str(source.get("password_sha256") or "").strip())
+
+def _parse_whitelist_entries(values) -> list[str]:
+    items: list[str] = []
+    if isinstance(values, list):
+        src = values
+    elif values in (None, ""):
+        src = []
+    else:
+        src = str(values).replace("\r", "\n").split("\n")
+    seen: set[str] = set()
+    for raw in src:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        try:
+            ipaddress.ip_network(text, strict=False)
+        except Exception:
+            continue
+        seen.add(text)
+        items.append(text)
+    return items
+
+def _api_ip_allowed(ip_text: str | None, entries: list[str] | None = None) -> bool:
+    if not bool(API_CFG.get("whitelist_enabled")) and entries is None:
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(str(ip_text or "").strip())
+    except Exception:
+        return False
+    allow_list = list(entries if entries is not None else (API_CFG.get("whitelist") or []))
+    if not allow_list:
+        return False
+    for item in allow_list:
+        try:
+            if ip_obj in ipaddress.ip_network(str(item), strict=False):
+                return True
+        except Exception:
+            continue
+    return False
+
+def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
+    raw = dict(auth_cfg) if isinstance(auth_cfg, dict) else {}
+    out = dict(raw)
+    plain_user = str(out.pop("username", "") or "").strip()
+    plain_pass = str(out.pop("password", "") or "")
+    user_hash = str(out.get("username_sha256") or "").strip().lower()
+    pass_hash = str(out.get("password_sha256") or "").strip().lower()
+    if plain_user:
+        user_hash = _sha256_hex(plain_user)
+    if plain_pass:
+        pass_hash = _sha256_hex(plain_pass)
+    if not re.fullmatch(r"[0-9a-f]{64}", user_hash or ""):
+        user_hash = ""
+    if not re.fullmatch(r"[0-9a-f]{64}", pass_hash or ""):
+        pass_hash = ""
+    out["enabled"] = bool(out.get("enabled"))
+    out["realm"] = str(out.get("realm") or "Light RID Scanner").strip() or "Light RID Scanner"
+    out["username_sha256"] = user_hash
+    out["password_sha256"] = pass_hash
+    return out
+
+def _prepare_api_cfg_for_save(api_cfg: dict | None) -> dict:
+    raw = dict(api_cfg) if isinstance(api_cfg, dict) else {}
+    out = dict(raw)
+    plain_token = str(out.get("token") or out.get("token_plain") or "").strip()
+    token_hash = str(out.get("token_sha256") or "").strip().lower()
+    if plain_token:
+        token_hash = _sha256_hex(plain_token)
+    if not re.fullmatch(r"[0-9a-f]{64}", token_hash or ""):
+        token_hash = ""
+    out["enabled"] = bool(out.get("enabled"))
+    out["token"] = plain_token
+    out["token_sha256"] = token_hash
+    out["whitelist_enabled"] = bool(out.get("whitelist_enabled"))
+    out["whitelist"] = _parse_whitelist_entries(out.get("whitelist"))
+    out.pop("token_plain", None)
+    return out
+
+def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None) -> str | None:
+    auth = _prepare_auth_cfg_for_save(auth_cfg)
+    api = _prepare_api_cfg_for_save(api_cfg)
+    if bool(auth.get("enabled")) and (not _auth_hashes_present(auth)):
+        return "启用网页登录鉴权前，必须先设置网页登录账号和密码"
+    if api.get("whitelist_enabled") and not api.get("whitelist"):
+        return "API 白名单模式已开启，但白名单为空或格式无效"
+    if bool(api.get("enabled")):
+        if not bool(auth.get("enabled")):
+            return "启用外部 API 前，必须先启用网页登录鉴权"
+        if not _auth_hashes_present(auth):
+            return "启用外部 API 前，必须先设置网页登录账号和密码"
+        if not str(api.get("token_sha256") or "").strip():
+            return "启用外部 API 前，必须先设置 API Token"
+    return None
+
+def _prepare_security_cfg_for_save(cfg: dict | None) -> tuple[dict, str | None]:
+    out = dict(cfg) if isinstance(cfg, dict) else {}
+    auth_raw = out.get("auth") if isinstance(out.get("auth"), dict) else {}
+    api_raw = out.get("api") if isinstance(out.get("api"), dict) else {}
+    auth_next = _prepare_auth_cfg_for_save(auth_raw)
+    api_next = _prepare_api_cfg_for_save(api_raw)
+    err = _validate_security_sections(auth_next, api_next)
+    out["auth"] = auth_next
+    out["api"] = api_next
+    return out, err
 
 def _normalize_auth_cfg(cfg: dict | None) -> dict:
     base = dict(AUTH_CFG)
@@ -1034,6 +1651,119 @@ def _normalize_auth_cfg(cfg: dict | None) -> dict:
     base["password_sha256"] = p
     if base["enabled"] and (not u or not p):
         _log("[WARN] auth enabled but username/password hash missing, fallback disabled")
+        base["enabled"] = False
+    return base
+
+def _mask_secret(value: str | None, keep: int = 4) -> str:
+    raw = str(value or "")
+    if not raw:
+        return ""
+    keep = max(1, int(keep or 1))
+    if len(raw) <= keep * 2:
+        return "*" * len(raw)
+    return raw[:keep] + ("*" * max(4, len(raw) - keep * 2)) + raw[-keep:]
+
+def _normalize_wecom_webhooks(raw_list, legacy_key: str = "") -> list[dict]:
+    items: list[dict] = []
+    seen: set[str] = set()
+    src: list = []
+    legacy_key = str(legacy_key or "").strip()
+    if legacy_key:
+        src.append({"name": "默认通道", "key": legacy_key, "enabled": True})
+    if isinstance(raw_list, list):
+        src.extend(raw_list)
+    elif raw_list not in (None, "", []):
+        src.append(raw_list)
+    for idx, item in enumerate(src, 1):
+        if isinstance(item, dict):
+            name = str(item.get("name") or f"通道 {idx}").strip() or f"通道 {idx}"
+            key = str(item.get("key") or "").strip()
+            enabled = bool(item.get("enabled", True))
+        else:
+            name = f"通道 {idx}"
+            key = str(item or "").strip()
+            enabled = True
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "name": name,
+            "key": key,
+            "enabled": enabled,
+        })
+    return items
+
+def _normalize_alarm_zone_item(zone, idx: int = 1) -> dict:
+    base = dict(WEB_CFG.get("alarm_zone") or {})
+    zone = zone if isinstance(zone, dict) else {}
+    item = {
+        "enabled": bool(zone.get("enabled", base.get("enabled", False))),
+        "name": str(zone.get("name") or base.get("name") or f"报警区域 {idx}").strip() or f"报警区域 {idx}",
+    }
+    for k, lo, hi in (
+        ("lat1", -90.0, 90.0),
+        ("lat2", -90.0, 90.0),
+        ("lon1", -180.0, 180.0),
+        ("lon2", -180.0, 180.0),
+    ):
+        try:
+            raw_v = zone.get(k)
+            val = None if raw_v in (None, "") else float(raw_v)
+            if val is not None and not (lo <= val <= hi):
+                val = None
+        except Exception:
+            val = None
+        item[k] = val
+    if None in (item["lat1"], item["lon1"], item["lat2"], item["lon2"]):
+        item["enabled"] = False
+    return item
+
+def _normalize_alarm_zones(raw_list, legacy_zone=None) -> list[dict]:
+    src: list = []
+    if isinstance(raw_list, list):
+        src.extend(raw_list)
+    elif raw_list not in (None, "", []):
+        src.append(raw_list)
+    if (not src) and isinstance(legacy_zone, dict):
+        src.append(legacy_zone)
+    items: list[dict] = []
+    for idx, item in enumerate(src, 1):
+        norm = _normalize_alarm_zone_item(item, idx=idx)
+        has_coords = any(norm.get(k) is not None for k in ("lat1", "lon1", "lat2", "lon2"))
+        if not has_coords and not bool(norm.get("enabled")) and str(norm.get("name") or "").strip() in ("", "报警区域", f"报警区域 {idx}"):
+            continue
+        items.append(norm)
+    return items
+
+def _notify_wecom_targets(cfg: dict | None = None) -> list[dict]:
+    source = cfg if isinstance(cfg, dict) else NOTIFY_CFG
+    hooks = _normalize_wecom_webhooks(source.get("wecom_webhooks"), source.get("wecom_webhook_key") or "")
+    return [x for x in hooks if x.get("enabled") and str(x.get("key") or "").strip()]
+
+def _normalize_api_cfg(cfg: dict | None) -> dict:
+    base = dict(API_CFG)
+    if isinstance(cfg, dict):
+        api = cfg.get("api")
+        if isinstance(api, dict):
+            for k in base.keys():
+                if k in api:
+                    base[k] = api.get(k)
+    base = _prepare_api_cfg_for_save(base)
+    if base.get("token") and not str(base.get("token_sha256") or "").strip():
+        base["token_sha256"] = _sha256_hex(str(base.get("token") or "").strip())
+        _log("[WARN] api.token detected in plain text; converted to SHA-256 in memory")
+    auth_cfg = _normalize_auth_cfg(cfg)
+    if base["enabled"] and not str(base.get("token_sha256") or "").strip():
+        _log("[WARN] api token enabled but token hash missing, fallback disabled")
+        base["enabled"] = False
+    if base["enabled"] and not bool(auth_cfg.get("enabled")):
+        _log("[WARN] api enabled but auth disabled, fallback disabled")
+        base["enabled"] = False
+    if base["enabled"] and not _auth_hashes_present(auth_cfg):
+        _log("[WARN] api enabled but auth credentials missing, fallback disabled")
+        base["enabled"] = False
+    if base.get("whitelist_enabled") and not base.get("whitelist"):
+        _log("[WARN] api whitelist enabled but empty/invalid, fallback disabled")
         base["enabled"] = False
     return base
 
@@ -1077,12 +1807,16 @@ def init_auth_from_config(cfg: dict | None) -> None:
     global AUTH_CFG
     AUTH_CFG = _normalize_auth_cfg(cfg)
 
+def init_api_from_config(cfg: dict | None) -> None:
+    global API_CFG
+    API_CFG = _normalize_api_cfg(cfg)
+
 def init_notify_from_config(cfg: dict | None) -> None:
     global NOTIFY_CFG
     NOTIFY_CFG = _normalize_notify_cfg(cfg)
-    key = NOTIFY_CFG.get("wecom_webhook_key") or ""
-    if NOTIFY_CFG.get("enabled") and key:
-        _log("[INFO] WeCom robot notification enabled (online-only)")
+    hooks = _notify_wecom_targets(NOTIFY_CFG)
+    if NOTIFY_CFG.get("enabled") and hooks:
+        _log(f"[INFO] WeCom robot notification enabled ({len(hooks)} channel(s), online-only)")
     else:
         _log("[INFO] notify disabled (missing key or disabled)")
 
@@ -1094,6 +1828,7 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
+    init_api_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)
 
     basic = APP_CONFIG.get("basic")
@@ -1222,25 +1957,27 @@ def start_notify_worker() -> None:
 def queue_online_notification(e: dict, event_title: str, now_wall: float | None = None) -> bool:
     if not NOTIFY_CFG.get("enabled"):
         return False
-    key = str(NOTIFY_CFG.get("wecom_webhook_key") or "").strip()
-    if not key:
+    targets = _notify_wecom_targets(NOTIFY_CFG)
+    if not targets:
         return False
     now_wall = float(now_wall or time.time())
     content = _notify_online_text(e, event_title, now_wall)
-    _notify_queue_put({
-        "type": "wecom_text",
-        "key": key,
-        "content": content,
-        "timeout_sec": int(NOTIFY_CFG.get("send_timeout_sec") or 8),
-    })
+    for item in targets:
+        _notify_queue_put({
+            "type": "wecom_text",
+            "key": str(item.get("key") or "").strip(),
+            "content": content,
+            "timeout_sec": int(NOTIFY_CFG.get("send_timeout_sec") or 8),
+        })
     return True
 
-def send_test_notification_from_config() -> tuple[bool, str]:
-    if not NOTIFY_CFG.get("enabled"):
+def send_test_notification_from_config(cfg: dict | None = None) -> tuple[bool, str]:
+    notify_cfg = _normalize_notify_cfg(cfg) if isinstance(cfg, dict) else dict(NOTIFY_CFG)
+    if not notify_cfg.get("enabled"):
         return False, "notify disabled"
-    key = str(NOTIFY_CFG.get("wecom_webhook_key") or "").strip()
-    if not key:
-        return False, "missing wecom_webhook_key"
+    targets = _notify_wecom_targets(notify_cfg)
+    if not targets:
+        return False, "missing wecom webhook"
     now_wall = time.time()
     test_e = {
         "sn": "TEST-RID-ONLINE",
@@ -1257,11 +1994,16 @@ def send_test_notification_from_config() -> tuple[bool, str]:
         "vspeed": None,
         "pkt_count": 1,
     }
-    return _wecom_send_text(
-        key,
-        _notify_online_text(test_e, "上线(测试)", now_wall),
-        timeout_sec=int(NOTIFY_CFG.get("send_timeout_sec") or 8),
-    )
+    content = _notify_online_text(test_e, "上线(测试)", now_wall)
+    timeout_sec = int(notify_cfg.get("send_timeout_sec") or 8)
+    results: list[str] = []
+    ok_count = 0
+    for item in targets:
+        ok, resp = _wecom_send_text(str(item.get("key") or "").strip(), content, timeout_sec=timeout_sec)
+        if ok:
+            ok_count += 1
+        results.append(f"{item.get('name') or '通道'}: {'OK' if ok else 'FAIL'} {resp}")
+    return (ok_count > 0), " | ".join(results)
 
 def _mac_oui_key(mac: str | None) -> str:
     if not mac:
@@ -2829,6 +3571,9 @@ def _state_snapshot() -> dict:
             "sniff_idle_sec": sniff_meta.get("idle_sec"),
             "sniff_last_pkt": sniff_meta.get("last_pkt"),
             "sniff_last_err_at": sniff_meta.get("last_err_at"),
+            "alert_zone": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zone"),
+            "alert_zones": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zones"),
+            "settings_path": "/settings",
         },
     }
 
@@ -2839,26 +3584,36 @@ def _api_iso_now(ts: float | None = None) -> str:
         return ""
 
 def _api_meta() -> dict:
-    configured = bool(AUTH_CFG.get("username_sha256")) and bool(AUTH_CFG.get("password_sha256"))
+    auth_configured = _auth_hashes_present(AUTH_CFG)
+    api_configured = bool(API_CFG.get("token_sha256"))
+    public_enabled = bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and auth_configured and api_configured
     return {
         "name": API_NAME,
         "version": API_VERSION,
         "time": _api_iso_now(),
-        "auth": {
-            "type": "http_basic",
+        "web_auth": {
+            "type": "basic+session",
             "enabled": bool(_auth_enabled()),
-            "configured": bool(configured),
+            "configured": bool(auth_configured),
             "realm": str(AUTH_CFG.get("realm") or "Light RID Scanner"),
+        },
+        "public_api": {
+            "enabled": bool(public_enabled),
+            "configured": bool(api_configured),
+            "header": "X-API-Token",
+            "authorization": "Bearer <token>",
+            "whitelist_enabled": bool(API_CFG.get("whitelist_enabled")),
+            "whitelist_count": len(API_CFG.get("whitelist") or []),
+            "mode_when_disabled": "page-session-only",
         },
     }
 
 def _api_endpoint_index() -> list[dict]:
     return [
-        {"method": "GET", "path": "/api", "desc": "API index"},
+        {"method": "GET", "path": "/api/docs", "desc": "API docs and auth guide"},
         {"method": "GET", "path": "/api/health", "desc": "Service health"},
         {"method": "GET", "path": "/api/v1/snapshot", "desc": "Full runtime snapshot"},
         {"method": "GET", "path": "/api/v1/auth/status", "desc": "Auth status"},
-        {"method": "POST", "path": "/api/v1/auth/logout", "desc": "Clear auth session"},
         {"method": "GET", "path": "/api/v1/drones", "desc": "Drone list"},
         {"method": "GET", "path": "/api/v1/drones/{sn}", "desc": "Drone detail"},
         {"method": "GET", "path": "/api/v1/tracks/{sn}", "desc": "Track by SN"},
@@ -2869,6 +3624,61 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "POST", "path": "/api/v1/tracks/clear", "desc": "Clear tracks"},
         {"method": "POST", "path": "/api/v1/config/reload", "desc": "Reload config file"},
     ]
+
+def _api_token_enabled() -> bool:
+    return bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and _auth_hashes_present(AUTH_CFG)
+
+def _api_token_check_value(token: str | None) -> bool:
+    if not _api_token_enabled():
+        return False
+    raw = str(token or "").strip()
+    token_hash = str(API_CFG.get("token_sha256") or "").strip().lower()
+    if not raw or not token_hash:
+        return False
+    return hmac.compare_digest(_sha256_hex(raw), token_hash)
+
+def _api_token_from_request(headers, query: dict | None = None) -> str:
+    authz = str(headers.get("Authorization") or "").strip()
+    if authz.lower().startswith("bearer "):
+        return authz[7:].strip()
+    token = str(headers.get("X-API-Token") or "").strip()
+    if token:
+        return token
+    if isinstance(query, dict):
+        try:
+            arr = query.get("token") or [""]
+            return str(arr[0] or "").strip()
+        except Exception:
+            return ""
+    return ""
+
+def _api_token_docs_payload() -> dict:
+    return {
+        "ok": True,
+        "api": _api_meta(),
+        "auth": {
+            "type": "token",
+            "usage": [
+                "Header: X-API-Token: <token>",
+                "or Authorization: Bearer <token>",
+                "Query fallback: ?token=<token> (not recommended for browser history/privacy)",
+            ],
+            "disabled_behavior": "When public API is disabled, /api/docs, /api/health and /api/v1/* only work from the built-in web pages via page session requests.",
+        },
+        "endpoints": _api_endpoint_index(),
+    }
+
+def _path_uses_api_token(req_path: str | None) -> bool:
+    path = str(req_path or "").split("?", 1)[0]
+    if path == "/api/docs":
+        return True
+    if path == "/api/health":
+        return True
+    return path.startswith("/api/v1/")
+
+def _path_is_page_api(req_path: str | None) -> bool:
+    path = str(req_path or "").split("?", 1)[0]
+    return path.startswith("/api/") and (not _path_uses_api_token(path))
 
 def _auth_enabled() -> bool:
     return bool(AUTH_CFG.get("enabled"))
@@ -2956,6 +3766,27 @@ def _auth_check_session_cookie(cookie_header: str | None, *, refresh: bool = Tru
             auth_sessions[token] = now_wall + float(AUTH_SESSION_TTL_SEC)
     return True
 
+def _request_same_origin(headers) -> bool:
+    host = str(headers.get("Host") or "").strip().lower()
+    if not host:
+        return True
+    for header_name in ("Origin", "Referer"):
+        raw = str(headers.get(header_name) or "").strip()
+        if not raw:
+            continue
+        try:
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(raw)
+            if parsed.netloc and parsed.netloc.lower() != host:
+                return False
+        except Exception:
+            return False
+    return True
+
+def _page_api_header_ok(headers) -> bool:
+    value = str(headers.get(PAGE_API_HEADER) or "").strip()
+    return value == PAGE_API_HEADER_VALUE
+
 def _hw_safe_iface(iface: str) -> str | None:
     name = str(iface or "").strip()
     if not name:
@@ -2989,7 +3820,104 @@ def _hw_cmd_result(cmd: str, timeout: int = 8) -> dict:
             "stderr": str(e),
         }
 
+_HOST_CPU_LOCK = Lock()
+_HOST_CPU_CACHE: tuple[float, float] | None = None
+
+
+def _read_proc_cpu_totals() -> tuple[float, float] | None:
+    try:
+        with open("/proc/stat", "r", encoding="utf-8", errors="ignore") as f:
+            first = f.readline().strip()
+        if not first.startswith("cpu "):
+            return None
+        parts = [float(x) for x in first.split()[1:] if x.strip()]
+        if len(parts) < 4:
+            return None
+        idle = parts[3] + (parts[4] if len(parts) > 4 else 0.0)
+        total = float(sum(parts))
+        return idle, total
+    except Exception:
+        return None
+
+
+def _host_cpu_percent() -> float | None:
+    global _HOST_CPU_CACHE
+    snap = _read_proc_cpu_totals()
+    if snap:
+        idle, total = snap
+        with _HOST_CPU_LOCK:
+            prev = _HOST_CPU_CACHE
+            _HOST_CPU_CACHE = (idle, total)
+        if prev:
+            idle_prev, total_prev = prev
+            total_delta = total - total_prev
+            idle_delta = idle - idle_prev
+            if total_delta > 0:
+                busy = max(0.0, min(1.0, 1.0 - (idle_delta / total_delta)))
+                return round(busy * 100.0, 1)
+    try:
+        load1 = os.getloadavg()[0]
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        return round(max(0.0, min(100.0, (float(load1) / float(cpu_count)) * 100.0)), 1)
+    except Exception:
+        return None
+
+
+def _host_mem_stats() -> dict:
+    try:
+        data: dict[str, int] = {}
+        with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                try:
+                    data[k.strip()] = int(v.strip().split()[0])
+                except Exception:
+                    continue
+        total_kb = int(data.get("MemTotal") or 0)
+        avail_kb = int(data.get("MemAvailable") or data.get("MemFree") or 0)
+        if total_kb <= 0:
+            return {"percent": None, "used_mb": None, "total_mb": None}
+        used_kb = max(0, total_kb - avail_kb)
+        return {
+            "percent": round((used_kb / total_kb) * 100.0, 1),
+            "used_mb": int(round(used_kb / 1024.0)),
+            "total_mb": int(round(total_kb / 1024.0)),
+        }
+    except Exception:
+        return {"percent": None, "used_mb": None, "total_mb": None}
+
+
+def _host_resource_snapshot() -> dict:
+    mem = _host_mem_stats()
+    uptime_sec = None
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8", errors="ignore") as f:
+            uptime_sec = int(float((f.read().strip().split() or ["0"])[0]))
+    except Exception:
+        uptime_sec = None
+    load1 = load5 = load15 = None
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except Exception:
+        pass
+    return {
+        "hostname": str(platform.node() or os.environ.get("COMPUTERNAME") or "host"),
+        "cpu_percent": _host_cpu_percent(),
+        "cpu_count": int(os.cpu_count() or 1),
+        "mem_percent": mem.get("percent"),
+        "mem_used_mb": mem.get("used_mb"),
+        "mem_total_mb": mem.get("total_mb"),
+        "load1": (None if load1 is None else round(float(load1), 2)),
+        "load5": (None if load5 is None else round(float(load5), 2)),
+        "load15": (None if load15 is None else round(float(load15), 2)),
+        "uptime_sec": uptime_sec,
+    }
+
+
 def _hw_status_snapshot() -> dict:
+    host = _host_resource_snapshot()
     return {
         "items": _iface_options_snapshot(),
         "active_iface": str(sniff_iface_name or ""),
@@ -2998,6 +3926,7 @@ def _hw_status_snapshot() -> dict:
         "scan_wifi_fast": bool(SCAN_WIFI_FAST),
         "wifi_fast_supported": WIFI_FAST_SUPPORTED,
         "wifi_fast_msg": str(WIFI_FAST_SUPPORT_MSG or ""),
+        "host": host,
     }
 
 def _hw_execute_task(task: dict) -> dict:
@@ -3117,45 +4046,40 @@ _PAGE_HTML = """<!doctype html><html lang="zh"><head>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 :root{
-  --font-ui:"Rajdhani","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
-  --font-mono:"Share Tech Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;
-  --bg:#060b13;--bg2:#0d1522;--border:#20344f;--txt:#d2deee;
-  --green:#43d59b;--yellow:#e3ad38;--dim:#7a8a9d;--blue:#61b7ff;
-  --purple:#d2a8ff;--cyan:#79c0ff;--glow:rgba(88,166,255,.12)
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --bg:#201f1e;--bg2:#252423;--panel:#2b2a29;--panel2:#252423;--border:#3b3a39;--txt:#f3f2f1;
+  --green:#92c353;--yellow:#ffb900;--dim:#c8c6c4;--blue:#2899f5;
+  --purple:#caa0ff;--cyan:#7dc6ff;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03)
 }
 body{background:var(--bg);color:var(--txt);font-family:var(--font-ui);font-size:16px;
      height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) minmax(240px,38vh) auto;
      row-gap:12px;overflow:hidden;position:relative;
-     transition:background-color .18s,color .18s}
+     transition:background-color .16s ease,color .16s ease;
+     background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
 body.theme-light{
-  --bg:#f4f7fb;--bg2:#eef3f9;--border:#cfd8e3;--txt:#1f2937;
-  --green:#1f883d;--yellow:#9a6700;--dim:#6b7280;--blue:#0969da;
-  --purple:#8250df;--cyan:#1d4ed8;--glow:rgba(9,105,218,.08)
+  --bg:#f3f2f1;--bg2:#edebe9;--panel:#ffffff;--panel2:#faf9f8;--border:#e1dfdd;--txt:#323130;
+  --green:#107c10;--yellow:#986f0b;--dim:#605e5c;--blue:#0078d4;
+  --purple:#6b5bd2;--cyan:#005a9e;--glow:rgba(0,120,212,.10);--soft:rgba(0,0,0,.018)
 }
 body::before{
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
-  background:
-    radial-gradient(900px 420px at 8% -5%, rgba(88,166,255,.16), transparent 55%),
-    radial-gradient(820px 380px at 95% 110%, rgba(121,192,255,.10), transparent 60%),
-    linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,0));
+  background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,0) 140px);
 }
 body.theme-light::before{
-  background:
-    radial-gradient(900px 420px at 8% -5%, rgba(9,105,218,.10), transparent 55%),
-    radial-gradient(820px 380px at 95% 110%, rgba(37,99,235,.06), transparent 60%),
-    linear-gradient(180deg, rgba(255,255,255,.45), rgba(255,255,255,0));
+  background:linear-gradient(180deg, rgba(255,255,255,.65), rgba(255,255,255,0) 140px);
 }
 header,.tbl-wrap,.panel,footer{position:relative;z-index:1}
 .mono, code, .logbox, .aplist, .adv-input, .stat b{font-family:var(--font-mono)}
 
 /* -- Header -- */
-header{background:linear-gradient(180deg, rgba(16,23,33,.96), rgba(13,17,23,.96));border-bottom:1px solid var(--border);
+header{background:var(--panel);border-bottom:1px solid var(--border);
        padding:10px 14px;display:grid;grid-template-columns:auto 1fr;
        align-items:center;gap:8px 16px;position:sticky;top:0;z-index:10;
-       box-shadow:0 8px 24px rgba(0,0,0,.22), inset 0 1px 0 rgba(121,192,255,.06)}
+       box-shadow:0 1px 3px rgba(0,0,0,.12)}
 header .head-stats{display:flex;align-items:center;justify-content:flex-end;
        gap:8px 16px;flex-wrap:wrap;min-width:0}
-header h1{font-size:21px;font-weight:700;color:var(--blue);letter-spacing:.06em;text-transform:uppercase}
+header h1{font-size:20px;font-weight:600;color:var(--txt);letter-spacing:.01em;text-transform:none}
 .adv-modal{
   position:fixed;inset:0;z-index:10006;background:rgba(3,8,14,.62);
   display:none;align-items:center;justify-content:center;padding:12px;
@@ -3163,12 +4087,12 @@ header h1{font-size:21px;font-weight:700;color:var(--blue);letter-spacing:.06em;
 .adv-modal.show{display:flex}
 .adv-window{
   width:min(1120px, calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;
-  border:1px solid var(--border);border-radius:10px;background:linear-gradient(180deg,#0d1420,#0b131d);
-  box-shadow:0 20px 48px rgba(0,0,0,.45);
+  border:1px solid var(--border);border-radius:4px;background:var(--panel);
+  box-shadow:0 18px 36px rgba(0,0,0,.20);
 }
 .adv-window-hd{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
-  padding:10px 12px;border-bottom:1px solid var(--border);color:var(--blue);font-size:14px;font-weight:700;
+  padding:10px 12px;border-bottom:1px solid var(--border);color:var(--txt);font-size:14px;font-weight:600;
 }
 .adv-window-hd .btn-mini{padding:4px 8px}
 .adv-body{
@@ -3179,28 +4103,28 @@ header h1{font-size:21px;font-weight:700;color:var(--blue);letter-spacing:.06em;
 }
 .adv-col{display:grid;gap:8px;min-width:0;align-content:start}
 .adv-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
-.adv-row label{font-size:13px;color:#8b949e}
+.adv-row label{font-size:13px;color:var(--dim)}
 .adv-row.focus-pulse{
-  border:1px solid rgba(88,166,255,.45);
-  border-radius:8px;
+  border:1px solid color-mix(in srgb, var(--blue) 48%, var(--border));
+  border-radius:4px;
   padding:6px;
-  box-shadow:0 0 0 2px rgba(88,166,255,.14);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 24%, transparent);
   animation:hwPulse .9s ease-out 2;
 }
 @keyframes hwPulse{
   0%{box-shadow:0 0 0 0 rgba(88,166,255,.30)}
   100%{box-shadow:0 0 0 10px rgba(88,166,255,0)}
 }
-.adv-input{min-width:260px;flex:1 1 420px;background:#0a0e14;color:var(--txt);border:1px solid #2b3a4b;border-radius:6px;padding:7px 9px;font:inherit}
-.adv-note{font-size:13px;color:#8b949e;word-break:break-all}
-.adv-note code{color:#c5cdd9}
+.adv-input{min-width:260px;flex:1 1 420px;background:var(--panel2);color:var(--txt);border:1px solid var(--border);border-radius:4px;padding:7px 9px;font:inherit}
+.adv-note{font-size:13px;color:var(--dim);word-break:break-all}
+.adv-note code{color:var(--txt)}
 .adv-actions{display:flex;gap:8px;flex-wrap:wrap}
 .cfg-editor{
   width:100%;min-height:220px;resize:vertical;
-  background:#0a0e14;color:#cbd8e8;border:1px solid #2b3a4b;border-radius:6px;
+  background:var(--panel2);color:var(--txt);border:1px solid var(--border);border-radius:4px;
   padding:8px 10px;font:13px/1.5 var(--font-mono);
 }
-.stat{font-size:15px;color:#8b949e;white-space:nowrap}
+.stat{font-size:15px;color:var(--dim);white-space:nowrap}
 .stat b{color:var(--green)}
 .stat.ls b{color:var(--dim)}
 .stat.cs b{color:var(--purple)}
@@ -3213,18 +4137,18 @@ header h1{font-size:21px;font-weight:700;color:var(--blue);letter-spacing:.06em;
   grid-column:1/-1;
   margin-top:6px;
   padding:8px 12px;
-  border:1px solid #7f3f3f;
-  border-radius:8px;
-  background:rgba(127,63,63,.18);
-  color:#ffb4b4;
+  border:1px solid color-mix(in srgb, var(--warn) 44%, var(--border));
+  border-radius:4px;
+  background:color-mix(in srgb, var(--warn) 10%, var(--panel));
+  color:#ffd7cc;
   font-size:13px;
   line-height:1.35;
   z-index:12;
 }
 .sniff-banner.warn{
-  border-color:#7a622a;
-  background:rgba(122,98,42,.18);
-  color:#f1d08b;
+  border-color:color-mix(in srgb, var(--yellow) 38%, var(--border));
+  background:color-mix(in srgb, var(--yellow) 11%, var(--panel));
+  color:#f5e2a8;
 }
 .banner-stack{
   position:fixed;top:10px;left:50%;transform:translateX(-50%);
@@ -3232,32 +4156,32 @@ header h1{font-size:21px;font-weight:700;color:var(--blue);letter-spacing:.06em;
   width:min(92vw, 860px);pointer-events:none;
 }
 .banner{
-  opacity:0;transform:translateY(-8px);
-  transition:opacity .24s ease,transform .24s ease;
-  border:1px solid #33516f;border-radius:8px;
-  background:rgba(14,25,38,.9);color:#d6e5f7;
+  opacity:0;transform:translateY(-6px);
+  transition:opacity .18s ease,transform .18s ease;
+  border:1px solid var(--border);border-radius:4px;
+  background:var(--panel);color:var(--txt);
   padding:9px 12px;font-size:13px;line-height:1.35;
-  box-shadow:0 10px 26px rgba(0,0,0,.35);
+  box-shadow:0 8px 18px rgba(0,0,0,.16);
 }
 .banner.show{opacity:1;transform:translateY(0)}
-.banner.ok{border-color:#2d6f4d;background:rgba(21,52,35,.92);color:#b8f5cf}
-.banner.warn{border-color:#8a5c34;background:rgba(61,38,20,.94);color:#ffd9a9}
+.banner.ok{border-color:color-mix(in srgb, var(--green) 40%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--panel));color:color-mix(in srgb, var(--green) 72%, white)}
+.banner.warn{border-color:color-mix(in srgb, var(--yellow) 34%, var(--border));background:color-mix(in srgb, var(--yellow) 10%, var(--panel));color:#ffd9a9}
 #dot-ws{width:9px;height:9px;border-radius:50%;background:var(--dim);
         display:inline-block;margin-right:4px;transition:background .3s}
 #dot-ws.on{background:var(--green)}
 
 /* -- Table -- */
 .tbl-wrap{margin:0 12px;min-height:0;overflow:auto;
-          border:1px solid var(--border);border-radius:12px;background:linear-gradient(180deg, rgba(13,20,32,.98), rgba(10,14,22,.98));
-          box-shadow:0 14px 30px rgba(0,0,0,.24), 0 0 0 1px rgba(97,183,255,.05) inset}
+          border:1px solid var(--border);border-radius:4px;background:var(--panel);
+          box-shadow:0 1px 3px rgba(0,0,0,.08)}
 table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:980px}
-thead tr{background:var(--bg2);position:sticky;top:0;z-index:9}
-thead th{padding:9px 10px;text-align:left;font-size:14px;color:#8b949e;
-         border-bottom:1px solid var(--border);white-space:nowrap}
-tbody tr{border-bottom:1px solid #161b22;transition:background .12s}
-tbody tr:hover{background:rgba(88,166,255,.06)}
+thead tr{background:var(--panel2);position:sticky;top:0;z-index:9}
+thead th{padding:9px 10px;text-align:left;font-size:14px;color:var(--dim);
+          border-bottom:1px solid var(--border);white-space:nowrap}
+tbody tr{border-bottom:1px solid color-mix(in srgb, var(--border) 70%, transparent);transition:background-color .14s ease}
+tbody tr:hover{background:color-mix(in srgb, var(--blue) 7%, var(--panel))}
 tbody tr.lost{opacity:.4}
-tbody tr.selected{background:rgba(88,166,255,.10)}
+tbody tr.selected{background:color-mix(in srgb, var(--blue) 12%, var(--panel))}
 td{padding:8px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px}
 .empty{text-align:center;padding:40px;color:var(--dim);font-size:15px}
 th:nth-child(1),td:nth-child(1){width:46px}
@@ -3393,10 +4317,10 @@ body.bottom-all-collapsed{
 .panel{border:1px solid var(--border);border-radius:8px;overflow:hidden;
        display:flex;flex-direction:column;min-height:0;
        box-shadow:0 12px 26px rgba(0,0,0,.22), 0 0 0 1px rgba(97,183,255,.04) inset}
-.panel-hdr{background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(12,18,27,.95));padding:8px 14px;font-size:14px;
-           color:var(--blue);font-weight:700;border-bottom:1px solid var(--border);
+.panel-hdr{background:var(--panel2);padding:8px 14px;font-size:14px;
+           color:var(--txt);font-weight:600;border-bottom:1px solid var(--border);
            display:flex;justify-content:space-between;align-items:center}
-.panel-hdr span.sub{color:#8b949e;font-size:13px;font-weight:400}
+.panel-hdr span.sub{color:var(--dim);font-size:13px;font-weight:400}
 .panel-hdr .hdr-actions{display:flex;align-items:center;gap:8px}
 .panel.collapsible.collapsed{align-self:start;min-height:0}
 .panel.collapsible.collapsed .panel-hdr{padding:8px 10px;gap:8px}
@@ -3425,11 +4349,12 @@ body.bottom-all-collapsed{
   display:none;
   position:absolute;right:14px;top:62px;z-index:1201;
   width:min(320px,45vw);max-height:48vh;overflow:auto;
-  border:1px solid var(--border);border-radius:8px;
-  background:rgba(8,12,20,.88);backdrop-filter:blur(2px);
+  border:1px solid var(--border);border-radius:4px;
+  background:color-mix(in srgb, var(--panel) 94%, transparent);backdrop-filter:blur(6px);
   padding:8px;
+  box-shadow:0 8px 18px rgba(0,0,0,.14);
 }
-.map-mini-list .mini-title{font-size:12px;color:#8b949e;margin-bottom:6px}
+.map-mini-list .mini-title{font-size:12px;color:var(--dim);margin-bottom:6px}
 .map-mini-list .mini-item{
   display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;white-space:nowrap;
 }
@@ -3443,17 +4368,18 @@ body.bottom-all-collapsed{
 .logbox .ap{color:var(--txt)}
 .logbox .rid{color:var(--green);font-weight:700}
 .panel-hdr label{display:flex;align-items:center;gap:6px;cursor:pointer;
-                 color:#8b949e;font-weight:400;font-size:13px}
+                 color:var(--dim);font-weight:400;font-size:13px}
 .btn-mini{
-  border:1px solid #3c5572;background:linear-gradient(180deg,#142033,#111a2b);color:#d2deee;
-  padding:5px 9px;border-radius:6px;font:inherit;font-size:13px;cursor:pointer;
-  letter-spacing:.03em;
-  transition:background .12s,border-color .12s,box-shadow .12s,color .12s,transform .12s;
+  border:1px solid var(--border);background:var(--panel2);color:var(--txt);
+  padding:5px 9px;border-radius:4px;font:600 13px/1 var(--font-ui);cursor:pointer;
+  letter-spacing:0;
+  transition:background-color .14s ease,border-color .14s ease,box-shadow .14s ease,color .14s ease,transform .14s ease;
+  box-shadow:0 1px 2px rgba(0,0,0,.06);
 }
-.btn-mini:hover{background:linear-gradient(180deg,#1a2940,#17253b);border-color:#6ea8dc;box-shadow:0 0 0 2px rgba(97,183,255,.14);transform:translateY(-1px)}
+.btn-mini:hover{background:color-mix(in srgb, var(--blue) 10%, var(--panel2));border-color:var(--blue);box-shadow:0 2px 8px var(--glow);transform:translateY(-1px)}
 .btn-mini:disabled{opacity:.55;cursor:wait}
-.btn-mini.warn{border-color:#7f3f3f;color:#ffb4b4}
-.btn-mini.warn:hover{background:#2a1717}
+.btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:color-mix(in srgb, var(--warn) 74%, white)}
+.btn-mini.warn:hover{background:color-mix(in srgb, var(--warn) 8%, var(--panel2))}
 #bottom-restore{
   position:fixed;right:12px;bottom:12px;z-index:9996;display:none;
   box-shadow:0 8px 24px rgba(0,0,0,.26);
@@ -3462,16 +4388,18 @@ body.bottom-all-collapsed #bottom-restore{display:inline-flex}
 .sn-cell{display:flex;align-items:center;gap:6px;min-width:0}
 .sn-cell .mono{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .sn-badge{
-  display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;
-  border:1px solid #7d6118;background:#3b2e09;color:#ffd85f;line-height:1.3;flex:0 0 auto;
+  display:inline-block;padding:1px 6px;border-radius:999px;font-size:11px;
+  border:1px solid color-mix(in srgb, var(--yellow) 38%, var(--border));background:color-mix(in srgb, var(--yellow) 12%, var(--panel2));color:#ffd85f;line-height:1.3;flex:0 0 auto;
 }
 .icon-btn{
-  border:1px solid #314156;background:#0d1622;color:#b6c2d2;
+  border:1px solid var(--border);background:var(--panel2);color:var(--dim);
   width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;
-  border-radius:5px;cursor:pointer;font-size:12px;line-height:1;flex:0 0 auto;
+  border-radius:4px;cursor:pointer;font-size:12px;line-height:1;flex:0 0 auto;
+  transition:background-color .14s ease,border-color .14s ease,color .14s ease,transform .14s ease,box-shadow .14s ease;
+  box-shadow:0 1px 2px rgba(0,0,0,.05);
 }
-.icon-btn:hover{background:#172334;color:#fff}
-.icon-btn.done{border-color:#2a6a45;color:#9ef0bc}
+.icon-btn:hover{background:color-mix(in srgb, var(--blue) 10%, var(--panel2));color:var(--txt);border-color:var(--blue);transform:translateY(-1px)}
+.icon-btn.done{border-color:color-mix(in srgb, var(--green) 42%, var(--border));color:color-mix(in srgb, var(--green) 72%, white)}
 tbody tr.data-row{cursor:pointer}
 tbody td.hl{
   background-color:rgba(255,216,96,calc(var(--hl-alpha,.0) * .58));
@@ -3484,43 +4412,43 @@ tbody td.hl{
 .info-card{
   width:min(440px, calc(100vw - 28px));
   max-height:min(78vh, 560px);
-  border:1px solid #2a3a4d;border-radius:10px;overflow:hidden;
-  background:linear-gradient(180deg,#0f1721,#0c121a);
-  box-shadow:0 16px 40px rgba(0,0,0,.42);
+  border:1px solid var(--border);border-radius:4px;overflow:hidden;
+  background:var(--panel);
+  box-shadow:0 16px 32px rgba(0,0,0,.18);
   display:flex;flex-direction:column;
 }
 .info-card-hd{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
-  padding:10px 12px;border-bottom:1px solid #203247;color:#8fbde7;font-weight:700;
+  padding:10px 12px;border-bottom:1px solid var(--border);color:var(--txt);font-weight:600;
 }
 .info-card-close{
-  border:1px solid #344a60;background:#111c29;color:#c6d6ea;
-  width:26px;height:26px;border-radius:6px;cursor:pointer;line-height:1;
+  border:1px solid var(--border);background:var(--panel2);color:var(--dim);
+  width:26px;height:26px;border-radius:4px;cursor:pointer;line-height:1;
 }
-.info-card-close:hover{background:#1a2a3d;color:#fff}
+.info-card-close:hover{background:color-mix(in srgb, var(--blue) 10%, var(--panel2));color:var(--txt);border-color:var(--blue)}
 .info-card-body{
   padding:12px 14px;overflow:auto;
-  white-space:normal;line-height:1.6;color:#d7e2ef;font-size:14px;
+  white-space:normal;line-height:1.6;color:var(--txt);font-size:14px;
 }
 .info-grid{display:grid;grid-template-columns:1fr;gap:4px}
 .info-row{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:start}
-.info-row .k{color:#8fbde7}
+.info-row .k{color:var(--dim)}
 .info-row .v{word-break:break-all}
-.raw-title{margin:10px 0 6px 0;font-weight:700;color:#9cc7ef}
-.raw-meta{font-size:12px;color:#8fa7c2;margin:6px 0 4px 0}
+.raw-title{margin:10px 0 6px 0;font-weight:600;color:var(--txt)}
+.raw-meta{font-size:12px;color:var(--dim);margin:6px 0 4px 0}
 .raw-code{
-  margin:0 0 8px 0;padding:8px 10px;border-radius:6px;
-  border:1px solid #29405a;background:#0a1320;color:#d4e5f8;
+  margin:0 0 8px 0;padding:8px 10px;border-radius:4px;
+  border:1px solid var(--border);background:var(--panel2);color:var(--txt);
   font:12px/1.45 var(--font-mono);white-space:pre-wrap;word-break:break-all;
 }
-.raw-empty{color:#8b949e;font-size:13px}
+.raw-empty{color:var(--dim);font-size:13px}
 .info-card-body .mono{font-family:var(--font-mono)}
-.aplist{flex:1;overflow:auto;background:var(--bg);font-size:13px;line-height:1.45;padding:6px 8px}
+.aplist{flex:1;overflow:auto;background:var(--panel);font-size:13px;line-height:1.45;padding:6px 8px}
 .aplist .ap-empty{color:var(--dim);padding:14px 8px}
-.aprow{display:grid;grid-template-columns:42px minmax(116px, 15ch) 62px 86px minmax(0,1.15fr) minmax(0,1fr);gap:8px;padding:5px 6px;border-bottom:1px solid #141b23;align-items:start}
-.aprow:hover{background:#101722}
-.aprow.hd{position:sticky;top:0;background:#0d1117;color:#8b949e;font-weight:700;z-index:1}
-.aprow .idx{text-align:right;color:#8fa4bc}
+.aprow{display:grid;grid-template-columns:42px minmax(116px, 15ch) 62px 86px minmax(0,1.15fr) minmax(0,1fr);gap:8px;padding:6px 6px;border-bottom:1px solid color-mix(in srgb, var(--border) 70%, transparent);align-items:start}
+.aprow:hover{background:color-mix(in srgb, var(--blue) 6%, var(--panel))}
+.aprow.hd{position:sticky;top:0;background:var(--panel2);color:var(--dim);font-weight:600;z-index:1}
+.aprow .idx{text-align:right;color:var(--dim)}
 .aprow .mono{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .aprow .ap-mac{font-feature-settings:"tnum" 1}
 .aplist.wide .aprow{grid-template-columns:42px minmax(170px, 20ch) 64px 92px minmax(0,1.15fr) minmax(0,1fr)}
@@ -3528,35 +4456,35 @@ tbody td.hl{
 .aplist.narrow .aprow > :nth-child(4),
 .aplist.narrow .aprow > :nth-child(6){display:none}
 .aprow .ssid{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all}
-.aprow .vendor{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all;color:#c9d5e6}
+.aprow .vendor{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all;color:var(--txt)}
 .aprow .ssid-col,.aprow .vendor-col{min-width:0}
-.subline{font-size:11px;color:#8b949e}
+.subline{font-size:11px;color:var(--dim)}
 
 body.theme-light header{
-  background:linear-gradient(180deg, rgba(255,255,255,.96), rgba(247,250,253,.96));
-  box-shadow:0 8px 24px rgba(15,23,42,.08), inset 0 1px 0 rgba(9,105,218,.06);
+  background:var(--panel);
+  box-shadow:0 1px 3px rgba(0,0,0,.06);
 }
 body.theme-light .adv-window{
-  background:linear-gradient(180deg,#ffffff,#f7fbff);
-  border-color:#d8e1eb;
-  box-shadow:0 18px 42px rgba(15,23,42,.18);
+  background:var(--panel);
+  border-color:var(--border);
+  box-shadow:0 16px 30px rgba(15,23,42,.12);
 }
 body.theme-light .adv-window-hd{
-  color:#2d4e72;border-bottom-color:#d8e1eb;
+  color:var(--txt);border-bottom-color:var(--border);
 }
 body.theme-light .tbl-wrap{
-  background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(250,252,255,.98));
-  box-shadow:0 10px 28px rgba(15,23,42,.07), 0 0 0 1px rgba(9,105,218,.03) inset;
+  background:var(--panel);
+  box-shadow:0 1px 3px rgba(15,23,42,.06);
 }
-body.theme-light thead tr{background:#f3f6fa}
-body.theme-light thead th{color:#5b6470}
-body.theme-light tbody tr{border-bottom-color:#e6ecf2}
-body.theme-light tbody tr:hover{background:rgba(9,105,218,.05)}
+body.theme-light thead tr{background:var(--panel2)}
+body.theme-light thead th{color:var(--dim)}
+body.theme-light tbody tr{border-bottom-color:#e6e3e1}
+body.theme-light tbody tr:hover{background:color-mix(in srgb, var(--blue) 6%, var(--panel))}
 body.theme-light .panel{
-  box-shadow:0 10px 24px rgba(15,23,42,.07), 0 0 0 1px rgba(9,105,218,.02) inset;
+  box-shadow:0 1px 3px rgba(15,23,42,.06);
 }
 body.theme-light .panel-hdr{
-  background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(244,248,253,.95));
+  background:var(--panel2);
 }
 body.theme-light .panel-hdr,
 body.theme-light .panel-hdr span.sub,
@@ -3567,88 +4495,88 @@ body.theme-light .stat,
 body.theme-light footer,
 body.theme-light .subline{color:#5b6470}
 body.theme-light .logbox,
-body.theme-light .aplist{background:#ffffff}
-body.theme-light .aprow{border-bottom-color:#edf1f5}
-body.theme-light .aprow:hover{background:#f4f8ff}
-body.theme-light .aprow.hd{background:#f3f6fa;color:#5b6470}
-body.theme-light .aprow .vendor{color:#334155}
+body.theme-light .aplist{background:var(--panel)}
+body.theme-light .aprow{border-bottom-color:#ece8e6}
+body.theme-light .aprow:hover{background:color-mix(in srgb, var(--blue) 5%, var(--panel))}
+body.theme-light .aprow.hd{background:var(--panel2);color:var(--dim)}
+body.theme-light .aprow .vendor{color:var(--txt)}
 body.theme-light .adv-input{
-  background:#ffffff;color:#1f2937;border-color:#c9d4df;
+  background:var(--panel2);color:var(--txt);border-color:var(--border);
 }
 body.theme-light .adv-row.focus-pulse{
-  border-color:rgba(9,105,218,.45);
-  box-shadow:0 0 0 2px rgba(9,105,218,.12);
+  border-color:color-mix(in srgb, var(--blue) 45%, var(--border));
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent);
 }
-body.theme-light .adv-note code{color:#1f2937}
+body.theme-light .adv-note code{color:var(--txt)}
 body.theme-light .cfg-editor{
-  background:#ffffff;color:#1f2937;border-color:#c9d4df;
+  background:var(--panel2);color:var(--txt);border-color:var(--border);
 }
 body.theme-light .btn-mini{
-  border-color:#b8c6d6;
-  background:linear-gradient(180deg,#ffffff,#f4f7fb);
-  color:#334155;
+  border-color:var(--border);
+  background:var(--panel2);
+  color:var(--txt);
 }
 body.theme-light .btn-mini:hover{
-  background:linear-gradient(180deg,#f9fbff,#edf3fb);
-  border-color:#95abc3;
-  box-shadow:0 0 0 2px rgba(9,105,218,.08);
+  background:color-mix(in srgb, var(--blue) 8%, var(--panel2));
+  border-color:var(--blue);
+  box-shadow:0 2px 8px var(--glow);
 }
-body.theme-light .btn-mini.warn{border-color:#d6a3a3;color:#9b1c1c}
-body.theme-light .btn-mini.warn:hover{background:#fff1f1}
+body.theme-light .btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 40%, var(--border));color:var(--warn)}
+body.theme-light .btn-mini.warn:hover{background:color-mix(in srgb, var(--warn) 8%, var(--panel2))}
 body.theme-light .icon-btn{
-  border-color:#b8c6d6;background:#f7faff;color:#475569;
+  border-color:var(--border);background:var(--panel2);color:var(--dim);
 }
-body.theme-light .icon-btn:hover{background:#eaf2ff;color:#0f172a}
-body.theme-light .icon-btn.done{border-color:#4aa56f;color:#0f7a3b}
-body.theme-light .sn-badge{border-color:#cfb061;background:#fff6db;color:#7b5b00}
+body.theme-light .icon-btn:hover{background:color-mix(in srgb, var(--blue) 8%, var(--panel2));color:var(--txt)}
+body.theme-light .icon-btn.done{border-color:color-mix(in srgb, var(--green) 38%, var(--border));color:#0f7a3b}
+body.theme-light .sn-badge{border-color:color-mix(in srgb, var(--yellow) 35%, var(--border));background:color-mix(in srgb, var(--yellow) 12%, var(--panel2));color:#7b5b00}
 body.theme-light tbody td.hl{
   background-color:rgba(250,213,97,calc(var(--hl-alpha,.0) * .52));
 }
-body.theme-light tbody tr.selected{background:rgba(9,105,218,.09)}
+body.theme-light tbody tr.selected{background:color-mix(in srgb, var(--blue) 10%, var(--panel))}
 body.theme-light .map-mini-list{
-  border-color:#cfd8e3;background:rgba(255,255,255,.94);
+  border-color:var(--border);background:rgba(255,255,255,.96);
 }
-body.theme-light .map-mini-list .mini-title{color:#57606a}
+body.theme-light .map-mini-list .mini-title{color:var(--dim)}
 body.theme-light .info-modal{background:rgba(15,23,42,.24)}
 body.theme-light .info-card{
-  border-color:#ced9e5;
-  background:linear-gradient(180deg,#ffffff,#f7fbff);
-  box-shadow:0 18px 36px rgba(15,23,42,.18);
+  border-color:var(--border);
+  background:var(--panel);
+  box-shadow:0 16px 28px rgba(15,23,42,.12);
 }
 body.theme-light .info-card-hd{
-  color:#2d4e72;border-bottom-color:#d8e4ef;
+  color:var(--txt);border-bottom-color:var(--border);
 }
 body.theme-light .info-card-close{
-  border-color:#b7c6d8;background:#f2f7fd;color:#35506d;
+  border-color:var(--border);background:var(--panel2);color:var(--dim);
 }
-body.theme-light .info-card-close:hover{background:#e7f0fb;color:#1e334a}
-body.theme-light .info-card-body{color:#1f2937}
-body.theme-light .info-row .k{color:#35506d}
-body.theme-light .raw-title{color:#35506d}
-body.theme-light .raw-meta{color:#64748b}
+body.theme-light .info-card-close:hover{background:color-mix(in srgb, var(--blue) 8%, var(--panel2));color:var(--txt)}
+body.theme-light .info-card-body{color:var(--txt)}
+body.theme-light .info-row .k{color:var(--dim)}
+body.theme-light .raw-title{color:var(--txt)}
+body.theme-light .raw-meta{color:var(--dim)}
 body.theme-light .raw-code{
-  border-color:#c7d7e9;background:#f6faff;color:#1f2937;
+  border-color:var(--border);background:var(--panel2);color:var(--txt);
 }
-body.theme-light .raw-empty{color:#64748b}
+body.theme-light .raw-empty{color:var(--dim)}
 body.theme-light .sniff-banner{
-  border-color:#d7a6a6;
-  background:#fff3f3;
+  border-color:color-mix(in srgb, var(--warn) 40%, var(--border));
+  background:color-mix(in srgb, var(--warn) 10%, var(--panel));
   color:#9f2a2a;
 }
 body.theme-light .sniff-banner.warn{
-  border-color:#d4bf8a;
-  background:#fff9e8;
+  border-color:color-mix(in srgb, var(--yellow) 35%, var(--border));
+  background:color-mix(in srgb, var(--yellow) 12%, var(--panel));
   color:#8a6800;
 }
-body.theme-light .banner{border-color:#b4c8df;background:rgba(255,255,255,.97);color:#334155}
-body.theme-light .banner.ok{border-color:#89c49d;background:#ecfff3;color:#14532d}
-body.theme-light .banner.warn{border-color:#d5b07f;background:#fff8eb;color:#7c2d12}
+body.theme-light .banner{border-color:var(--border);background:rgba(255,255,255,.97);color:var(--txt)}
+body.theme-light .banner.ok{border-color:color-mix(in srgb, var(--green) 38%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--panel));color:#14532d}
+body.theme-light .banner.warn{border-color:color-mix(in srgb, var(--yellow) 34%, var(--border));background:color-mix(in srgb, var(--yellow) 12%, var(--panel));color:#7c2d12}
  
 footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 </style>
 </head><body>
 <header>
-  <h1>&#x2708; Light RID Scanner</h1>
+  <h1>&#x2708; Light RID Scanner</h1><p>v1.1.0</p>
   <div class="head-stats">
   <span class="stat">&#x5728;&#x7EBF; <b id="n-live">-</b></span>
   <span class="stat ls">&#x79BB;&#x7EBF; <b id="n-lost">-</b></span>
@@ -3711,6 +4639,7 @@ var latestApsTotal = 0;
 var selectedSnSet = {};
 var selectedMacSet = {};
 var autoTrackSnSet = {};
+var rowClickTimer = null;
 var trackCache = {};
 var trackLoading = {};
 var prefRealtimeTrack = true;
@@ -4279,7 +5208,7 @@ function handleDroneNotifications(list){
   });
 }
 async function getJson(url){
-  var resp = await fetch(apiUrl(url), {cache:'no-store'});
+  var resp = await fetch(apiUrl(url), {cache:'no-store', headers:{'X-LightRID-Page':'1'}});
   var data = {};
   try{ data = await resp.json(); }catch(_e){}
   if(!resp.ok || data.ok===false){
@@ -4327,7 +5256,7 @@ function toggleTheme(){
 async function postJson(url, body){
   var resp = await fetch(apiUrl(url), {
     method:'POST',
-    headers:{'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json','X-LightRID-Page':'1'},
     body: JSON.stringify(body||{})
   });
   var data = {};
@@ -4702,7 +5631,9 @@ function renderMapMiniList(list){
   var box = ensureMapMiniList();
   if(!box) return;
   var panel = qs('map-panel');
-  var show = isMapFullscreen() || !!(panel && panel.classList && panel.classList.contains('fullscreen'));
+  var show = isMapFullscreen()
+    || !!(panel && panel.classList && panel.classList.contains('fullscreen'))
+    || ((document.body.getAttribute('data-page') || 'map') === 'map');
   box.style.display = show ? 'block' : '';
   var rows = (Array.isArray(list) ? list : []).slice().filter(function(e){
     return !!String((e && e.sn) || '');
@@ -4721,7 +5652,7 @@ function renderMapMiniList(list){
     box.innerHTML = '<div class="mini-title">暂无飞机</div>';
     return;
   }
-  var html = '<div class="mini-title">轨迹选择（勾选后显示飞手与轨迹）</div>';
+  var html = '<div class="mini-title">勾选后显示轨迹</div>';
   rows.forEach(function(e, idx){
     e = e || {};
     var sn = String(e.sn || '');
@@ -5164,8 +6095,39 @@ function buildExtraUi(){
     var tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-sn]') : null;
     if(tr){
       var sn = tr.getAttribute('data-sn') || '';
-      var e = latestDroneMap[sn];
-      if(e) showInfoCard(buildInfoHtml(e), true);
+      if(rowClickTimer){
+        clearTimeout(rowClickTimer);
+        rowClickTimer = null;
+      }
+      rowClickTimer = setTimeout(function(){
+        rowClickTimer = null;
+        var e = latestDroneMap[sn];
+        if(e) showInfoCard(buildInfoHtml(e), true);
+      }, 220);
+    }
+  });
+  if(qs('tbody')) qs('tbody').addEventListener('dblclick', function(ev){
+    var cb = ev.target && ev.target.closest ? ev.target.closest('.sel-sn') : null;
+    if(cb) return;
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.copy-sn') : null;
+    if(btn) return;
+    var tr = ev.target && ev.target.closest ? ev.target.closest('tr[data-sn]') : null;
+    if(!tr) return;
+    var sn = tr.getAttribute('data-sn') || '';
+    if(!sn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if(rowClickTimer){
+      clearTimeout(rowClickTimer);
+      rowClickTimer = null;
+    }
+    setSnSelected(sn, true);
+    hideInfoCard();
+    if(typeof window.__ridNavSet === 'function'){
+      window.__ridNavSet('map');
+    }else{
+      document.body.setAttribute('data-page', 'map');
+      setTimeout(function(){ if(map) map.invalidateSize(false); }, 80);
     }
   });
   applyTheme(uiTheme);
@@ -5946,12 +6908,13 @@ function initMap(){
 }
 
 function baseIcon(){
-  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
-    +'<circle cx="12" cy="12" r="10" fill="#2f81f7" fill-opacity="0.88" stroke="#fff" stroke-width="1.4"/>'
-    +'<text x="12" y="16" text-anchor="middle" font-size="12" fill="#fff" font-family="monospace" font-weight="bold">&#x2302;</text>'
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24">'
+    +'<circle cx="12" cy="12" r="10.6" fill="#2f81f7" fill-opacity="0.92" stroke="#fff" stroke-width="1.1"/>'
+    +'<path d="M12 6.3v10.2M9.4 17.1h5.2M10.2 10.8L12 9l1.8 1.8M9.8 8.5c.9-.92 2.05-1.38 3.2-1.38 1.15 0 2.3.46 3.2 1.38M8.3 7c1.32-1.34 3.03-2.01 4.74-2.01 1.71 0 3.42.67 4.74 2.01" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" fill="none"/>'
+    +'<path d="M10.8 16.6l-1.15 2.3M13.2 16.6l1.15 2.3" stroke="#fff" stroke-linecap="round" stroke-width="1.2"/>'
     +'</svg>';
   return L.divIcon({
-    html: svg, className:'', iconSize:[24,24], iconAnchor:[12,12], popupAnchor:[0,-10]
+    html: svg, className:'', iconSize:[48,48], iconAnchor:[24,24], popupAnchor:[0,-22]
   });
 }
 
@@ -5996,7 +6959,7 @@ function droneIcon(color, lost, headingDeg, selected, indexNo){
   var idxTxt = idx > 99 ? '99+' : String(Math.round(idx));
   var glow = selected ? '0 0 8px rgba(255,255,255,.48)' : 'none';
   var lineOp = selected ? 0.96 : 0.68;
-  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 34 34">'
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="68" height="68" viewBox="0 0 34 34">'
     +'<circle cx="17" cy="17" r="12.5" fill="'+color+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.5"/>'
     +'<text x="17" y="19.7" text-anchor="middle" font-size="10.5" fill="#04131d" font-family="ui-monospace,Consolas" font-weight="700">'+esc(idxTxt)+'</text>'
     +'<line x1="17" y1="17" x2="17" y2="4.5" stroke="#fff" stroke-opacity="'+lineOp+'" stroke-width="'+(selected?2.3:1.6)+'"/>'
@@ -6006,19 +6969,19 @@ function droneIcon(color, lost, headingDeg, selected, indexNo){
     +'</g>'
     +'</svg>';
   return L.divIcon({
-    html: svg, className:'', iconSize:[34,34], iconAnchor:[17,17], popupAnchor:[0,-17]
+    html: svg, className:'', iconSize:[68,68], iconAnchor:[34,34], popupAnchor:[0,-30]
   });
 }
 
 function pilotIcon(color, lost){
   var op = lost ? 0.4 : 1.0;
   var fill = color || '#ffb84d';
-  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24">'
     +'<rect x="3.5" y="3.5" width="17" height="17" rx="4" ry="4" fill="'+fill+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.4"/>'
     +'<text x="12" y="16" text-anchor="middle" font-size="12" fill="#fff" font-family="monospace" font-weight="bold">&#x1F464;</text>'
     +'</svg>';
   return L.divIcon({
-    html: svg, className:'', iconSize:[24,24], iconAnchor:[12,12], popupAnchor:[0,-10]
+    html: svg, className:'', iconSize:[48,48], iconAnchor:[24,24], popupAnchor:[0,-20]
   });
 }
 
@@ -6272,57 +7235,135 @@ _HW_PAGE_HTML = """<!doctype html><html lang="zh"><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>硬件配置助手 - Light RID Scanner</title>
 <style>
-*{box-sizing:border-box} body{margin:0;background:#0b1118;color:#d7e1ef;font:14px/1.5 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-header{padding:10px 14px;border-bottom:1px solid #243244;background:#101925;display:flex;justify-content:space-between;align-items:center;gap:8px}
-h1{margin:0;font-size:16px;color:#7ab8ff}
-.wrap{padding:12px;display:grid;gap:12px}
-.card{border:1px solid #28384d;border-radius:10px;background:#0f1722;padding:10px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.btn{border:1px solid #365375;background:#152236;color:#d7e1ef;padding:6px 10px;border-radius:7px;cursor:pointer}
-.btn:hover{background:#1b2a41}
-.btn.warn{border-color:#7f3f3f;color:#ffb3b3}
-select,input{background:#0b131e;color:#d7e1ef;border:1px solid #33475f;border-radius:7px;padding:6px 8px}
-pre{margin:0;max-height:48vh;overflow:auto;background:#08101a;border:1px solid #223246;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,Consolas,monospace}
-.muted{color:#8ca1bb;font-size:12px}
-#status{white-space:pre-wrap}
+*{box-sizing:border-box}
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --bg:#201f1e;--bg2:#252423;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;
+  --muted:#c8c6c4;--blue:#2899f5;--green:#92c353;--warn:#f7630c;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03)
+}
+body.theme-light{
+  --bg:#f3f2f1;--bg2:#edebe9;--card:#ffffff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;
+  --muted:#605e5c;--blue:#0078d4;--green:#107c10;--warn:#d83b01;--glow:rgba(0,120,212,.10);--soft:rgba(0,0,0,.018)
+}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
+body{min-height:100vh;background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg));}
+.wrap{max-width:1360px;margin:0 auto;padding:22px 18px 32px}
+.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+.title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
+.sub{color:var(--muted);margin-top:6px}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+.btn{border:1px solid var(--border);background:var(--card2);color:var(--txt);padding:10px 14px;border-radius:4px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;transition:border-color .14s ease,background-color .14s ease,color .14s ease,transform .14s ease,box-shadow .14s ease;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.btn:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 10%, var(--card2));box-shadow:0 2px 8px var(--glow)}
+.btn.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:var(--warn)}
+.btn.warn:hover{background:color-mix(in srgb, var(--warn) 8%, var(--card2))}
+.layout{display:grid;grid-template-columns:minmax(320px,.92fr) minmax(400px,1.08fr);gap:14px}
+.stack{display:grid;gap:14px}
+.card{border:1px solid var(--border);border-radius:4px;background:var(--card);padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.08);animation:officeFade .16s ease-out both}
+.card h2{margin:0 0 12px;font:600 18px/1 var(--font-ui);letter-spacing:.01em}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.field{display:grid;gap:6px}
+.field label{font:600 12px/1 var(--font-ui);letter-spacing:.01em;color:var(--muted);text-transform:none}
+select,input{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--border);border-radius:4px;padding:10px 12px;font:600 14px/1.35 var(--font-ui);transition:border-color .14s ease,box-shadow .14s ease,background-color .14s ease}
+select:focus,input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 38%, transparent)}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap}
+.btn-group{display:grid;gap:10px}
+.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.status-tile{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
+.status-tile .k{font:600 11px/1 var(--font-ui);letter-spacing:.01em;color:var(--muted);text-transform:none}
+.status-tile .v{margin-top:8px;font:600 20px/1.1 var(--font-ui)}
+.status-tile .s{margin-top:6px;color:var(--muted);font-size:13px;word-break:break-word}
+.iface-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.iface-card{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
+.iface-name{font:600 16px/1 var(--font-ui)}
+.iface-meta{margin-top:6px;color:var(--muted);font-size:13px;line-height:1.55}
+.tag{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--border);border-radius:999px;font:600 12px/1 var(--font-ui);letter-spacing:0}
+.tag.ok{color:var(--green);border-color:color-mix(in srgb, var(--green) 34%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--card2))}
+.tag.warn{color:var(--warn);border-color:color-mix(in srgb, var(--warn) 34%, var(--border));background:color-mix(in srgb, var(--warn) 8%, var(--card2))}
+.status-line{white-space:pre-wrap;color:var(--muted);font-size:13px;line-height:1.6}
+pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:14px;color:var(--txt);font:13px/1.55 var(--font-mono)}
+@keyframes officeFade{from{opacity:.0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (max-width:1080px){.layout{grid-template-columns:1fr}.grid,.status-grid{grid-template-columns:1fr}}
 </style>
 </head><body>
-<header>
-  <h1>硬件配置助手</h1>
-  <div class="row">
-    <button class="btn" id="btn-back" type="button">返回主页面</button>
-    <button class="btn" id="btn-refresh" type="button">刷新状态</button>
-  </div>
-</header>
 <div class="wrap">
-  <div class="card">
-    <div class="row">
-      <label for="iface">网卡</label>
-      <select id="iface"><option value="">(auto)</option></select>
-      <label for="channel">信道</label>
-      <input id="channel" type="number" min="1" max="196" value="6" style="width:90px">
+  <div class="topbar">
+    <div>
+      <div class="title">硬件配置助手</div>
+      <div class="sub">网卡、信道、采集恢复。</div>
     </div>
-    <div class="row" style="margin-top:8px">
-      <button class="btn" id="btn-iw-dev" type="button">iw dev</button>
-      <button class="btn" id="btn-iw-info" type="button">iw info</button>
-      <button class="btn" id="btn-iw-link" type="button">iw link</button>
-      <button class="btn" id="btn-set-monitor" type="button">切监控模式</button>
-      <button class="btn" id="btn-set-managed" type="button">切托管模式</button>
-      <button class="btn" id="btn-restart-iface" type="button">重启网卡</button>
-      <button class="btn" id="btn-set-channel" type="button">设置信道</button>
-      <button class="btn warn" id="btn-restart-program" type="button">重启主程序</button>
+    <div class="actions">
+      <button class="btn" id="btn-back" type="button">返回设置</button>
+      <button class="btn" id="btn-theme" type="button">浅色</button>
+      <button class="btn" id="btn-refresh" type="button">刷新状态</button>
     </div>
-    <div class="muted" id="status" style="margin-top:8px">-</div>
   </div>
-  <div class="card">
-    <div class="muted" style="margin-bottom:6px">命令输出</div>
-    <pre id="output">-</pre>
+  <div class="layout">
+    <div class="stack">
+      <div class="card">
+        <h2>当前状态</h2>
+        <div class="status-grid">
+          <div class="status-tile"><div class="k">采集状态</div><div class="v" id="tile-state">-</div><div class="s" id="tile-msg">-</div></div>
+          <div class="status-tile"><div class="k">当前网卡</div><div class="v" id="tile-active-iface">-</div><div class="s" id="tile-selected-iface">默认/自动</div></div>
+          <div class="status-tile"><div class="k">当前信道</div><div class="v" id="tile-channel">-</div><div class="s" id="tile-extra">-</div></div>
+        </div>
+        <div id="status" class="status-line" style="margin-top:12px">-</div>
+      </div>
+      <div class="card">
+        <h2>控制面板</h2>
+        <div class="grid">
+          <div class="field"><label for="iface">目标网卡</label><select id="iface"><option value="">(auto)</option></select></div>
+          <div class="field"><label for="channel">目标信道</label><input id="channel" type="number" min="1" max="196" value="6"></div>
+        </div>
+        <div class="btn-group" style="margin-top:14px">
+          <div class="btn-row">
+            <button class="btn" id="btn-iw-dev" type="button">查看 iw dev</button>
+            <button class="btn" id="btn-iw-info" type="button">查看 iw info</button>
+            <button class="btn" id="btn-iw-link" type="button">查看 iw link</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn" id="btn-set-monitor" type="button">切换为监控模式</button>
+            <button class="btn" id="btn-set-managed" type="button">切换为托管模式</button>
+            <button class="btn" id="btn-set-channel" type="button">应用目标信道</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn" id="btn-restart-iface" type="button">重启网卡</button>
+            <button class="btn warn" id="btn-restart-program" type="button">重启主程序</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>网卡总览</h2>
+        <div id="iface-grid" class="iface-grid"></div>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <h2>命令输出</h2>
+        <pre id="output">-</pre>
+      </div>
+    </div>
   </div>
 </div>
 <script>
 function qs(id){ return document.getElementById(id); }
 function showStatus(s){ qs('status').textContent = String(s||'-'); }
 function showOut(t){ qs('output').textContent = String(t||'-'); }
+function loadTheme(){
+  try{
+    var s = localStorage.getItem('rid_ui_theme');
+    if(s === 'dark' || s === 'light') return s;
+  }catch(_e){}
+  if(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+  return 'dark';
+}
+function applyTheme(theme){
+  var light = (theme === 'light');
+  document.body.classList.toggle('theme-light', light);
+  document.body.classList.toggle('theme-dark', !light);
+  try{ localStorage.setItem('rid_ui_theme', light ? 'light' : 'dark'); }catch(_e){}
+  qs('btn-theme').textContent = light ? '深色' : '浅色';
+}
 function apiUrl(url){
   const u = String(url || '');
   try{
@@ -6332,13 +7373,13 @@ function apiUrl(url){
   }
 }
 async function getJson(url){
-  const r = await fetch(apiUrl(url), {cache:'no-store'});
+  const r = await fetch(apiUrl(url), {cache:'no-store', headers:{'X-LightRID-Page':'1'}});
   const d = await r.json().catch(()=>({}));
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
 }
 async function postJson(url, body){
-  const r = await fetch(apiUrl(url), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  const r = await fetch(apiUrl(url), {method:'POST', headers:{'Content-Type':'application/json','X-LightRID-Page':'1'}, body:JSON.stringify(body||{})});
   const d = await r.json().catch(()=>({}));
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
@@ -6354,6 +7395,25 @@ function fmtOpResult(d){
   }
   return JSON.stringify(d, null, 2);
 }
+function renderIfaceGrid(items){
+  const root = qs('iface-grid');
+  const arr = Array.isArray(items) ? items : [];
+  if(!root) return;
+  if(!arr.length){
+    root.innerHTML = '<div class="iface-card"><div class="iface-name">未发现网卡</div><div class="iface-meta">请检查 USB 网卡、驱动与权限。</div></div>';
+    return;
+  }
+  root.innerHTML = arr.map(it=>{
+    const mode = String(it.mode || '-');
+    const band = it.supports_5g ? '2.4G / 5G' : '2.4G';
+    const monitor = mode.toLowerCase().indexOf('monitor') >= 0;
+    return '<div class="iface-card">'
+      +'<div class="iface-name">'+String(it.name || '-').replace(/</g,'&lt;')+'</div>'
+      +'<div style="margin-top:10px"><span class="tag '+(monitor ? 'ok' : 'warn')+'">'+(monitor ? '监控模式' : '非监控模式')+'</span></div>'
+      +'<div class="iface-meta">模式: '+mode+'<br>频段: '+band+'<br>5G 支持: '+(it.supports_5g ? '是' : '否')+'</div>'
+      +'</div>';
+  }).join('');
+}
 async function refreshStatus(){
   try{
     const d = await getJson('/api/hw/status');
@@ -6368,7 +7428,14 @@ async function refreshStatus(){
     }).join('');
     if(old) sel.value = old;
     const snf = d.sniff_state || {};
-    showStatus(`采集网卡: ${d.active_iface||'-'} | 状态: ${snf.state||'-'} | ${snf.msg||'-'}`);
+    qs('tile-state').textContent = String(snf.state || '-');
+    qs('tile-msg').textContent = String(snf.msg || '-');
+    qs('tile-active-iface').textContent = String(d.active_iface || '-');
+    qs('tile-selected-iface').textContent = '选择: ' + String(curIface() || '(auto)');
+    qs('tile-channel').textContent = String((snf.channel || d.current_channel || '-') || '-');
+    qs('tile-extra').textContent = '网卡数: ' + String(items.length || 0);
+    showStatus(`采集网卡: ${d.active_iface||'-'}\n状态: ${snf.state||'-'}\n说明: ${snf.msg||'-'}`);
+    renderIfaceGrid(items);
     showOut(JSON.stringify(d, null, 2));
   }catch(e){
     showStatus('刷新失败: ' + (e.message || e));
@@ -6386,7 +7453,8 @@ async function runOp(op, ext){
     showStatus('执行失败: ' + (e.message || e));
   }
 }
-qs('btn-back').addEventListener('click', ()=>{ location.href = '/'; });
+qs('btn-back').addEventListener('click', ()=>{ location.href = '/settings'; });
+qs('btn-theme').addEventListener('click', ()=>applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'));
 qs('btn-refresh').addEventListener('click', refreshStatus);
 qs('btn-iw-dev').addEventListener('click', ()=>runOp('iw_dev'));
 qs('btn-iw-info').addEventListener('click', ()=>runOp('iw_info'));
@@ -6398,12 +7466,1530 @@ qs('btn-set-channel').addEventListener('click', ()=>runOp('set_channel', {channe
 qs('btn-restart-program').addEventListener('click', ()=>{
   if(confirm('确认重启主程序？')) runOp('restart_program');
 });
+applyTheme(loadTheme());
 refreshStatus();
 </script>
 </body></html>"""
 
+_MAIN_PAGE_PATCH_CSS = r"""
+header.app-shell-header{
+  margin:12px 12px 0;
+  padding:10px 12px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:nowrap;
+  overflow-x:auto;
+  overflow-y:visible;
+  white-space:nowrap;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:4px;
+  box-shadow:0 1px 3px rgba(0,0,0,.08);
+}
+header.app-shell-header::-webkit-scrollbar{height:6px}
+.main-shell-top{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex:1 0 auto;
+  min-width:max-content;
+}
+.main-title-block{
+  min-width:0;
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+header.app-shell-header h1{
+  margin:0;
+  font:600 20px/1 var(--font-ui);
+  letter-spacing:.01em;
+  color:var(--txt);
+  text-transform:none;
+  white-space:nowrap;
+}
+.main-title-sub{
+  display:none;
+}
+.main-head-side{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  justify-content:flex-end;
+  min-width:0;
+  flex:1 0 auto;
+}
+.main-menu-actions{
+  display:flex;
+  gap:8px;
+  flex-wrap:nowrap;
+  justify-content:flex-end;
+}
+.main-live-stats{
+  display:flex;
+  gap:8px;
+  flex-wrap:nowrap;
+  justify-content:flex-end;
+}
+.main-live-stats .stat{
+  border:1px solid var(--border);
+  border-radius:4px;
+  background:var(--panel2);
+  padding:6px 10px;
+  color:var(--txt);
+  box-shadow:0 1px 2px rgba(0,0,0,.05);
+  font-size:13px;
+  white-space:nowrap;
+}
+.main-live-stats .stat b{font-weight:700}
+.app-tab-nav{
+  display:inline-grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:3px;
+  width:auto;min-width:320px;margin:0;
+  border:1px solid var(--border);background:var(--panel2);border-radius:4px;
+  box-shadow:0 1px 2px rgba(0,0,0,.05)
+}
+.app-tab-btn,.header-link-btn,.btn-mini,.icon-btn,.info-card-close{
+  border:1px solid var(--border);
+  background:var(--panel2);
+  color:var(--txt);
+  border-radius:4px;
+  font:600 14px/1 var(--font-ui);
+  letter-spacing:0;
+  cursor:pointer;
+  transition:background-color .14s ease,border-color .14s ease,color .14s ease,transform .14s ease,box-shadow .14s ease;
+  box-shadow:0 1px 2px rgba(0,0,0,.05);
+}
+.app-tab-btn,.header-link-btn,.btn-mini{
+  padding:8px 11px;
+  text-align:center;
+  white-space:nowrap;
+}
+.icon-btn,.info-card-close{
+  width:28px;
+  height:28px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:0;
+}
+.app-tab-btn:hover,.header-link-btn:hover,.btn-mini:hover,.icon-btn:hover,.info-card-close:hover{
+  transform:translateY(-1px);
+  border-color:var(--blue);
+  background:color-mix(in srgb, var(--blue) 10%, var(--panel2));
+  box-shadow:0 2px 8px var(--glow);
+}
+.app-tab-btn.active{
+  border-color:var(--blue);
+  background:color-mix(in srgb, var(--blue) 14%, var(--panel2));
+  color:var(--txt);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 26%, transparent)
+}
+.btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:color-mix(in srgb, var(--warn) 74%, white)}
+.btn-mini.warn:hover{background:color-mix(in srgb, var(--warn) 8%, var(--panel2));border-color:var(--warn);box-shadow:0 2px 8px color-mix(in srgb, var(--warn) 16%, transparent)}
+body.theme-light .app-tab-nav{background:var(--panel2);box-shadow:0 1px 2px rgba(15,23,42,.05)}
+body.theme-light .app-tab-btn:hover,body.theme-light .header-link-btn:hover,body.theme-light .btn-mini:hover,body.theme-light .icon-btn:hover,body.theme-light .info-card-close:hover{background:color-mix(in srgb, var(--blue) 8%, var(--panel2));border-color:var(--blue);box-shadow:0 2px 8px var(--glow)}
+body.theme-light .app-tab-btn.active{
+  background:color-mix(in srgb, var(--blue) 12%, var(--panel2));
+  color:var(--txt);border-color:var(--blue);box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 20%, transparent)
+}
+body.theme-light header.app-shell-header{
+  background:var(--panel);
+}
+body.theme-light .main-live-stats .stat{background:var(--panel2)}
+body.theme-light .btn-mini,body.theme-light .header-link-btn,body.theme-light .app-tab-btn,body.theme-light .icon-btn,body.theme-light .info-card-close{
+  background:var(--panel2);
+  border-color:var(--border);
+  color:var(--txt);
+}
+body.theme-light .btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 40%, var(--border));color:var(--warn)}
+body.app-paged{grid-template-rows:auto minmax(0,1fr) auto}
+.app-pages{min-height:0;padding:0 14px 10px;display:block}
+.app-page{display:none;min-height:0;height:100%}
+body[data-page="map"] .app-page[data-page="map"],
+body[data-page="list"] .app-page[data-page="list"],
+body[data-page="more"] .app-page[data-page="more"]{display:block}
+body[data-page="map"] .app-page[data-page="map"] .panel{height:calc(100dvh - 108px)}
+body[data-page="map"] .app-page[data-page="map"] #map{height:100%}
+body[data-page="list"] .tbl-wrap{height:calc(100dvh - 110px);overflow:auto}
+body[data-page="list"] .tbl-wrap table{min-width:100%}
+body[data-page="more"] .bottom{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:14px;height:calc(100dvh - 110px)}
+body[data-page="more"] .bottom .panel{min-height:0;display:flex;flex-direction:column}
+body[data-page="more"] .bottom .panel .logbox,
+body[data-page="more"] .bottom .panel .aplist{flex:1;min-height:0;max-height:none}
+#map-panel-toggle,#log-panel-toggle,#ap-panel-toggle,#bottom-restore{display:none!important}
+#map-panel .panel-hdr,#log-panel .panel-hdr,#ap-panel .panel-hdr{cursor:default!important}
+.app-page .panel{border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08);animation:officeFade .16s ease-out both}
+.app-page .panel-hdr{font-size:13px;letter-spacing:.01em}
+.tbl-wrap,.app-page .panel,.map-mini-list,.banner{
+  border-radius:4px;
+}
+.tbl-wrap{
+  box-shadow:0 1px 3px rgba(0,0,0,.08);
+}
+.app-page .panel{
+  border:1px solid var(--border);
+  background:var(--panel);
+}
+.app-page .panel-hdr{
+  padding:12px 14px;
+  border-bottom:1px solid var(--border);
+  color:var(--txt);
+}
+.app-page .panel-hdr .sub{color:var(--dim)}
+.app-page .panel-hdr label{color:var(--dim)}
+.app-page[data-page="map"] .map-mini-list{display:block}
+.app-page[data-page="map"] .panel.map-panel{position:relative}
+.app-page[data-page="map"] .map-mini-list{
+  width:min(340px,32vw);max-height:42vh;top:58px;right:14px;
+}
+.zone-alarm{
+  position:fixed;inset:18px;display:none;z-index:90;border:2px solid rgba(255,79,79,.92);
+  border-radius:4px;box-shadow:0 0 0 999px rgba(255,0,0,.12), inset 0 0 0 1px rgba(255,80,80,.18);
+  pointer-events:none;align-items:center;justify-content:center;padding:24px;text-align:center;
+  background:rgba(255,90,90,.06);
+}
+.zone-alarm.show{display:flex;animation:zonePulse 1.15s ease-in-out infinite alternate}
+.zone-alarm-card{backdrop-filter:blur(8px);background:color-mix(in srgb, var(--panel) 92%, transparent);border:1px solid rgba(255,96,96,.75);border-radius:4px;padding:26px 28px;max-width:min(640px,88vw);box-shadow:0 18px 28px rgba(0,0,0,.18)}
+.zone-alarm-title{font:600 34px/1 var(--font-ui);color:#ff7b7b;letter-spacing:.06em;margin-bottom:10px}
+.zone-alarm-text{font:500 18px/1.55 var(--font-ui);color:#ffe8e8}
+@keyframes zonePulse{from{transform:scale(1);opacity:.92}to{transform:scale(1.01);opacity:1}}
+.info-sections{display:grid;gap:14px}
+.info-block{border:1px solid var(--border);border-radius:4px;padding:14px;background:var(--panel2);box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.info-block h3{font:600 15px/1 var(--font-ui);letter-spacing:.01em;margin-bottom:12px;color:var(--txt)}
+.info-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.info-actions .btn-mini{padding:7px 12px}
+@keyframes officeFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (max-width: 960px){
+  header.app-shell-header{gap:8px}
+  .app-tab-nav{min-width:286px}
+  body[data-page="more"] .bottom{grid-template-columns:1fr;height:auto}
+  body[data-page="list"] .tbl-wrap{height:auto;max-height:calc(100dvh - 128px)}
+  body[data-page="map"] .app-page[data-page="map"] .panel{height:calc(100dvh - 126px)}
+  .app-page[data-page="map"] .map-mini-list{width:min(94vw,320px);right:8px;top:52px;max-height:40vh}
+  .main-shell-top,.main-head-side,.main-menu-actions,.main-live-stats{gap:6px}
+  header.app-shell-header h1{font-size:18px}
+}
+"""
+
+_MAIN_PAGE_PATCH_JS = r"""
+(function(){
+  var PAGE_COOKIE='rid_home_page';
+  var pageReady=false;
+  var alarmRects=[];
+  var alarmOverlayHideTimer=null;
+  var alarmLastSig='';
+  function ensureZoneOverlay(){
+    var el = document.getElementById('zone-alarm');
+    if(el) return el;
+    el = document.createElement('div');
+    el.id = 'zone-alarm';
+    el.className = 'zone-alarm';
+    el.innerHTML = '<div class="zone-alarm-card"><div class="zone-alarm-title">区域告警</div><div id="zone-alarm-text" class="zone-alarm-text">检测到目标进入报警区域</div></div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function navSet(page){
+    var p = (page === 'list' || page === 'more') ? page : 'map';
+    document.body.setAttribute('data-page', p);
+    cookieSet(PAGE_COOKIE, p, 365);
+    var tabs = document.querySelectorAll('.app-tab-btn');
+    for(var i=0;i<tabs.length;i++){
+      tabs[i].classList.toggle('active', tabs[i].getAttribute('data-page') === p);
+    }
+    if(p === 'map'){
+      setTimeout(function(){ if(map) map.invalidateSize(false); }, 80);
+    }
+  }
+  window.__ridNavSet = navSet;
+  function neutralizeCollapseHeader(hdr){
+    if(!hdr || hdr.getAttribute('data-no-collapse') === '1') return;
+    hdr.setAttribute('data-no-collapse', '1');
+    hdr.style.cursor = 'default';
+    hdr.addEventListener('click', function(ev){
+      var t = ev.target;
+      if(t && t.closest && t.closest('button,input,label,a,select,textarea')) return;
+      ev.stopImmediatePropagation();
+    }, true);
+  }
+  function neutralizeLegacyCollapsers(){
+    ['map-panel','log-panel','ap-panel'].forEach(function(id){
+      var panel = qs(id);
+      if(!panel || !panel.querySelector) return;
+      neutralizeCollapseHeader(panel.querySelector('.panel-hdr'));
+    });
+  }
+  function ensureHeaderChrome(){
+    var header = document.querySelector('header');
+    if(!header) return;
+    header.classList.add('app-shell-header');
+    var title = header.querySelector('h1');
+    if(title && !qs('main-title-sub')){
+      var titleBlock = document.createElement('div');
+      titleBlock.className = 'main-title-block';
+      title.parentNode.insertBefore(titleBlock, title);
+      titleBlock.appendChild(title);
+      var sub = document.createElement('div');
+      sub.id = 'main-title-sub';
+      sub.className = 'main-title-sub';
+      sub.textContent = '地图、列表、日志。';
+      titleBlock.appendChild(sub);
+    }
+    var statsWrap = header.querySelector('.head-stats');
+    if(statsWrap && !qs('main-shell-top')){
+      var titleBlockNode = header.querySelector('.main-title-block') || title;
+      var top = document.createElement('div');
+      top.id = 'main-shell-top';
+      top.className = 'main-shell-top';
+      var side = document.createElement('div');
+      side.id = 'main-head-side';
+      side.className = 'main-head-side';
+      var actions = document.createElement('div');
+      actions.id = 'main-menu-actions';
+      actions.className = 'main-menu-actions';
+      var stats = document.createElement('div');
+      stats.id = 'main-live-stats';
+      stats.className = 'main-live-stats';
+      var children = Array.prototype.slice.call(statsWrap.children || []);
+      children.forEach(function(node){
+        if(!node) return;
+        if(String(node.tagName || '').toUpperCase() === 'BUTTON'){
+          node.classList.add('header-link-btn');
+          actions.appendChild(node);
+        }else{
+          stats.appendChild(node);
+        }
+      });
+      side.appendChild(actions);
+      side.appendChild(stats);
+      top.appendChild(titleBlockNode);
+      top.appendChild(side);
+      header.insertBefore(top, header.firstChild);
+      if(statsWrap.parentNode) statsWrap.parentNode.removeChild(statsWrap);
+    }else if(statsWrap){
+      Array.prototype.slice.call(statsWrap.children || []).forEach(function(node){
+        if(String(node.tagName || '').toUpperCase() === 'BUTTON'){
+          node.classList.add('header-link-btn');
+        }
+      });
+    }
+  }
+  function ensureMainPages(){
+    var header = document.querySelector('header');
+    if(header && !qs('app-tab-nav')){
+      var nav = document.createElement('div');
+      nav.id = 'app-tab-nav';
+      nav.className = 'app-tab-nav';
+      nav.innerHTML =
+        '<button class="app-tab-btn" data-page="map" type="button">地图</button>'+
+        '<button class="app-tab-btn" data-page="list" type="button">飞机列表</button>'+
+        '<button class="app-tab-btn" data-page="more" type="button">其他</button>';
+      nav.addEventListener('click', function(ev){
+        var btn = ev.target && ev.target.closest ? ev.target.closest('.app-tab-btn') : null;
+        if(!btn) return;
+        navSet(btn.getAttribute('data-page') || 'map');
+      });
+      header.appendChild(nav);
+    }
+    var clearBtn = qs('btn-clear-history');
+    if(clearBtn && !qs('btn-settings')){
+      var btn = document.createElement('button');
+      btn.id = 'btn-settings';
+      btn.className = 'btn-mini header-link-btn';
+      btn.type = 'button';
+      btn.textContent = '设置';
+      btn.addEventListener('click', function(){ location.href = '/settings'; });
+      clearBtn.parentNode.insertBefore(btn, clearBtn);
+    }
+    var advBtn = qs('btn-adv-open'); if(advBtn && advBtn.parentNode) advBtn.parentNode.removeChild(advBtn);
+    var hwBtn = qs('btn-hw-assistant'); if(hwBtn && hwBtn.parentNode) hwBtn.parentNode.removeChild(hwBtn);
+    var advModal = qs('adv-modal'); if(advModal && advModal.parentNode) advModal.parentNode.removeChild(advModal);
+    try{
+      if(typeof setMapPanelCollapsed === 'function') setMapPanelCollapsed(false);
+      if(typeof setLogPanelCollapsed === 'function') setLogPanelCollapsed(false);
+      if(typeof setApPanelCollapsed === 'function') setApPanelCollapsed(false);
+      if(typeof syncBottomPanelLayout === 'function') syncBottomPanelLayout();
+    }catch(_e){}
+    ensureHeaderChrome();
+    neutralizeLegacyCollapsers();
+    if(pageReady) return;
+    var listWrap = document.querySelector('.tbl-wrap');
+    var bottom = document.querySelector('.bottom');
+    var mapEl = qs('map');
+    var mapPanel = mapEl && mapEl.closest ? mapEl.closest('.panel') : null;
+    if(!header || !listWrap || !bottom || !mapPanel) return;
+    document.body.classList.add('app-paged');
+    var pages = document.getElementById('app-pages');
+    if(!pages){
+      pages = document.createElement('div');
+      pages.id = 'app-pages';
+      pages.className = 'app-pages';
+      header.insertAdjacentElement('afterend', pages);
+    }
+    function ensurePage(name){
+      var el = document.querySelector('.app-page[data-page="'+name+'"]');
+      if(el) return el;
+      el = document.createElement('section');
+      el.className = 'app-page';
+      el.setAttribute('data-page', name);
+      pages.appendChild(el);
+      return el;
+    }
+    ensurePage('map').appendChild(mapPanel);
+    ensurePage('list').appendChild(listWrap);
+    ensurePage('more').appendChild(bottom);
+    pageReady = true;
+    navSet(cookieGet(PAGE_COOKIE) || 'map');
+  }
+  function buildInfoSection(title, rows){
+    var html = '<section class="info-block"><h3>'+esc(title)+'</h3><div class="info-grid">';
+    for(var i=0;i<rows.length;i++){
+      html += infoRowHtml(rows[i][0], rows[i][1]);
+    }
+    html += '</div></section>';
+    return html;
+  }
+  window.exportTrackForSn = async function(sn){
+    sn = String(sn || '').trim();
+    if(!sn) return;
+    var data = await getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
+    _downloadJsonFile('rid_track_' + sn + '_' + _toolStamp() + '.json', data);
+  };
+  function patchInfoCard(){
+    buildInfoHtml = function(e){
+      e = e || {};
+      var base = [
+        ['SN', String(e.sn || '-')],
+        ['机型', String(e.model || 'N/A')],
+        ['在线状态', e.lost ? '离线' : '在线'],
+        ['来源', snSourceText(e)],
+        ['扫描类型', scanTypeText(e)],
+        ['MAC', String(e.mac || '-')],
+        ['SSID', String(e.ssid || '(hidden)')],
+        ['捕获类型', String(e.capture_type || '-')],
+        ['捕获时间', String(e.capture_time || '-')],
+        ['最后数据包', String(e.last_pkt_time || e.capture_time || '-')],
+        ['信号', e.rssi==null ? 'N/A' : (e.rssi + 'dBm')],
+        ['信道', String(e.ch || '?') + (e.ch_assumed ? ' (assumed)' : '')],
+        ['包数', String(e.pkts==null?0:e.pkts)],
+        ['数据更新时间', String(e.age_text || fmtAge(e.age))],
+        ['在线时长', fmtDurSec(e.online_dur)],
+        ['首次上线', String(e.first_seen || '-')],
+        ['最后上线', String(e.last_seen || '-')],
+        ['轨迹点数', String(e.track_count==null?0:e.track_count)]
+      ];
+      var dronePos = [
+        ['纬度', fmt(e.lat,6,'')],
+        ['经度', fmt(e.lon,6,'')],
+        ['高度', fmt(e.alt,1,'m')],
+        ['速度', fmt(e.spd,2,'m/s')],
+        ['垂直速度', fmt(e.vspd,2,'m/s')],
+        ['方向', String(e.dir || '-')]
+      ];
+      var pilotPos = [
+        ['飞手纬度', fmt(e.pilot_lat,6,'')],
+        ['飞手经度', fmt(e.pilot_lon,6,'')],
+        ['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]
+      ];
+      var html = '<div class="info-actions">'+
+        '<button class="btn-mini" type="button" data-sn="'+escAttr(String(e.sn||''))+'" onclick="exportTrackForSn(this.getAttribute(&quot;data-sn&quot;))">导出轨迹</button>'+
+        '</div><div class="info-sections">';
+      html += buildInfoSection('飞机位置信息', dronePos);
+      html += buildInfoSection('飞手位置信息', pilotPos);
+      html += buildInfoSection('其他信息', base);
+      var raws = Array.isArray(e.raw_packets) ? e.raw_packets : [];
+      html += '<section class="info-block"><h3>原始包</h3>';
+      if(raws.length){
+        for(var i=0;i<raws.length;i++){
+          var p = raws[i] || {};
+          html += '<div class="raw-meta">#'+(i+1)+' ['+esc(String(p.capture_type || e.capture_type || '-'))+'] '+esc(String(p.ts || e.capture_time || '-'))+'</div>';
+          html += '<pre class="raw-code">'+esc(String(p.hex || ''))+'</pre>';
+        }
+      }else{
+        html += '<div class="raw-empty">暂无</div>';
+      }
+      html += '</section></div>';
+      return html;
+    };
+  }
+  function zoneList(){
+    var list = metaState && metaState.alert_zones;
+    if(Array.isArray(list) && list.length){
+      return list.filter(function(z){ return !!z && typeof z === 'object'; });
+    }
+    var z = metaState && metaState.alert_zone;
+    return (z && typeof z === 'object') ? [z] : [];
+  }
+  function zoneBounds(z){
+    var lat1 = numOrNull(z.lat1), lat2 = numOrNull(z.lat2), lon1 = numOrNull(z.lon1), lon2 = numOrNull(z.lon2);
+    if(lat1==null || lat2==null || lon1==null || lon2==null) return null;
+    return {
+      south: Math.min(lat1, lat2),
+      north: Math.max(lat1, lat2),
+      west: Math.min(lon1, lon2),
+      east: Math.max(lon1, lon2)
+    };
+  }
+  function clearAlarmZones(){
+    if(!map) return;
+    while(alarmRects.length){
+      try{ map.removeLayer(alarmRects.pop()); }catch(_e){}
+    }
+  }
+  function drawAlarmZones(){
+    if(!map) return;
+    clearAlarmZones();
+    zoneList().forEach(function(z){
+      var b = zoneBounds(z || {});
+      if(!z || !z.enabled || !b) return;
+      var rect = L.rectangle([[b.south, b.west], [b.north, b.east]], {color:'#ff5b5b', weight:2, fillColor:'#ff3b3b', fillOpacity:0.08}).addTo(map);
+      rect.bindPopup('<b>'+esc(String(z.name || '报警区域'))+'</b>');
+      alarmRects.push(rect);
+    });
+  }
+  function zoneHitGroups(rows){
+    var groups = [];
+    rows = Array.isArray(rows) ? rows : [];
+    zoneList().forEach(function(z){
+      var b = zoneBounds(z || {});
+      if(!z || !z.enabled || !b) return;
+      var hits = [];
+      for(var i=0;i<rows.length;i++){
+        var e = rows[i] || {};
+        if(e.lost || e.archived) continue;
+        var lat = numOrNull(e.lat), lon = numOrNull(e.lon);
+        if(lat==null || lon==null) continue;
+        if(lat >= b.south && lat <= b.north && lon >= b.west && lon <= b.east){
+          hits.push(e);
+        }
+      }
+      if(hits.length){
+        groups.push({zone:z, hits:hits});
+      }
+    });
+    return groups;
+  }
+  function setZoneAlarm(rows){
+    var overlay = ensureZoneOverlay();
+    var groups = zoneHitGroups(rows);
+    if(!groups.length){
+      overlay.classList.remove('show');
+      alarmLastSig = '';
+      return;
+    }
+    var sigParts = [];
+    var lines = [];
+    groups.forEach(function(group){
+      var zoneName = String((group.zone && group.zone.name) || '报警区域');
+      var names = group.hits.map(function(x){ return String(x.sn||'-') + ' / ' + String(x.model || 'N/A'); }).join('；');
+      lines.push(zoneName + '：' + names);
+      sigParts.push(zoneName + '>' + group.hits.map(function(x){ return String(x.sn||''); }).sort().join('|'));
+    });
+    var sig = sigParts.sort().join(' || ');
+    var lineText = lines.join(' / ');
+    qs('zone-alarm-text').textContent = '检测到目标进入自定义报警区域：' + lineText;
+    overlay.classList.add('show');
+    if(sig !== alarmLastSig){
+      showBanner('区域告警：' + lineText, 'warn', 5200);
+      if(webNotifyEnabled && window.Notification && Notification.permission === 'granted'){
+        try{ new Notification('Light RID Scanner 区域告警', {body:lineText}); }catch(_e){}
+      }
+      alarmLastSig = sig;
+    }
+    if(alarmOverlayHideTimer) clearTimeout(alarmOverlayHideTimer);
+    alarmOverlayHideTimer = setTimeout(function(){
+      if(!zoneHitGroups(latestDroneRows).length){
+        overlay.classList.remove('show');
+      }
+    }, 6000);
+  }
+  var _origBuildExtraUi = buildExtraUi;
+  buildExtraUi = function(){
+    _origBuildExtraUi();
+    neutralizeLegacyCollapsers();
+    ensureMainPages();
+  };
+  var _origApplyMeta = applyMeta;
+  applyMeta = function(meta){
+    _origApplyMeta(meta);
+    ensureMainPages();
+    neutralizeLegacyCollapsers();
+    drawAlarmZones();
+  };
+  var _origUpdateMap = updateMap;
+  updateMap = function(drones){
+    _origUpdateMap(drones);
+    drawAlarmZones();
+    setZoneAlarm(drones);
+  };
+  document.addEventListener('DOMContentLoaded', function(){
+    patchInfoCard();
+    ensureMainPages();
+    neutralizeLegacyCollapsers();
+    drawAlarmZones();
+  });
+})();
+"""
+
+def _inject_html_once(html_src: str, marker: str, extra: str) -> str:
+    if not extra:
+        return html_src
+    if extra in html_src:
+        return html_src
+    return html_src.replace(marker, extra + marker, 1)
+
 def _build_html() -> str:
-    return _PAGE_HTML
+    html_src = _PAGE_HTML
+    html_src = _inject_html_once(html_src, "</style>", _MAIN_PAGE_PATCH_CSS + "\n")
+    html_src = _inject_html_once(html_src, "</body>", "<script>\n" + _MAIN_PAGE_PATCH_JS + "\n</script>\n")
+    return html_src
+
+def _build_settings_html() -> str:
+    return """<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>设置 - Light RID Scanner</title>
+<style>
+*{box-sizing:border-box}
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --bg:#201f1e;--bg2:#252423;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;
+  --muted:#c8c6c4;--blue:#2899f5;--green:#92c353;--warn:#f7630c;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03)
+}
+body.theme-light{
+  --bg:#f3f2f1;--bg2:#edebe9;--card:#ffffff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;
+  --muted:#605e5c;--blue:#0078d4;--green:#107c10;--warn:#d83b01;--glow:rgba(0,120,212,.10);--soft:rgba(0,0,0,.018)
+}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
+body{min-height:100vh;background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
+.wrap{max-width:1380px;margin:0 auto;padding:22px 18px 36px}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+.title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
+.sub{color:var(--muted);margin-top:6px;max-width:780px;line-height:1.55}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+.btn[disabled]{opacity:.58;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+.btn{border:1px solid var(--border);background:var(--card2);color:var(--txt);padding:10px 14px;border-radius:4px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;transition:border-color .14s ease,background-color .14s ease,transform .14s ease,box-shadow .14s ease,color .14s ease;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.btn:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 10%, var(--card2));box-shadow:0 2px 8px var(--glow)}
+.btn.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:color-mix(in srgb, var(--warn) 70%, white)}
+.btn.warn:hover{background:color-mix(in srgb, var(--warn) 8%, var(--card2))}
+.btn.ghost{background:transparent}
+.draft-bar{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin:0 auto 16px;padding:12px 14px;border:1px solid var(--border);border-radius:4px;background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.draft-copy{display:grid;gap:4px}
+.draft-title{font:600 15px/1.2 var(--font-ui)}
+.draft-meta{font-size:12px;color:var(--muted);line-height:1.5}
+.draft-actions{display:flex;gap:10px;flex-wrap:wrap}
+.tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:3px;border:1px solid var(--border);background:var(--card2);border-radius:4px;margin:0 auto 16px;width:min(920px,100%);box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.tab{border:1px solid transparent;background:transparent;color:var(--txt);padding:11px 16px;border-radius:4px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;text-align:center;transition:border-color .14s ease,background-color .14s ease,transform .14s ease,box-shadow .14s ease}
+.tab:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 8%, var(--card2));box-shadow:0 2px 8px var(--glow)}
+.tab.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 12%, var(--card2));box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent)}
+body.theme-light .tabs{background:var(--card2)}
+body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(--card2));border-color:var(--blue)}
+.panel{display:none}.panel.active{display:block}
+.visual-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(360px,.88fr);gap:14px}
+.stack{display:grid;gap:14px;min-width:0}
+.card{border:1px solid var(--border);border-radius:4px;background:var(--card);padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.08);min-width:0;overflow:hidden;animation:officeFade .16s ease-out both}
+.card.dirty{border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 22%, transparent),0 8px 18px var(--glow)}
+.card.dirty h2{color:var(--blue)}
+.card h2{margin:0;font:600 18px/1 var(--font-ui);letter-spacing:.01em}
+.hint{color:var(--muted);font-size:13px;line-height:1.6}
+.section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.section-copy{margin-top:6px;color:var(--muted);font-size:13px;line-height:1.55;max-width:56ch}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.field{display:grid;gap:6px}
+.field.full{grid-column:1/-1}
+.field label{font:600 12px/1.15 var(--font-ui);letter-spacing:.01em;color:var(--muted)}
+.field input,.field select,.field textarea{width:100%;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:10px 12px;font:600 14px/1.35 var(--font-ui);transition:border-color .14s ease,box-shadow .14s ease,background-color .14s ease}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 38%, transparent)}
+.field textarea{min-height:440px;resize:vertical;font-family:var(--font-mono);font-size:13px}
+.field-inline{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
+.field-inline input[disabled]{opacity:.9;background:color-mix(in srgb, var(--card2) 92%, black)}
+.checks{display:flex;flex-wrap:wrap;gap:12px}
+.checks label{display:flex;align-items:center;gap:8px;font-size:15px;color:var(--txt)}
+.row-actions{display:flex;gap:10px;flex-wrap:wrap}
+.token-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.token-actions input{flex:1 1 260px}
+.status{margin-top:12px;color:#8fd0a8;white-space:pre-wrap;line-height:1.65}
+.status.err{color:#ff9b9b}
+.secret-note,.micro{font-size:12px;color:var(--muted);line-height:1.55}
+.micro{margin-top:6px}
+.list-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.list-wrap{display:grid;gap:10px}
+.list-row{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
+.hook-layout{display:grid;grid-template-columns:minmax(110px,.7fr) minmax(0,1.5fr) 88px auto;gap:10px;align-items:end;min-width:0}
+.zone-layout{display:grid;grid-template-columns:minmax(120px,1.2fr) 86px repeat(4,minmax(0,1fr)) auto;gap:10px;align-items:end;min-width:0}
+.hook-layout>.field,.zone-layout>.field{min-width:0}
+.empty-state{padding:14px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);background:var(--card2)}
+.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.stat{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
+.stat .k{font:600 12px/1 var(--font-ui);color:var(--muted);letter-spacing:.01em}
+.stat .v{margin-top:8px;font:600 20px/1.1 var(--font-ui)}
+details.advanced{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
+details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-spacing:.01em}
+.split-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
+.modal-mask{position:fixed;inset:0;background:rgba(4,8,14,.66);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
+.modal-mask.show{display:flex}
+.modal-card{width:min(480px,100%);border:1px solid var(--border);border-radius:4px;background:var(--card);padding:18px;box-shadow:0 18px 32px rgba(0,0,0,.18)}
+.modal-card h3{margin:0 0 10px;font:600 20px/1 var(--font-ui)}
+@keyframes officeFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (max-width:1360px){
+  .hook-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .zone-layout{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .hook-layout .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
+}
+@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.hook-layout,.zone-layout,.field-inline{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+  <div class="topbar">
+    <div>
+      <div class="title">设置</div>
+      <div class="sub">修改会先留在页面里，测试通过后再保存。</div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="btn-back" type="button">返回主页</button>
+      <button class="btn" id="btn-theme" type="button">浅色</button>
+      <button class="btn" id="btn-reload-view" type="button">刷新</button>
+    </div>
+  </div>
+  <div class="draft-bar">
+    <div class="draft-copy">
+      <div class="draft-title" id="draft-title">当前没有未保存修改</div>
+      <div class="draft-meta" id="draft-meta">改过的卡片会高亮。测试只做预演，不会写入配置文件。</div>
+    </div>
+    <div class="draft-actions">
+      <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
+      <button class="btn warn" id="btn-save-visual" type="button" disabled>测试并保存</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="visual" type="button">可视化设置</button>
+    <button class="tab" data-tab="raw" type="button">原始文件</button>
+    <button class="tab" data-tab="api" type="button">API 文档</button>
+  </div>
+  <div class="panel active" data-tab="visual">
+    <div class="visual-grid">
+      <div class="stack">
+        <div class="card" data-card-key="capture">
+          <div class="section-head">
+            <div>
+              <h2>采集</h2>
+              <div class="section-copy">默认扫描项。</div>
+            </div>
+          </div>
+          <div class="grid" style="margin-top:14px">
+            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">(auto)</option></select></div>
+            <div class="field">
+              <label>固定信道</label>
+              <div class="field-inline">
+                <input id="cfg-channel" type="number" min="1" max="196" disabled>
+                <button class="btn ghost" id="btn-channel-edit" type="button">编辑</button>
+                <button class="btn ghost" id="btn-channel-reset" type="button">默认</button>
+              </div>
+              <div class="micro" id="channel-hint">默认 CH6。</div>
+            </div>
+            <div class="field"><label>日志刷新间隔(s)</label><input id="cfg-time" type="number" step="0.1"></div>
+            <div class="field"><label>最短重复间隔(s)</label><input id="cfg-min-gap" type="number" step="0.1"></div>
+            <div class="field"><label>信号变化阈值</label><input id="cfg-rssi-delta" type="number"></div>
+            <div class="field full"><label>模型映射文件</label><input id="cfg-model-map" type="text"></div>
+            <div class="field full"><label>历史缓存文件</label><input id="cfg-history-file" type="text"></div>
+          </div>
+          <div class="checks" style="margin-top:14px">
+            <label><input id="cfg-heal" type="checkbox"> 自愈恢复</label>
+            <label><input id="cfg-rssi-change" type="checkbox"> 信号变化时更新</label>
+            <label><input id="cfg-payload-change" type="checkbox"> 数据变化时更新</label>
+            <label><input id="cfg-debug" type="checkbox"> 调试日志</label>
+          </div>
+          <details class="advanced" style="margin-top:14px">
+            <summary>高级采集参数</summary>
+            <div class="grid" style="margin-top:14px">
+              <div class="field"><label>2.4G 驻留(ms)</label><input id="cfg-dwell2g" type="number"></div>
+              <div class="field"><label>5G 驻留(ms)</label><input id="cfg-dwell5g" type="number"></div>
+              <div class="field"><label>切换稳定等待(ms)</label><input id="cfg-settle" type="number"></div>
+              <div class="field"><label>命中驻留(ms)</label><input id="cfg-hit-dwell" type="number"></div>
+              <div class="field"><label>命中上限(ms)</label><input id="cfg-hit-cap" type="number"></div>
+            </div>
+            <div class="checks" style="margin-top:14px">
+              <label><input id="cfg-hop" type="checkbox"> 自动跳频</label>
+              <label><input id="cfg-hop5g" type="checkbox"> 跳频含 5G</label>
+              <label><input id="cfg-fast" type="checkbox"> 扫描 WiFi 快传</label>
+            </div>
+          </details>
+        </div>
+        <div class="card" data-card-key="map">
+          <div class="section-head">
+            <div>
+              <h2>地图与基站</h2>
+              <div class="section-copy">基站位置和地图参数。</div>
+            </div>
+          </div>
+          <div class="grid">
+            <div class="field"><label>基站名称</label><input id="cfg-base-name" type="text"></div>
+            <div class="field"><label>DJI 查询地址</label><input id="cfg-dji-url" type="text"></div>
+            <div class="field"><label>基站纬度</label><input id="cfg-base-lat" type="number" step="0.000001"></div>
+            <div class="field"><label>基站经度</label><input id="cfg-base-lon" type="number" step="0.000001"></div>
+            <div class="field"><label>默认缩放</label><input id="cfg-base-zoom" type="number" min="3" max="30"></div>
+            <div class="field"><label>参考航向(°)</label><input id="cfg-heading-ref" type="number" step="0.1"></div>
+            <div class="field"><label>自动回中冷却(s)</label><input id="cfg-map-idle" type="number" min="5" max="600"></div>
+            <div class="field full">
+              <label>定位</label>
+              <div class="row-actions">
+                <button class="btn" id="btn-browser-loc" type="button">读取浏览器位置</button>
+                <button class="btn ghost" id="btn-clear-base-loc" type="button">清空基站坐标</button>
+              </div>
+              <div class="micro" id="base-geo-hint">部分浏览器只允许在 HTTPS 或 localhost 下读取定位。</div>
+            </div>
+          </div>
+        </div>
+        <div class="card" data-card-key="zones">
+          <div class="list-head">
+            <div>
+              <h2>报警区域</h2>
+              <div class="section-copy">两点经纬度。</div>
+            </div>
+            <button class="btn" id="btn-zone-add" type="button">添加区域</button>
+          </div>
+          <div id="zone-list" class="list-wrap"></div>
+        </div>
+      </div>
+      <div class="stack">
+        <div class="card" data-card-key="access">
+          <div class="list-head">
+            <div>
+              <h2>通知、API 与访问控制</h2>
+              <div class="section-copy">敏感字段默认遮罩。</div>
+            </div>
+            <button class="btn" id="btn-hook-add" type="button">添加通知通道</button>
+          </div>
+          <div id="wecom-list" class="list-wrap"></div>
+          <div class="grid" style="margin-top:14px">
+            <div class="field"><label>重上线冷却(s)</label><input id="cfg-reonline" type="number"></div>
+            <div class="field"><label>通知超时(s)</label><input id="cfg-send-timeout" type="number"></div>
+            <div class="field"><label>登录提示标题</label><input id="cfg-auth-realm" type="text"><div class="micro">显示在浏览器登录弹窗里。</div></div>
+            <div class="field"><label>网页登录账号</label><input id="cfg-auth-user" type="text" placeholder="留空则保持不变"></div>
+            <div class="field"><label>网页登录密码</label><input id="cfg-auth-pass" type="password" placeholder="留空则保持不变"></div>
+            <div class="field full"><label>当前 API Token</label>
+              <div class="token-actions">
+                <input id="cfg-api-token-current" type="password" readonly placeholder="未设置">
+                <button class="btn ghost" id="btn-api-token-reveal" type="button">显示</button>
+                <button class="btn" id="btn-api-token-copy" type="button">复制</button>
+                <button class="btn ghost" id="btn-api-token-clear" type="button">清空</button>
+              </div>
+              <div class="micro">显示或复制前需要再次验证。</div>
+            </div>
+            <div class="field full"><label>替换 API Token</label><input id="cfg-api-token-new" type="password" placeholder="留空则保持不变"></div>
+            <div class="field full"><label>API 白名单</label><textarea id="cfg-api-whitelist" spellcheck="false" style="min-height:140px"></textarea><div class="micro">启用白名单模式后，每行填写一个允许访问外部 API 的 IP 或 CIDR，例如 `127.0.0.1`、`192.168.1.0/24`。</div></div>
+          </div>
+          <div class="checks" style="margin-top:14px">
+            <label><input id="cfg-notify-enabled" type="checkbox"> 启用企业微信通知</label>
+            <label><input id="cfg-notify-reonline" type="checkbox"> 允许重上线通知</label>
+            <label><input id="cfg-auth-enabled" type="checkbox"> 启用网页登录鉴权</label>
+            <label><input id="cfg-api-enabled" type="checkbox"> 启用外部 API</label>
+            <label><input id="cfg-api-whitelist-enabled" type="checkbox"> 启用 API 白名单模式</label>
+          </div>
+          <div class="secret-note" id="secret-state" style="margin-top:12px">启用外部 API 前，先完成网页登录和 Token 设置。</div>
+          <div id="status-visual" class="status">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>主机状态</h2>
+              <div class="section-copy">资源占用和采集状态。</div>
+            </div>
+            <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
+          </div>
+          <div id="host-stats" class="stats-grid" style="margin-top:14px"></div>
+          <div id="host-meta" class="micro">-</div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-open-hw" type="button">打开硬件助手</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="panel" data-tab="raw">
+    <div class="card">
+      <div class="split-actions">
+        <div>
+          <h2>原始配置文件</h2>
+          <div class="section-copy">直接编辑 rid_config.json</div>
+        </div>
+        <div class="row-actions">
+          <button class="btn" id="btn-load-raw" type="button">读取原始文件</button>
+          <button class="btn warn" id="btn-save-raw" type="button">保存并热重载</button>
+        </div>
+      </div>
+      <div class="field full" style="margin-top:14px"><label>rid_config.json</label><textarea id="raw-editor" spellcheck="false"></textarea></div>
+      <div id="status-raw" class="status">-</div>
+    </div>
+  </div>
+  <div class="panel" data-tab="api">
+    <div class="card">
+      <h2>API 文档</h2>
+      <div class="section-copy">外部 API 需要 Token。</div>
+      <div class="field full" style="margin-top:14px"><label>接口文档</label><textarea id="api-docs" readonly spellcheck="false"></textarea></div>
+      <div id="status-api" class="status">-</div>
+    </div>
+  </div>
+</div>
+<div class="modal-mask" id="reauth-modal">
+  <div class="modal-card">
+    <h3>再次验证</h3>
+    <div class="section-copy">请再次验证。</div>
+    <div class="grid" style="margin-top:14px">
+      <div class="field full"><label>账号</label><input id="reauth-user" type="text" autocomplete="username"></div>
+      <div class="field full"><label>密码</label><input id="reauth-pass" type="password" autocomplete="current-password"></div>
+    </div>
+    <div class="row-actions" style="margin-top:14px">
+      <button class="btn ghost" id="btn-reauth-cancel" type="button">取消</button>
+      <button class="btn" id="btn-reauth-confirm" type="button">确认</button>
+    </div>
+    <div id="reauth-status" class="status">-</div>
+  </div>
+</div>
+<script>
+function qs(id){ return document.getElementById(id); }
+function qsa(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel) || []); }
+function enc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function splitLines(text){
+  var raw = String(text || '');
+  if(raw.indexOf('\\r') >= 0) raw = raw.split('\\r').join('');
+  return raw.split('\\n');
+}
+function isLocalHostName(host){
+  var h = String(host || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1';
+}
+var apiTokenAction = '__KEEP__';
+var apiTokenLastReveal = '';
+var reauthAction = null;
+var settingsState = {visualLoaded:false, rawLoaded:false, apiLoaded:false, channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}};
+function setStatus(id, text, err){
+  var el = qs(id); if(!el) return;
+  el.textContent = String(text || '-');
+  el.classList.toggle('err', !!err);
+}
+function apiUrl(url){
+  try{ return new URL(String(url||''), window.location.origin).toString(); }catch(_e){ return String(url||''); }
+}
+function pageHeaders(extra){
+  var headers = {'X-LightRID-Page':'1'};
+  if(extra && typeof extra === 'object'){
+    Object.keys(extra).forEach(function(k){ headers[k] = extra[k]; });
+  }
+  return headers;
+}
+async function copyTextPlain(text){
+  var raw = String(text || '');
+  if(!raw) throw new Error('没有可复制的内容');
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    try{
+      await navigator.clipboard.writeText(raw);
+      return;
+    }catch(_e){}
+  }
+  var ta = document.createElement('textarea');
+  ta.value = raw;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  ta.style.pointerEvents = 'none';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try{
+    if(!document.execCommand('copy')) throw new Error('copy failed');
+  }finally{
+    if(ta.parentNode) ta.parentNode.removeChild(ta);
+  }
+}
+async function getJson(url){
+  const r = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+async function postJson(url, body){
+  const r = await fetch(apiUrl(url), {method:'POST', headers:pageHeaders({'Content-Type':'application/json'}), body:JSON.stringify(body||{})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+function v(id){ return String((qs(id) && qs(id).value) || '').trim(); }
+function n(id){ var x = v(id); if(!x) return null; var f = Number(x); return isFinite(f) ? f : null; }
+function check(id){ return !!(qs(id) && qs(id).checked); }
+function cloneJson(obj){ return JSON.parse(JSON.stringify(obj == null ? null : obj)); }
+function sameJson(a, b){ return JSON.stringify(a == null ? null : a) === JSON.stringify(b == null ? null : b); }
+function loadTheme(){
+  try{ var s = localStorage.getItem('rid_ui_theme'); if(s === 'dark' || s === 'light') return s; }catch(_e){}
+  if(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+  return 'dark';
+}
+function applyTheme(theme){
+  var light = (theme === 'light');
+  document.body.classList.toggle('theme-light', light);
+  document.body.classList.toggle('theme-dark', !light);
+  try{ localStorage.setItem('rid_ui_theme', light ? 'light' : 'dark'); }catch(_e){}
+  qs('btn-theme').textContent = light ? '深色' : '浅色';
+}
+async function ensureTabLoaded(tab){
+  if(tab === 'raw' && !settingsState.rawLoaded){
+    await loadRaw();
+    settingsState.rawLoaded = true;
+  }
+  if(tab === 'api' && !settingsState.apiLoaded){
+    await loadApiDocs();
+    settingsState.apiLoaded = true;
+  }
+}
+function activateTab(tab){
+  qsa('.tab').forEach(function(btn){ btn.classList.toggle('active', btn.getAttribute('data-tab')===tab); });
+  qsa('.panel').forEach(function(p){ p.classList.toggle('active', p.getAttribute('data-tab')===tab); });
+  ensureTabLoaded(tab).catch(function(e){
+    if(tab === 'raw') setStatus('status-raw', e.message || e, true);
+    else if(tab === 'api') setStatus('status-api', e.message || e, true);
+  });
+}
+function applyTabs(){
+  qsa('.tab').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      activateTab(btn.getAttribute('data-tab') || 'visual');
+    });
+  });
+}
+function fmtPct(v){
+  return (v == null || !isFinite(v)) ? '—' : (Number(v).toFixed(1) + '%');
+}
+function fmtMb(used, total){
+  if(used == null || total == null || !isFinite(used) || !isFinite(total)) return '—';
+  return String(used) + ' / ' + String(total) + ' MB';
+}
+function fmtSecShort(sec){
+  sec = Number(sec);
+  if(!isFinite(sec) || sec < 0) return '—';
+  if(sec < 60) return Math.round(sec) + 's';
+  if(sec < 3600) return Math.round(sec / 60) + 'm';
+  if(sec < 86400) return Math.round(sec / 3600) + 'h';
+  return Math.round(sec / 86400) + 'd';
+}
+function renderHostStats(host, basic){
+  var root = qs('host-stats');
+  if(!root) return;
+  host = host || {};
+  basic = basic || {};
+  var sniff = host.sniff_state || {};
+  var sniffLabel = sniff.state === 'ok' ? '正常' : (sniff.state === 'warn' ? '等待数据' : (sniff.state === 'error' ? '异常' : '—'));
+  var items = [
+    ['主机', host.hostname || '—'],
+    ['CPU', fmtPct(host.cpu_percent)],
+    ['内存', fmtPct(host.mem_percent)],
+    ['内存容量', fmtMb(host.mem_used_mb, host.mem_total_mb)],
+    ['当前网卡', host.active_iface || basic.iface || '自动'],
+    ['当前信道', String(host.current_channel || basic.channel_effective || 6)]
+  ];
+  root.innerHTML = items.map(function(row){
+    return '<div class="stat"><div class="k">'+enc(row[0])+'</div><div class="v">'+enc(row[1])+'</div></div>';
+  }).join('');
+  var meta = [];
+  if(host.cpu_count) meta.push('核心 ' + String(host.cpu_count));
+  if(host.load1 != null) meta.push('负载 ' + String(host.load1) + '/' + String(host.load5) + '/' + String(host.load15));
+  if(host.uptime_sec != null) meta.push('运行 ' + fmtSecShort(host.uptime_sec));
+  if(sniff.state) meta.push('采集 ' + sniffLabel);
+  if(sniff.msg) meta.push(String(sniff.msg));
+  qs('host-meta').textContent = meta.length ? meta.join(' | ') : '-';
+}
+function collectVisualPayload(){
+  return {
+    basic: {
+      iface: v('cfg-iface') || null,
+      channel: settingsState.channelUseDefault ? null : n('cfg-channel'),
+      channel_use_default: !!settingsState.channelUseDefault,
+      time: n('cfg-time'),
+      min_gap: n('cfg-min-gap'),
+      rssi_delta: n('cfg-rssi-delta'),
+      model_map: v('cfg-model-map'),
+      history_file: v('cfg-history-file'),
+      auto_self_heal: check('cfg-heal'),
+      change_on_rssi: check('cfg-rssi-change'),
+      change_on_payload: check('cfg-payload-change'),
+      debug: check('cfg-debug'),
+      dwell_2g: n('cfg-dwell2g'),
+      dwell_5g: n('cfg-dwell5g'),
+      settle: n('cfg-settle'),
+      dwell_on_hit: n('cfg-hit-dwell'),
+      hit_cap: n('cfg-hit-cap'),
+      hop: check('cfg-hop'),
+      hop_5g: check('cfg-hop5g'),
+      scan_wifi_fast: check('cfg-fast'),
+      no_tui: true
+    },
+    web: {
+      dji_lookup_url: v('cfg-dji-url'),
+      base_name: v('cfg-base-name'),
+      base_lat: n('cfg-base-lat'),
+      base_lon: n('cfg-base-lon'),
+      base_zoom: n('cfg-base-zoom'),
+      heading_ref_deg: n('cfg-heading-ref'),
+      map_auto_center_idle_sec: n('cfg-map-idle'),
+      alarm_zones: collectZoneRows()
+    },
+    notify: {
+      enabled: check('cfg-notify-enabled'),
+      notify_reonline: check('cfg-notify-reonline'),
+      reonline_cooldown_sec: n('cfg-reonline'),
+      send_timeout_sec: n('cfg-send-timeout'),
+      wecom_webhooks: collectHookRows()
+    },
+    api: {
+      enabled: check('cfg-api-enabled'),
+      token: (v('cfg-api-token-new') || ((apiTokenAction === '__CLEAR__') ? '__CLEAR__' : '__KEEP__')),
+      whitelist_enabled: check('cfg-api-whitelist-enabled'),
+      whitelist: splitLines(qs('cfg-api-whitelist').value || '')
+    },
+    auth: {
+      enabled: check('cfg-auth-enabled'),
+      realm: v('cfg-auth-realm'),
+      username: v('cfg-auth-user') || '__KEEP__',
+      password: String((qs('cfg-auth-pass') && qs('cfg-auth-pass').value) || '').trim() || '__KEEP__'
+    }
+  };
+}
+function visualPayloadSections(payload){
+  payload = payload || {};
+  return {
+    capture: payload.basic || {},
+    map: {
+      dji_lookup_url: ((payload.web || {}).dji_lookup_url),
+      base_name: ((payload.web || {}).base_name),
+      base_lat: ((payload.web || {}).base_lat),
+      base_lon: ((payload.web || {}).base_lon),
+      base_zoom: ((payload.web || {}).base_zoom),
+      heading_ref_deg: ((payload.web || {}).heading_ref_deg),
+      map_auto_center_idle_sec: ((payload.web || {}).map_auto_center_idle_sec)
+    },
+    zones: {alarm_zones: ((payload.web || {}).alarm_zones || [])},
+    access: {
+      notify: payload.notify || {},
+      api: payload.api || {},
+      auth: payload.auth || {}
+    }
+  };
+}
+function setDraftUi(dirtyMap){
+  dirtyMap = dirtyMap || {};
+  settingsState.dirtyCards = dirtyMap;
+  settingsState.visualDirty = Object.keys(dirtyMap).some(function(k){ return !!dirtyMap[k]; });
+  qsa('.card[data-card-key]').forEach(function(card){
+    var key = card.getAttribute('data-card-key') || '';
+    card.classList.toggle('dirty', !!dirtyMap[key]);
+  });
+  if(qs('btn-test-visual')) qs('btn-test-visual').disabled = !settingsState.visualDirty;
+  if(qs('btn-save-visual')) qs('btn-save-visual').disabled = !settingsState.visualDirty;
+  if(qs('draft-title')) qs('draft-title').textContent = settingsState.visualDirty ? '有未保存修改' : '当前没有未保存修改';
+  if(qs('draft-meta')){
+    var names = [];
+    if(dirtyMap.capture) names.push('采集');
+    if(dirtyMap.map) names.push('地图与基站');
+    if(dirtyMap.zones) names.push('报警区域');
+    if(dirtyMap.access) names.push('通知与访问控制');
+    qs('draft-meta').textContent = settingsState.visualDirty
+      ? ('已改动: ' + names.join('、') + '。先测试，再决定是否保存。')
+      : '改过的卡片会高亮。测试只做预演，不会写入配置文件。';
+  }
+}
+function updateVisualDraftState(){
+  if(!settingsState.visualLoaded || !settingsState.visualInitial) return;
+  var current = collectVisualPayload();
+  var initialSections = visualPayloadSections(settingsState.visualInitial);
+  var currentSections = visualPayloadSections(current);
+  setDraftUi({
+    capture: !sameJson(initialSections.capture, currentSections.capture),
+    map: !sameJson(initialSections.map, currentSections.map),
+    zones: !sameJson(initialSections.zones, currentSections.zones),
+    access: !sameJson(initialSections.access, currentSections.access)
+  });
+}
+function resetVisualDraftState(){
+  settingsState.visualInitial = cloneJson(collectVisualPayload());
+  setDraftUi({});
+}
+function bindVisualDraftTracking(){
+  var root = document.querySelector('.panel[data-tab="visual"]');
+  if(!root || root.getAttribute('data-dirty-bind') === '1') return;
+  root.setAttribute('data-dirty-bind', '1');
+  root.addEventListener('input', function(ev){
+    var t = ev.target;
+    if(t && t.id === 'cfg-api-token-current') return;
+    updateVisualDraftState();
+  });
+  root.addEventListener('change', function(){
+    updateVisualDraftState();
+  });
+}
+function setVisualActionBusy(busy){
+  ['btn-test-visual','btn-save-visual','btn-reload-view'].forEach(function(id){
+    var el = qs(id);
+    if(!el) return;
+    if(id === 'btn-test-visual' || id === 'btn-save-visual'){
+      el.disabled = !!busy || (!settingsState.visualDirty);
+    }else{
+      el.disabled = !!busy;
+    }
+  });
+}
+function setChannelUi(editing){
+  settingsState.channelEditing = !!editing;
+  var input = qs('cfg-channel');
+  var editBtn = qs('btn-channel-edit');
+  var resetBtn = qs('btn-channel-reset');
+  var hint = qs('channel-hint');
+  if(input) input.disabled = !editing;
+  if(editBtn) editBtn.textContent = editing ? '锁定' : '编辑';
+  if(resetBtn) resetBtn.style.display = settingsState.channelUseDefault ? 'none' : '';
+  if(hint){
+    hint.textContent = settingsState.channelUseDefault
+      ? '默认 CH6。'
+      : '当前使用自定义信道。';
+  }
+}
+function openReauth(action){
+  reauthAction = action;
+  qs('reauth-user').value = '';
+  qs('reauth-pass').value = '';
+  setStatus('reauth-status', '请输入网页登录账号和密码。', false);
+  qs('reauth-modal').classList.add('show');
+  window.setTimeout(function(){ try{ qs('reauth-user').focus(); }catch(_e){} }, 30);
+}
+function closeReauth(){
+  reauthAction = null;
+  qs('reauth-modal').classList.remove('show');
+}
+async function performTokenReauth(action){
+  var user = String(qs('reauth-user').value || '').trim();
+  var pass = String(qs('reauth-pass').value || '');
+  if(!user || !pass){
+    setStatus('reauth-status', '请输入完整账号和密码。', true);
+    return;
+  }
+  var basic = 'Basic ' + btoa(unescape(encodeURIComponent(user + ':' + pass)));
+  const r = await fetch(apiUrl('/api/settings/api-token/reveal'), {
+    method:'POST',
+    headers:pageHeaders({'Authorization':basic, 'Content-Type':'application/json'}),
+    body:'{}'
+  });
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok || d.ok===false){
+    throw new Error(d.error || ('HTTP ' + r.status));
+  }
+  apiTokenLastReveal = String(d.token || '');
+  qs('cfg-api-token-current').value = apiTokenLastReveal;
+  qs('cfg-api-token-current').type = (action === 'reveal') ? 'text' : 'password';
+  if(action === 'copy'){
+    if(!apiTokenLastReveal) throw new Error('当前 Token 不可复制');
+    await copyTextPlain(apiTokenLastReveal);
+  }
+}
+function fillIfaceOptions(items, selected){
+  const sel = qs('cfg-iface');
+  if(!sel) return;
+  const opts = ['<option value="">(auto)</option>'];
+  (Array.isArray(items)?items:[]).forEach(function(it){
+    const name = String(it.name || '');
+    if(!name) return;
+    opts.push('<option value="'+enc(name)+'">'+enc(name)+' ['+enc(String(it.mode||''))+'] '+(it.supports_5g ? '5G' : '2.4G')+'</option>');
+  });
+  sel.innerHTML = opts.join('');
+  sel.value = selected || '';
+}
+function renderHookRows(items){
+  var root = qs('wecom-list');
+  var arr = Array.isArray(items) ? items.slice() : [];
+  if(!arr.length) arr = [{index:'', name:'默认通道', enabled:true, key_masked:''}];
+  root.innerHTML = arr.map(function(item, idx){
+    var index = (item.index == null) ? '' : String(item.index);
+    var name = enc(item.name || ('通道 ' + (idx + 1)));
+    var mask = enc(item.key_masked || '');
+    return '<div class="list-row hook-row" data-index="'+enc(index)+'">'
+      +'<div class="hook-layout">'
+      +'<div class="field"><label>通道名称</label><input class="hook-name" type="text" value="'+name+'"></div>'
+      +'<div class="field"><label>Webhook Key</label><input class="hook-key" type="password" value="" placeholder="'+(mask || '输入新的 Key')+'"><div class="micro">当前值: '+(mask || '未设置')+'</div></div>'
+      +'<div class="field"><label>启用</label><input class="hook-enabled" type="checkbox" '+(item.enabled ? 'checked' : '')+'></div>'
+      +'<div class="field"><label>&nbsp;</label><button class="btn ghost row-remove" type="button">移除</button></div>'
+      +'</div></div>';
+  }).join('');
+}
+function renderZoneRows(items){
+  var root = qs('zone-list');
+  var arr = Array.isArray(items) ? items.slice() : [];
+  if(!arr.length){
+    root.innerHTML = '<div class="empty-state">暂无报警区域</div>';
+    return;
+  }
+  root.innerHTML = arr.map(function(item, idx){
+    return '<div class="list-row zone-row">'
+      +'<div class="zone-layout">'
+      +'<div class="field"><label>区域名称</label><input class="zone-name" type="text" value="'+enc(item.name || ('报警区域 ' + (idx + 1)))+'"></div>'
+      +'<div class="field"><label>启用</label><input class="zone-enabled" type="checkbox" '+(item.enabled ? 'checked' : '')+'></div>'
+      +'<div class="field"><label>A 点纬度</label><input class="zone-lat1" type="number" step="0.000001" value="'+(item.lat1 == null ? '' : enc(item.lat1))+'"></div>'
+      +'<div class="field"><label>A 点经度</label><input class="zone-lon1" type="number" step="0.000001" value="'+(item.lon1 == null ? '' : enc(item.lon1))+'"></div>'
+      +'<div class="field"><label>B 点纬度</label><input class="zone-lat2" type="number" step="0.000001" value="'+(item.lat2 == null ? '' : enc(item.lat2))+'"></div>'
+      +'<div class="field"><label>B 点经度</label><input class="zone-lon2" type="number" step="0.000001" value="'+(item.lon2 == null ? '' : enc(item.lon2))+'"></div>'
+      +'<div class="field"><label>&nbsp;</label><button class="btn ghost row-remove" type="button">移除</button></div>'
+      +'</div></div>';
+  }).join('');
+}
+function collectHookRows(){
+  return qsa('.hook-row').map(function(row){
+    var keyInput = row.querySelector('.hook-key');
+    var idx = row.getAttribute('data-index') || '';
+    var rawKey = String((keyInput && keyInput.value) || '').trim();
+    if(!rawKey && idx !== '') rawKey = '__KEEP__';
+    if(!rawKey && idx === '') return null;
+    return {
+      index: (idx === '' ? null : Number(idx)),
+      name: String((row.querySelector('.hook-name') || {}).value || '').trim() || '默认通道',
+      enabled: !!((row.querySelector('.hook-enabled') || {}).checked),
+      key: rawKey
+    };
+  }).filter(function(x){ return !!x; });
+}
+function collectZoneRows(){
+  return qsa('.zone-row').map(function(row, idx){
+    function rowVal(sel){ return String(((row.querySelector(sel) || {}).value) || '').trim(); }
+    function rowNum(sel){ var s = rowVal(sel); if(!s) return null; var f = Number(s); return isFinite(f) ? f : null; }
+    var name = rowVal('.zone-name') || ('报警区域 ' + (idx + 1));
+    var zone = {
+      name: name,
+      enabled: !!((row.querySelector('.zone-enabled') || {}).checked),
+      lat1: rowNum('.zone-lat1'),
+      lon1: rowNum('.zone-lon1'),
+      lat2: rowNum('.zone-lat2'),
+      lon2: rowNum('.zone-lon2')
+    };
+    if(zone.lat1 == null && zone.lon1 == null && zone.lat2 == null && zone.lon2 == null && !zone.enabled){
+      return null;
+    }
+    return zone;
+  }).filter(function(x){ return !!x; });
+}
+function attachRowRemove(rootId, onEmptyFactory){
+  var root = qs(rootId);
+  if(!root) return;
+  root.addEventListener('click', function(ev){
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.row-remove') : null;
+    if(!btn) return;
+    var row = btn.closest('.list-row');
+    if(row && row.parentNode) row.parentNode.removeChild(row);
+    if(!root.children.length && typeof onEmptyFactory === 'function') onEmptyFactory();
+    updateVisualDraftState();
+  });
+}
+async function useBrowserLocation(){
+  if(!navigator.geolocation){ setStatus('status-visual', '当前浏览器不支持地理定位。', true); return; }
+  if(!window.isSecureContext && !isLocalHostName(location.hostname || '')){
+    setStatus('status-visual', '当前页面不是安全上下文，部分浏览器会拒绝定位。若读取失败，请改用 HTTPS 或手动填写。', true);
+  }
+  navigator.geolocation.getCurrentPosition(function(pos){
+    qs('cfg-base-lat').value = String(pos.coords.latitude || '');
+    qs('cfg-base-lon').value = String(pos.coords.longitude || '');
+    updateVisualDraftState();
+    setStatus('status-visual', '已读取浏览器位置，等待测试或保存。', false);
+  }, function(err){
+    setStatus('status-visual', '定位失败: ' + (err && err.message ? err.message : err), true);
+  }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+}
+async function loadVisual(){
+  const data = await getJson('/api/settings/view');
+  const s = data.visual || {};
+  const b = s.basic || {}, w = s.web || {}, nt = s.notify || {}, api = s.api || {}, auth = s.auth || {};
+  fillIfaceOptions(data.interfaces || [], b.iface || '');
+  settingsState.visualLoaded = true;
+  settingsState.channelUseDefault = !b.channel_custom;
+  qs('cfg-channel').value = String(b.channel_effective == null ? 6 : b.channel_effective);
+  setChannelUi(false);
+  qs('cfg-time').value = String(b.time ?? '');
+  qs('cfg-min-gap').value = String(b.min_gap ?? '');
+  qs('cfg-rssi-delta').value = String(b.rssi_delta ?? '');
+  qs('cfg-model-map').value = String(b.model_map || '');
+  qs('cfg-history-file').value = String(b.history_file || '');
+  qs('cfg-heal').checked = !!b.auto_self_heal;
+  qs('cfg-rssi-change').checked = !!b.change_on_rssi;
+  qs('cfg-payload-change').checked = !!b.change_on_payload;
+  qs('cfg-debug').checked = !!b.debug;
+  qs('cfg-dwell2g').value = String(b.dwell_2g ?? '');
+  qs('cfg-dwell5g').value = String(b.dwell_5g ?? '');
+  qs('cfg-settle').value = String(b.settle ?? '');
+  qs('cfg-hit-dwell').value = String(b.dwell_on_hit ?? '');
+  qs('cfg-hit-cap').value = String(b.hit_cap ?? '');
+  qs('cfg-hop').checked = !!b.hop;
+  qs('cfg-hop5g').checked = !!b.hop_5g;
+  qs('cfg-fast').checked = !!b.scan_wifi_fast;
+  qs('cfg-base-name').value = String(w.base_name || '');
+  qs('cfg-dji-url').value = String(w.dji_lookup_url || '');
+  qs('cfg-base-lat').value = (w.base_lat == null) ? '' : String(w.base_lat);
+  qs('cfg-base-lon').value = (w.base_lon == null) ? '' : String(w.base_lon);
+  qs('cfg-base-zoom').value = String(w.base_zoom ?? '');
+  qs('cfg-heading-ref').value = String(w.heading_ref_deg ?? '');
+  qs('cfg-map-idle').value = String(w.map_auto_center_idle_sec ?? '');
+  renderZoneRows(Array.isArray(w.alarm_zones) ? w.alarm_zones : []);
+  renderHostStats(data.host || {}, b);
+  qs('cfg-notify-enabled').checked = !!nt.enabled;
+  qs('cfg-notify-reonline').checked = !!nt.notify_reonline;
+  qs('cfg-reonline').value = String(nt.reonline_cooldown_sec ?? '');
+  qs('cfg-send-timeout').value = String(nt.send_timeout_sec ?? '');
+  renderHookRows(Array.isArray(nt.wecom_webhooks) ? nt.wecom_webhooks : []);
+  qs('cfg-api-enabled').checked = !!api.enabled;
+  apiTokenAction = '__KEEP__';
+  apiTokenLastReveal = '';
+  qs('cfg-api-token-current').value = '';
+  qs('cfg-api-token-current').type = 'password';
+  qs('cfg-api-token-current').placeholder = api.token_masked || '未设置';
+  qs('cfg-api-token-new').value = '';
+  qs('cfg-api-token-new').placeholder = api.token_masked ? '留空则保持不变' : '请输入新的 Token';
+  qs('cfg-api-whitelist-enabled').checked = !!api.whitelist_enabled;
+  qs('cfg-api-whitelist').value = Array.isArray(api.whitelist) ? api.whitelist.join('\\n') : '';
+  qs('cfg-auth-enabled').checked = !!auth.enabled;
+  qs('cfg-auth-user').value = '';
+  qs('cfg-auth-user').placeholder = auth.username_masked || '留空则保持不变';
+  qs('cfg-auth-pass').value = '';
+  qs('cfg-auth-pass').placeholder = auth.password_masked || '留空则保持不变';
+  qs('cfg-auth-realm').value = String(auth.realm || 'Light RID Scanner');
+  qs('secret-state').textContent = '通知通道 ' + String((nt.wecom_webhooks || []).length || 0)
+    + ' | Token ' + (api.token_masked || '未设置')
+    + ' | 外部 API ' + (api.enabled ? '开启' : '关闭')
+    + ' | 登录 ' + (auth.enabled ? (auth.configured ? '开启' : '未完成') : '关闭');
+  resetVisualDraftState();
+  if(data.path) setStatus('status-visual', '配置文件: ' + data.path, false);
+}
+async function loadRaw(){
+  const data = await getJson('/api/config');
+  settingsState.rawLoaded = true;
+  qs('raw-editor').value = String(data.text || '');
+  setStatus('status-raw', '已读取: ' + String(data.path || '-'), false);
+}
+async function saveVisual(){
+  const payload = collectVisualPayload();
+  const data = await postJson('/api/settings/visual/save', payload);
+  var msg = '测试并保存成功: ' + String(data.saved_to || '-');
+  if(data.backup_path) msg += '\\n备份: ' + String(data.backup_path);
+  if(data.notify_test && data.notify_test !== 'skip') msg += '\\n通知测试: ' + String(data.notify_test);
+  if(data.reload_msg) msg += '\\n' + String(data.reload_msg);
+  setStatus('status-visual', msg, false);
+  await loadVisual();
+}
+async function testVisual(){
+  const payload = collectVisualPayload();
+  const data = await postJson('/api/settings/visual/test', payload);
+  var msg = '测试通过，运行配置已回滚。';
+  if(data.notify_test && data.notify_test !== 'skip') msg += '\\n通知测试: ' + String(data.notify_test);
+  if(data.reload_msg) msg += '\\n' + String(data.reload_msg);
+  setStatus('status-visual', msg, false);
+}
+async function saveRaw(){
+  const data = await postJson('/api/settings/raw/save', {text: String(qs('raw-editor').value || '')});
+  setStatus('status-raw', '保存成功: ' + String(data.saved_to || '-') + '\\n' + String(data.reload_msg || ''), false);
+}
+async function loadApiDocs(){
+  const data = await getJson('/api/settings/api-docs').catch(function(){ return {api:{}, endpoints:[]}; });
+  settingsState.apiLoaded = true;
+  qs('api-docs').value = JSON.stringify(data, null, 2);
+  setStatus('status-api', 'API 文档已生成。启用 Token 后可在 Header 中使用 X-API-Token 或 Authorization: Bearer。', false);
+}
+qs('btn-back').addEventListener('click', function(){ location.href='/'; });
+qs('btn-theme').addEventListener('click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
+qs('btn-open-hw').addEventListener('click', function(){ location.href='/hardware-assistant'; });
+qs('btn-refresh-host').addEventListener('click', async function(){ try{ await loadVisual(); }catch(e){ setStatus('status-visual', e.message || e, true); } });
+qs('btn-reload-view').addEventListener('click', async function(){ try{ await loadVisual(); }catch(e){ setStatus('status-visual', e.message || e, true); } });
+qs('btn-channel-edit').addEventListener('click', function(){
+  setChannelUi(!settingsState.channelEditing);
+});
+qs('btn-channel-reset').addEventListener('click', function(){
+  settingsState.channelUseDefault = true;
+  qs('cfg-channel').value = '6';
+  setChannelUi(false);
+});
+qs('cfg-channel').addEventListener('input', function(){
+  var val = Number(qs('cfg-channel').value || '');
+  settingsState.channelUseDefault = !(isFinite(val) && val !== 6);
+  setChannelUi(settingsState.channelEditing);
+});
+qs('btn-api-token-clear').addEventListener('click', function(){
+  apiTokenAction = '__CLEAR__';
+  apiTokenLastReveal = '';
+  qs('cfg-api-token-current').value = '';
+  qs('cfg-api-token-current').type = 'password';
+  qs('cfg-api-token-current').placeholder = '将于保存时清空';
+  qs('cfg-api-token-new').value = '';
+  updateVisualDraftState();
+  setStatus('status-visual', '当前 API Token 已标记为清空，等待测试或保存。', false);
+});
+qs('btn-api-token-reveal').addEventListener('click', function(){ openReauth('reveal'); });
+qs('btn-api-token-copy').addEventListener('click', function(){ openReauth('copy'); });
+qs('btn-reauth-cancel').addEventListener('click', function(){ closeReauth(); });
+qs('reauth-modal').addEventListener('click', function(ev){ if(ev.target === qs('reauth-modal')) closeReauth(); });
+document.addEventListener('keydown', function(ev){ if(ev.key === 'Escape' && qs('reauth-modal').classList.contains('show')) closeReauth(); });
+qs('btn-reauth-confirm').addEventListener('click', async function(){
+  try{
+    await performTokenReauth(reauthAction || 'copy');
+    if(reauthAction === 'copy'){
+      setStatus('status-visual', '当前 API Token 已复制到剪贴板。', false);
+    }else{
+      setStatus('status-visual', '当前 API Token 已通过再次验证并显示。', false);
+    }
+    closeReauth();
+  }catch(e){
+    setStatus('reauth-status', e.message || e, true);
+  }
+});
+qs('btn-load-raw').addEventListener('click', async function(){ try{ await loadRaw(); }catch(e){ setStatus('status-raw', e.message || e, true); } });
+qs('btn-save-raw').addEventListener('click', async function(){ try{ await saveRaw(); }catch(e){ setStatus('status-raw', e.message || e, true); } });
+qs('btn-test-visual').addEventListener('click', async function(){
+  try{
+    setVisualActionBusy(true);
+    await testVisual();
+  }catch(e){
+    setStatus('status-visual', e.message || e, true);
+  }finally{
+    setVisualActionBusy(false);
+  }
+});
+qs('btn-save-visual').addEventListener('click', async function(){
+  try{
+    setVisualActionBusy(true);
+    await saveVisual();
+    apiTokenAction = '__KEEP__';
+    qs('cfg-api-token-new').value = '';
+  }catch(e){
+    setStatus('status-visual', e.message || e, true);
+  }finally{
+    setVisualActionBusy(false);
+  }
+});
+qs('cfg-api-token-new').addEventListener('input', function(){
+  if(String(qs('cfg-api-token-new').value || '').trim()){
+    apiTokenAction = '__KEEP__';
+    qs('cfg-api-token-current').placeholder = qs('cfg-api-token-current').placeholder || '已设置';
+  }
+  updateVisualDraftState();
+});
+qs('btn-hook-add').addEventListener('click', function(){
+  var rows = collectHookRows();
+  rows.push({index:null, name:'新通道', enabled:true, key:''});
+  renderHookRows(rows);
+  updateVisualDraftState();
+});
+qs('btn-zone-add').addEventListener('click', function(){
+  var rows = collectZoneRows();
+  rows.push({name:'报警区域 ' + (rows.length + 1), enabled:false, lat1:null, lon1:null, lat2:null, lon2:null});
+  renderZoneRows(rows);
+  updateVisualDraftState();
+});
+qs('btn-browser-loc').addEventListener('click', useBrowserLocation);
+qs('btn-clear-base-loc').addEventListener('click', function(){ qs('cfg-base-lat').value=''; qs('cfg-base-lon').value=''; updateVisualDraftState(); setStatus('status-visual', '已清空基站坐标，等待测试或保存。', false); });
+attachRowRemove('wecom-list', function(){ renderHookRows([]); });
+attachRowRemove('zone-list', function(){ renderZoneRows([]); });
+applyTheme(loadTheme());
+applyTabs();
+bindVisualDraftTracking();
+loadVisual().catch(function(e){ setStatus('status-visual', e.message || e, true); });
+</script></body></html>"""
 
 def http_server_thread() -> None:
     import socket as _socket, threading as _threading
@@ -6435,7 +9021,7 @@ def http_server_thread() -> None:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
-            self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+            self.send_header("Permissions-Policy", "geolocation=(self), microphone=(), camera=()")
             super().end_headers()
 
         def handle(self):
@@ -6498,6 +9084,50 @@ def http_server_thread() -> None:
             except Exception:
                 pass
 
+        def _api_token_fail(self):
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            body = json.dumps({
+                "ok": False,
+                "error": "api token required",
+                "hint": "use X-API-Token or Authorization: Bearer <token>",
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
+        def _page_api_fail(self, code: int = 403, message: str = "page session required"):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            body = json.dumps({
+                "ok": False,
+                "error": message,
+                "hint": "call this endpoint from the built-in web pages",
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
+        def _api_whitelist_fail(self):
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            body = json.dumps({
+                "ok": False,
+                "error": "api whitelist denied",
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
         def _require_auth(self) -> bool:
             if not _auth_enabled():
                 return True
@@ -6516,19 +9146,55 @@ def http_server_thread() -> None:
             self._auth_fail()
             return False
 
+        def _require_page_api(self) -> bool:
+            if not _request_same_origin(self.headers):
+                self._page_api_fail(403, "cross-origin page api denied")
+                return False
+            if not _page_api_header_ok(self.headers):
+                self._page_api_fail(403, "page api header required")
+                return False
+            if _auth_enabled() and not _auth_check_session_cookie(self.headers.get("Cookie"), refresh=True):
+                self._page_api_fail(401, "login required")
+                return False
+            return True
+
+        def _require_api_token(self, query: dict | None = None) -> bool:
+            if not _api_token_enabled():
+                return False
+            if bool(API_CFG.get("whitelist_enabled")) and (not _api_ip_allowed(self.client_address[0] if self.client_address else "", API_CFG.get("whitelist") or [])):
+                self._api_whitelist_fail()
+                return False
+            token = _api_token_from_request(self.headers, query)
+            if _api_token_check_value(token):
+                return True
+            self._api_token_fail()
+            return False
+
+        def _require_public_api(self, query: dict | None = None) -> bool:
+            if _api_token_enabled():
+                return self._require_api_token(query)
+            return self._require_page_api()
+
         def do_GET(self):
             from urllib.parse import urlparse, parse_qs, unquote
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
-            if not self._require_auth():
+            if _path_uses_api_token(path):
+                if not self._require_public_api(query):
+                    return
+            elif _path_is_page_api(path):
+                if not self._require_page_api():
+                    return
+            elif not self._require_auth():
                 return
             if path in ("/api", "/api/"):
-                self._send_json({
-                    "ok": True,
-                    "api": _api_meta(),
-                    "endpoints": _api_endpoint_index(),
-                }, 200)
+                if not self._require_page_api():
+                    return
+                self._send_json(_api_token_docs_payload(), 200)
+                return
+            if path == "/api/docs":
+                self._send_json(_api_token_docs_payload(), 200)
                 return
             if path == "/api/health":
                 now_mono = time.monotonic()
@@ -6651,7 +9317,14 @@ def http_server_thread() -> None:
                 }, 200)
                 return
             if path in ("/", "/index.html"):
-                body = _PAGE_HTML.encode("utf-8")
+                body = _build_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path in ("/settings", "/settings.html"):
+                body = _build_settings_html().encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -6679,6 +9352,20 @@ def http_server_thread() -> None:
                     }, 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/settings/view":
+                try:
+                    self._send_json(_settings_view_payload(), 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/settings/api-docs":
+                self._send_json(_api_token_docs_payload(), 200)
+            elif path == "/api/settings/api-token/status":
+                self._send_json({
+                    "ok": True,
+                    "configured": bool(str(API_CFG.get("token_sha256") or "").strip()),
+                    "copy_supported": bool(str(API_CFG.get("token") or "").strip()),
+                    "masked": (_mask_secret(str(API_CFG.get("token") or ""), keep=4) if str(API_CFG.get("token") or "").strip() else ("********" if str(API_CFG.get("token_sha256") or "").strip() else "")),
+                }, 200)
             elif path == "/api/interfaces":
                 try:
                     basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
@@ -6817,7 +9504,13 @@ def http_server_thread() -> None:
         def do_POST(self):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
-            if not self._require_auth():
+            if _path_uses_api_token(path):
+                if not self._require_public_api(None):
+                    return
+            elif _path_is_page_api(path):
+                if not self._require_page_api():
+                    return
+            elif not self._require_auth():
                 return
             try:
                 body_len = int(self.headers.get("Content-Length", "0") or "0")
@@ -6827,12 +9520,7 @@ def http_server_thread() -> None:
                 self._send_json({"ok": False, "error": f"request too large (>{HTTP_JSON_MAX_BYTES} bytes)"}, 413)
                 return
             if path == "/api/v1/auth/logout":
-                tok = _auth_cookie_parse(self.headers.get("Cookie"), AUTH_SESSION_COOKIE)
-                if tok:
-                    with auth_session_lock:
-                        auth_sessions.pop(tok, None)
-                self._auth_clear_cookie = True
-                self._send_json({"ok": True, "api": _api_meta(), "logout": True}, 200)
+                self._send_json({"ok": True, "api": _api_meta(), "logout": False, "token_api": True}, 200)
                 return
             if path == "/api/v1/history/clear":
                 try:
@@ -7040,18 +9728,93 @@ def http_server_thread() -> None:
                 except Exception as e:
                     self._send_json({"ok": False, "error": f"invalid json: {e}"}, 400)
                     return
+                parsed, guard_err = _prepare_security_cfg_for_save(parsed)
+                if guard_err:
+                    self._send_json({"ok": False, "error": guard_err}, 400)
+                    return
+                b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="config")
+                if not b_ok:
+                    self._send_json({"ok": False, "error": f"backup failed: {backup_path}"}, 500)
+                    return
                 ok, msg = save_app_config(APP_CONFIG_PATH, parsed)
                 if not ok:
                     self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
                     return
                 cfg_loaded = load_app_config(APP_CONFIG_PATH)
                 r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                if not r_ok:
+                    restore_config_backup(APP_CONFIG_PATH, backup_path)
+                    self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
+                    return
                 self._send_json({
                     "ok": True,
                     "saved_to": APP_CONFIG_PATH,
+                    "backup_path": backup_path,
                     "reloaded": bool(r_ok),
                     "reload_msg": r_msg,
                 }, 200)
+            elif path == "/api/settings/visual/test":
+                body = self._read_json_body()
+                rsp = _save_visual_settings(body, test_only=True)
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+            elif path == "/api/settings/visual/save":
+                body = self._read_json_body()
+                rsp = _save_visual_settings(body, test_only=False)
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+            elif path == "/api/settings/raw/save":
+                body = self._read_json_body()
+                raw_text = str(body.get("text") or "")
+                if not raw_text.strip():
+                    self._send_json({"ok": False, "error": "empty config text"}, 400)
+                    return
+                try:
+                    parsed = json.loads(raw_text)
+                    if not isinstance(parsed, dict):
+                        self._send_json({"ok": False, "error": "config root must be object"}, 400)
+                        return
+                except Exception as e:
+                    self._send_json({"ok": False, "error": f"invalid json: {e}"}, 400)
+                    return
+                parsed, guard_err = _prepare_security_cfg_for_save(parsed)
+                if guard_err:
+                    self._send_json({"ok": False, "error": guard_err}, 400)
+                    return
+                b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="raw")
+                if not b_ok:
+                    self._send_json({"ok": False, "error": f"backup failed: {backup_path}"}, 500)
+                    return
+                ok, msg = save_app_config(APP_CONFIG_PATH, parsed)
+                if not ok:
+                    self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
+                    return
+                cfg_loaded = load_app_config(APP_CONFIG_PATH)
+                r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                if not r_ok:
+                    restore_config_backup(APP_CONFIG_PATH, backup_path)
+                    self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
+                    return
+                self._send_json({
+                    "ok": True,
+                    "saved_to": APP_CONFIG_PATH,
+                    "backup_path": backup_path,
+                    "reloaded": bool(r_ok),
+                    "reload_msg": r_msg,
+                }, 200)
+            elif path == "/api/settings/notify/test":
+                ok, resp = send_test_notification_from_config()
+                self._send_json({"ok": bool(ok), "resp": resp}, 200 if ok else 500)
+            elif path == "/api/settings/api-token/reveal":
+                if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
+                    self._send_json({"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400)
+                    return
+                if not _auth_check_basic_header(self.headers.get("Authorization")):
+                    self._send_json({"ok": False, "error": "账号或密码错误"}, 401)
+                    return
+                token_plain = str(API_CFG.get("token") or "").strip()
+                if not token_plain:
+                    self._send_json({"ok": False, "error": "当前 Token 只有哈希或尚未设置，请先重新设置一次 Token"}, 400)
+                    return
+                self._send_json({"ok": True, "token": token_plain}, 200)
             elif path == "/api/web/base/save":
                 body = self._read_json_body()
                 if not APP_CONFIG_PATH:
@@ -7113,15 +9876,24 @@ def http_server_thread() -> None:
                     web_cfg["heading_ref_deg"] = round(float(heading_ref_deg), 2)
                     web_cfg["map_auto_center_idle_sec"] = int(map_auto_center_idle_sec)
                     cfg["web"] = web_cfg
+                    b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="web-base")
+                    if not b_ok:
+                        self._send_json({"ok": False, "error": f"backup failed: {backup_path}"}, 500)
+                        return
                     ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
                     if not ok:
                         self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
                         return
                     cfg_loaded = load_app_config(APP_CONFIG_PATH)
                     r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                    if not r_ok:
+                        restore_config_backup(APP_CONFIG_PATH, backup_path)
+                        self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
+                        return
                     self._send_json({
                         "ok": True,
                         "saved_to": APP_CONFIG_PATH,
+                        "backup_path": backup_path,
                         "reloaded": bool(r_ok),
                         "reload_msg": r_msg,
                         "base_name": str(WEB_CFG.get("base_name") or base_name),
@@ -7155,12 +9927,20 @@ def http_server_thread() -> None:
                     basic_cfg["iface"] = iface
                     basic_cfg["scan_wifi_fast"] = bool(scan_wifi_fast)
                     cfg["basic"] = basic_cfg
+                    b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="web-basic")
+                    if not b_ok:
+                        self._send_json({"ok": False, "error": f"backup failed: {backup_path}"}, 500)
+                        return
                     ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
                     if not ok:
                         self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
                         return
                     cfg_loaded = load_app_config(APP_CONFIG_PATH)
                     r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                    if not r_ok:
+                        restore_config_backup(APP_CONFIG_PATH, backup_path)
+                        self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
+                        return
                     if iface:
                         _sniff_recover_iface(iface, "web apply default iface", force=True)
                     basic_now = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
@@ -7169,6 +9949,7 @@ def http_server_thread() -> None:
                     self._send_json({
                         "ok": True,
                         "saved_to": APP_CONFIG_PATH,
+                        "backup_path": backup_path,
                         "reloaded": bool(r_ok),
                         "reload_msg": r_msg,
                         "iface_selected": (None if basic_now.get("iface") in (None, "") else str(basic_now.get("iface"))),
@@ -7190,7 +9971,9 @@ def http_server_thread() -> None:
     _threading.Thread(target=_ws_push_loop, daemon=True).start()
     _log(f"[INFO] HTTP+WS service started: http://0.0.0.0:{HTTP_PORT}/")
     if not _auth_enabled():
-        _log("[WARN] Web auth disabled: API is exposed to LAN; enable auth in config for safety")
+        _log("[WARN] Web auth disabled: Web UI is exposed to LAN; enable auth in config for safety")
+    if not _api_token_enabled():
+        _log("[INFO] API public mode disabled: /api/docs, /api/health and /api/v1/* stay page-session-only")
     try:
         srv.serve_forever()
     except Exception as e:
@@ -7542,7 +10325,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-map", default=os.path.join(os.getcwd(),"rid_models.json"))
     parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
                         help="history cache file (default rid_history_cache.json)")
-    parser.add_argument("--no-tui",   action="store_true", help="禁用 TUI，纯文本输出")
+    parser.add_argument("--no-tui",   action="store_true", default=True, help="禁用 TUI，纯文本输出")
+    parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
     parser.add_argument("--notify-test", action="store_true", help="send one WeCom test notification then exit")
     return parser
@@ -7624,6 +10408,9 @@ def _save_basic_config_from_tokens(tokens: list[str], raw_text: str = "", overri
         web = {}
         cfg["web"] = web
     web["last_restart_args"] = raw_text if raw_text else " ".join(tokens)
+    b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="restart")
+    if not b_ok:
+        return False, f"backup failed: {backup_path}"
     ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
     if ok:
         APP_CONFIG = cfg
@@ -7709,7 +10496,8 @@ def main() -> None:
     parser.add_argument("--model-map", default=os.path.join(os.getcwd(),"rid_models.json"))
     parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
                         help="history cache file (default: rid_history_cache.json)")
-    parser.add_argument("--no-tui",   action="store_true", help="禁用 TUI，纯文本输出")
+    parser.add_argument("--no-tui",   action="store_true", default=True, help="禁用 TUI，纯文本输出")
+    parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
     parser.add_argument("--notify-test", action="store_true", help="send one WeCom test notification then exit")
     APP_START_CWD = os.getcwd()
@@ -7743,6 +10531,7 @@ def main() -> None:
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
+    init_api_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)
     start_oui_loader()
     load_model_map(args.model_map)
@@ -7979,4 +10768,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

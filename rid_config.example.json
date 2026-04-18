@@ -1,4 +1,4 @@
-{
+﻿{
   "basic": {
     "iface": null,
     "channel": null,
@@ -28,22 +28,47 @@
     "reonline_cooldown_sec": 300,
     "skip_mac_only": true,
     "send_timeout_sec": 8,
-    "wecom_webhook_key": ""
+    "wecom_webhook_key": "",
+    "wecom_webhooks": [
+      {
+        "name": "默认通道",
+        "enabled": true,
+        "key": ""
+      }
+    ]
   },
   "web": {
     "dji_lookup_url": "https://repair.dji.com/device/search?re=cn&lang=zh-CN",
     "allow_restart": true,
-    "last_restart_args": "--no-tui",
-    "scan_type_rid": "RID report",
-    "scan_type_phone": "Phone fast transfer",
-    "sn_source_rid": "RID packet",
+    "last_restart_args": "",
+    "scan_type_rid": "RID报送",
+    "scan_type_phone": "手机快传",
+    "sn_source_rid": "RID包",
     "sn_source_ssid": "SSID",
-    "base_name": "RID Station",
+    "base_name": "基站",
     "base_lat": null,
     "base_lon": null,
-    "base_zoom": 18,
+    "base_zoom": 13,
     "heading_ref_deg": 0.0,
-    "map_auto_center_idle_sec": 20
+    "map_auto_center_idle_sec": 20,
+    "alarm_zone": {
+      "enabled": false,
+      "lat1": null,
+      "lon1": null,
+      "lat2": null,
+      "lon2": null,
+      "name": "报警区域"
+    },
+    "alarm_zones": [
+      {
+        "enabled": false,
+        "lat1": null,
+        "lon1": null,
+        "lat2": null,
+        "lon2": null,
+        "name": "报警区域 1"
+      }
+    ]
   },
   "ap": {
     "list_max": 80,
@@ -55,5 +80,12 @@
     "username_sha256": "",
     "password_sha256": "",
     "realm": "Light RID Scanner"
+  },
+  "api": {
+    "enabled": false,
+    "token": "",
+    "token_sha256": "",
+    "whitelist_enabled": false,
+    "whitelist": []
   }
 }

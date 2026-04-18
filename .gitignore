@@ -12,15 +12,15 @@ rid_config.json.rollback
 *.rollback.*
 rid_config.local.json
 *.secrets.json
-
+tools
 # Runtime data
 rid_history_cache.json
 *_history_cache.json
 oui.txt
-rid-n/client/config.json
-rid-n/server/config.json
-rid-n/**/data/*.json
-rid-n
+rid-n/ridn_config.json
+rid-n/**/*.runtime.json
+rid-n/data/
+rid-n/certs/
 # Local temporary / backup artifacts
 backups/
 *.tmp
@@ -32,7 +32,10 @@ _page_extracted.*
 memory.txt
 _moji_tokens.txt
 run.py.bak_mojibake
-
+_codex_context/
+tools/pi.local.json
+tools/__pycache__/
+plugins
 # OS / editor
 .DS_Store
 Thumbs.db

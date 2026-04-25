@@ -44,6 +44,19 @@ Default web URL:
 
 - `http://<device-ip>:4600/`
 
+## Fixed NIC Binding and OOBE
+
+- The scanner no longer auto-rotates across NICs.
+- `basic.iface` is treated as a fixed binding. If that NIC is missing, the service stays alive in degraded mode and shows a configuration warning instead of silently switching to another adapter.
+- If `rid_config.json` is missing, broken, or still has no bound NIC, the web UI enters the OOBE flow at `/oobe`.
+- OOBE is used to finish the minimum required setup:
+  - choose the default wireless NIC
+  - set the RID channel
+  - optionally set base-station coordinates
+  - optionally set the web login account/password
+
+Operationally, this makes multi-NIC deployments much safer: the scanner keeps using the intended adapter, and startup problems are surfaced as configuration work rather than hidden auto-fallback.
+
 ## Main Pages
 
 - `/`
@@ -186,7 +199,7 @@ That means:
 
 - external scripts must wait until the external API is explicitly enabled
 - browser pages inside Light RID Scanner still work
-- HTTP Basic no longer grants direct access to API paths
+- the web login session does not grant direct access to token API paths
 
 ## Web UI Auth vs Token API Auth
 
@@ -194,7 +207,7 @@ These are separate mechanisms.
 
 ### Web UI auth
 
-Used for browser pages and session-based helper endpoints.
+Used for browser pages and session-based helper endpoints. The browser now uses a normal `/login` page and a session cookie, not a browser HTTP Basic prompt.
 
 Config example:
 
@@ -219,12 +232,27 @@ print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
 PY
 ```
 
+SSO-style login is available for trusted local launchers:
+
+```text
+/login?user=<sha256(username)>&password=<sha256(password)>
+```
+
+For compatibility with old local shortcuts, a comma form is also accepted:
+
+```text
+/login?user=<sha256(username)>,password=<sha256(password)>
+```
+
 ### Session-only helper endpoints
 
 These are meant for the built-in web UI and current browser session:
 
 - `GET /api/settings/view`
+- `GET /api/settings/runtime`
 - `GET /api/settings/api-docs`
+- `GET /api/logs/view?type=runtime|operation|scan|scan_diff|ap`
+- `GET /api/logs/export?type=all|runtime|operation|scan|scan_diff|ap`
 - `POST /api/settings/visual/save`
 - `POST /api/settings/raw/save`
 - `POST /api/settings/notify/test`
@@ -233,6 +261,7 @@ These are meant for the built-in web UI and current browser session:
 - `GET /api/config`
 - `GET /api/tools/export/all`
 - `GET /api/tools/export/track?sn=<SN>`
+- `GET /api/tools/diagnostic.zip`
 - `POST /api/tools/import/all`
 - `POST /api/tools/import/track`
 - `GET /api/tracks/get?sn=<SN>`
@@ -246,7 +275,8 @@ These are not the same thing as `/api/v1/*`.
 
 - The current API token is shown as a masked password field
 - Revealing or copying it requires a fresh username/password check
-- That re-check uses the same web auth credentials, but API routes themselves are not unlocked by HTTP Basic
+- That re-check uses the same web auth credentials, but API routes still require the API token when external API mode is enabled
+- Login, token reveal, and external API token failures are rate-limited in memory and written to the operation log.
 
 ## API Overview
 
@@ -299,6 +329,20 @@ It supports:
 - base station position editing
 - browser geolocation fill-in for base station position
 - raw `rid_config.json` editing
+
+## Logs Page
+
+Open:
+
+- `/logs`
+
+It provides:
+
+- runtime log
+- operation/audit log
+- full scan log
+- unified diff between runtime and scan logs
+- text export for one view or ZIP export for all views
 - API documentation view
 - jump to hardware assistant
 

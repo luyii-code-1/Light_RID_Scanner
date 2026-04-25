@@ -1,9 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import argparse
 import base64
 import curses
+import difflib
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -16,12 +18,14 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 import zlib
 from collections import deque
 from threading import Lock, Thread
@@ -85,13 +89,15 @@ AP_STALE_TIMEOUT = 900.0
 NOTIFY_REONLINE_COOLDOWN_DEFAULT = 300.0
 DJI_LOOKUP_URL_DEFAULT = "https://repair.dji.com/device/search?re=cn&lang=zh-CN"
 SNIFF_POLL_TIMEOUT = 20.0
-SNIFF_STALL_RECOVER_SEC = 180.0
-SNIFF_RECOVER_COOLDOWN_SEC = 45.0
+SNIFF_STALL_RECOVER_SEC = 60.0
+SNIFF_RECOVER_COOLDOWN_SEC = 20.0
+SNIFF_WORKER_HARD_GRACE_SEC = 8.0
+SNIFF_WORKER_JOIN_GRACE_SEC = 2.0
 SNIFF_RESTART_AFTER_FAILS = 5
 WIFI_FAST_OUI_PREFIX = "0c:9a:e6"
 TRACK_MAX_POINTS = 12000
 TRACK_MIN_INTERVAL_SEC = 0.8
-NO_IFACE_DEGRADE_HINT = "未检测到无线网卡，已进入降级运行。请打开“高级设置 - 硬件配置助手”检查网卡。"
+NO_IFACE_DEGRADE_HINT = "未检测到已绑定的无线网卡，已进入降级运行。请打开设置或 OOBE 完成网卡配置。"
 CONFIG_ROLLBACK_SUFFIX = ".rollback"
 
 # -----------------------------------------------------------------------------
@@ -105,11 +111,14 @@ state_lock = Lock()
 log_buf:  deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Normal logs (LOST/INFO/etc.)
 scan_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Full scan logs (with debug frame info)
 ap_buf:   deque[str] = deque(maxlen=500)            # AP scan logs (for HTTP page)
+op_buf:   deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Web/admin/security operation audit log
 ap_seq:   int = 0
 ap_table: dict[str, dict] = {}
 ap_list_seq: int = 0
 ap_lock = Lock()
 log_lock = Lock()
+security_rate_lock = Lock()
+security_rate_state: dict[str, dict] = {}
 
 HISTORY_STORE_PATH: str | None = None
 history_persist_dirty: bool = False
@@ -119,6 +128,9 @@ history_io_lock = Lock()
 APP_CONFIG: dict = {}
 APP_CONFIG_PATH: str | None = None
 APP_CONFIG_PATH_IS_DEFAULT: bool = True
+OOBE_REQUIRED: bool = False
+OOBE_REASON: str = ""
+OOBE_LOCK = Lock()
 APP_START_CWD: str = os.getcwd()
 APP_START_WALL: float = time.time()
 WEB_CFG: dict = {
@@ -272,6 +284,38 @@ def _scan(msg: str) -> None:
     line = f"[{ts}] {msg}"
     with log_lock:
         scan_buf.append(line)
+
+def _op_log(action: str, detail: str = "", *, actor: str = "-", ip: str = "-", ok: bool = True) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    status = "OK" if ok else "FAIL"
+    safe_action = re.sub(r"[\r\n\t]+", " ", str(action or "-")).strip()[:80]
+    safe_actor = re.sub(r"[\r\n\t]+", " ", str(actor or "-")).strip()[:80]
+    safe_ip = re.sub(r"[\r\n\t]+", " ", str(ip or "-")).strip()[:80]
+    safe_detail = re.sub(r"[\r\n]+", " ", str(detail or "")).strip()
+    safe_detail = re.sub(r"(?i)(token|password|webhook|key|secret)=([^,\s\]}]+)", r"\1=***", safe_detail)
+    safe_detail = safe_detail[:1200]
+    line = f"[{ts}] [{status}] action={safe_action} actor={safe_actor} ip={safe_ip} {safe_detail}".rstrip()
+    with log_lock:
+        op_buf.append(line)
+
+def _client_ip_from_handler(handler) -> str:
+    try:
+        return str((handler.client_address or ("",))[0] or "")
+    except Exception:
+        return ""
+
+def _set_oobe_required(reason: str, required: bool = True) -> None:
+    global OOBE_REQUIRED, OOBE_REASON
+    text = str(reason or "").strip()
+    with OOBE_LOCK:
+        OOBE_REQUIRED = bool(required)
+        OOBE_REASON = text if required else ""
+    if required and text:
+        _op_log("oobe-required", text, ok=False)
+
+def _oobe_state() -> dict:
+    with OOBE_LOCK:
+        return {"required": bool(OOBE_REQUIRED), "reason": str(OOBE_REASON or "")}
 
 def _history_mark_dirty() -> None:
     global history_persist_dirty
@@ -747,6 +791,7 @@ def ensure_config_file(path: str) -> None:
         return
     if os.path.exists(path):
         return
+    _set_oobe_required(f"配置文件不存在，已创建默认配置: {path}", True)
     cfg = default_app_config()
     parent = os.path.dirname(path)
     if parent:
@@ -779,8 +824,22 @@ def _config_load_raw(path: str) -> dict:
         raise ValueError("root must be object")
     return raw
 
+def _cfg_preferred_iface_from_cfg(cfg: dict | None) -> str | None:
+    try:
+        basic = cfg.get("basic") if isinstance(cfg, dict) else {}
+        if not isinstance(basic, dict):
+            return None
+        v = basic.get("iface")
+        if v in (None, ""):
+            return None
+        s = str(v).strip()
+        return s or None
+    except Exception:
+        return None
+
 def load_app_config(path: str | None) -> dict:
     if not path:
+        _set_oobe_required("配置路径为空，使用默认配置", True)
         return default_app_config()
     rb_path = path + CONFIG_ROLLBACK_SUFFIX
     try:
@@ -791,10 +850,15 @@ def load_app_config(path: str | None) -> dict:
             shutil.copy2(path, rb_path)
         except Exception as e:
             _log(f"[WARN] 配置回滚副本刷新失败: {e}")
+        if not _cfg_preferred_iface_from_cfg(cfg):
+            _set_oobe_required("尚未绑定默认网卡，请进入 OOBE 或设置页完成配置", True)
+        else:
+            _set_oobe_required("", False)
         _log(f"[INFO] config loaded: {path}")
         return cfg
     except Exception as e:
         _log(f"[WARN] config load failed: {e}")
+        _set_oobe_required(f"配置文件异常: {e}", True)
         # Try rollback snapshot first.
         if os.path.exists(rb_path):
             try:
@@ -941,10 +1005,12 @@ def _settings_view_payload() -> dict:
         channel_effective = int(channel_raw) if channel_raw not in (None, "") else 6
     except Exception:
         channel_effective = 6
+    interfaces = _iface_options_snapshot()
     host = _host_resource_snapshot()
     host["active_iface"] = str(sniff_iface_name or basic.get("iface") or "")
     host["current_channel"] = int(current_channel or channel_effective or 6)
     host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
+    host["ifaces"] = interfaces
     api_mask = ""
     if str(api_prepared.get("token") or "").strip():
         api_mask = _mask_secret(str(api_prepared.get("token") or ""), keep=4)
@@ -1020,7 +1086,8 @@ def _settings_view_payload() -> dict:
             },
         },
         "host": host,
-        "interfaces": _iface_options_snapshot(),
+        "interfaces": interfaces,
+        "oobe": _oobe_state(),
         "hardware_link": "/hardware-assistant",
     }
 
@@ -1048,11 +1115,12 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
 
     iface_raw = p_basic.get("iface")
     iface = None if iface_raw in (None, "") else str(iface_raw).strip()
-    if iface:
-        safe_iface = _hw_safe_iface(iface)
-        if not safe_iface:
-            return {"ok": False, "error": "invalid iface"}
-        iface = safe_iface
+    if not iface:
+        return None, "必须选择并绑定默认网卡"
+    safe_iface = _hw_safe_iface(iface)
+    if not safe_iface:
+        return None, "invalid iface"
+    iface = safe_iface
     basic["iface"] = iface
     if bool(p_basic.get("channel_use_default")):
         basic["channel"] = None
@@ -1239,7 +1307,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
 
     return cfg, None
 
-def _run_visual_settings_test(candidate_cfg: dict, previous_cfg: dict | None = None, notify_test: bool = True, keep_runtime: bool = False) -> tuple[bool, str, str]:
+def _run_visual_settings_test(candidate_cfg: dict, previous_cfg: dict | None = None, notify_test: bool = False, keep_runtime: bool = False) -> tuple[bool, str, str]:
     prev_cfg = _deep_merge_dict(default_app_config(), previous_cfg if isinstance(previous_cfg, dict) else APP_CONFIG)
     notify_msg = ""
     r_ok, r_msg = reload_runtime_config(candidate_cfg)
@@ -1281,7 +1349,7 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
     test_ok, test_msg, notify_msg = _run_visual_settings_test(
         candidate_cfg,
         previous_cfg=prev_cfg,
-        notify_test=True,
+        notify_test=False,
         keep_runtime=not test_only,
     )
     if not test_ok:
@@ -1328,13 +1396,6 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
             return {"ok": False, "error": f"reload failed: {r_msg}; rolled back from backup", "backup_path": backup_path}
         return {"ok": False, "error": f"reload failed: {r_msg}; restore failed: {restore_msg}", "backup_path": backup_path}
 
-    iface = None
-    payload = body if isinstance(body, dict) else {}
-    p_basic = payload.get("basic") if isinstance(payload.get("basic"), dict) else {}
-    iface_raw = p_basic.get("iface")
-    iface = None if iface_raw in (None, "") else str(iface_raw).strip()
-    if iface:
-        _sniff_recover_iface(iface, "settings apply default iface", force=True)
     return {
         "ok": True,
         "saved_to": APP_CONFIG_PATH,
@@ -2045,11 +2106,11 @@ def _ap_vendor_type(vendor: str, ssid: str | None) -> str:
     if s.startswith("RID-") or "dji" in v:
         return "DJI/RID"
     if any(k in v for k in ("apple", "samsung", "huawei", "honor", "xiaomi", "oppo", "vivo", "google")):
-        return "\u624b\u673a/\u70ed\u70b9"
+        return "手机/热点"
     if any(k in v for k in ("tp-link", "h3c", "ruijie", "ubiquiti", "mikrotik", "netgear", "asus", "cisco", "tenda", "meraki")):
-        return "\u8def\u7531/AP"
+        return "路由/AP"
     if s.startswith("DIRECT-"):
-        return "\u76f4\u8fde/Wi-Fi"
+        return "直连/Wi-Fi"
     return "AP"
 
 def _parse_oui_text(raw: str) -> dict[str, str]:
@@ -2168,10 +2229,10 @@ def _lookup_oui_vendor(mac: str | None) -> str:
         return vendor
     if not loaded:
         start_oui_loader()
-        return "\u52a0\u8f7d\u4e2d"
+        return "加载中"
     with oui_db_lock:
-        oui_vendor_cache[key] = "\u672a\u77e5"
-    return "\u672a\u77e5"
+        oui_vendor_cache[key] = "未知"
+    return "未知"
 
 def _ap_trim_locked(now_wall: float | None = None) -> None:
     now_wall = float(now_wall or time.time())
@@ -2250,7 +2311,7 @@ def _ap_snapshot() -> tuple[list[dict], int, int]:
             "ch": e.get("ch"),
             "hits": int(e.get("hits") or 0),
             "subtype": str(e.get("subtype") or "AP"),
-            "vendor": vendor or str(e.get("vendor") or "\u672a\u77e5"),
+            "vendor": vendor or str(e.get("vendor") or "未知"),
             "vendor_type": ("WiFi快传" if _is_wifi_fast_mac(mac) else _ap_vendor_type(vendor or str(e.get("vendor") or ""), e.get("ssid"))),
             "age": age,
             "last_seen": _fmt_wall_ts(last_seen_wall),
@@ -2453,13 +2514,19 @@ def _sniff_recover_iface(iface: str, reason: str, force: bool = False) -> bool:
         sniff_iface_name = iface
     _sniff_note_error(reason)
     _log(f"[WARN] sniff recover: {reason}, reset iface {iface}")
-    for c in (
-        f"ip link set {iface} down",
-        f"iw dev {iface} set type monitor",
-        f"ip link set {iface} up",
-        f"iw dev {iface} set power_save off",
-    ):
+    steps = (
+        (f"ip link set {iface} down", 0.15),
+        (f"iw dev {iface} set type managed", 0.35),
+        (f"ip link set {iface} up", 0.25),
+        (f"ip link set {iface} down", 0.15),
+        (f"iw dev {iface} set type monitor", 0.35),
+        (f"ip link set {iface} up", 0.25),
+        (f"iw dev {iface} set power_save off", 0.0),
+    )
+    for c, pause_sec in steps:
         run_cmd(c, timeout=6)
+        if pause_sec > 0:
+            time.sleep(pause_sec)
     if current_channel:
         run_cmd(f"iw dev {iface} set channel {current_channel}", timeout=6)
     info_raw = run_cmd(f"iw dev {iface} info")
@@ -2476,6 +2543,58 @@ def _sniff_recover_iface(iface: str, reason: str, force: bool = False) -> bool:
     with sniff_health_lock:
         sniff_iface_name = iface
     return True
+
+def _sniff_close_socket(sock) -> None:
+    if not sock:
+        return
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+def _sniff_open_socket(iface: str):
+    try:
+        return conf.L2listen(iface=iface, monitor=True)
+    except TypeError:
+        return conf.L2listen(iface=iface)
+
+def _sniff_run_once(iface: str, timeout_sec: float = SNIFF_POLL_TIMEOUT) -> tuple[str, str]:
+    iface = str(iface or "").strip()
+    if not iface:
+        return "error", "iface empty"
+    timeout_sec = max(1.0, float(timeout_sec or SNIFF_POLL_TIMEOUT))
+    hard_deadline = time.monotonic() + timeout_sec + SNIFF_WORKER_HARD_GRACE_SEC
+    result = {"error": "", "done": False}
+    sock_ref = {"sock": None}
+
+    def _worker() -> None:
+        sock = None
+        try:
+            sock = _sniff_open_socket(iface)
+            sock_ref["sock"] = sock
+            sniff(opened_socket=sock, prn=parse_frame, store=False, timeout=timeout_sec)
+        except Exception as ex:
+            result["error"] = str(ex or "")
+        finally:
+            result["done"] = True
+            if sock_ref.get("sock") is sock:
+                sock_ref["sock"] = None
+            _sniff_close_socket(sock)
+
+    th = Thread(target=_worker, daemon=True)
+    th.start()
+    while th.is_alive():
+        if time.monotonic() >= hard_deadline:
+            _sniff_close_socket(sock_ref.get("sock"))
+            th.join(SNIFF_WORKER_JOIN_GRACE_SEC)
+            if th.is_alive():
+                return "hung", f"worker exceeded {timeout_sec + SNIFF_WORKER_HARD_GRACE_SEC:.0f}s"
+            return "hung", f"worker forced close after {timeout_sec + SNIFF_WORKER_HARD_GRACE_SEC:.0f}s"
+        time.sleep(0.25)
+    if result["error"]:
+        return "error", result["error"]
+    return "ok", ""
+
 def _sniff_iface_candidates() -> dict[str, str]:
     iw = run_cmd("iw dev")
     iftypes: dict[str, str] = {}
@@ -2508,17 +2627,7 @@ def _iface_options_snapshot() -> list[dict]:
     return out
 
 def _cfg_preferred_iface() -> str | None:
-    try:
-        basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
-        if not isinstance(basic, dict):
-            return None
-        v = basic.get("iface")
-        if v in (None, ""):
-            return None
-        s = str(v).strip()
-        return s or None
-    except Exception:
-        return None
+    return _cfg_preferred_iface_from_cfg(APP_CONFIG)
 
 def _cfg_auto_self_heal() -> bool:
     try:
@@ -2535,12 +2644,12 @@ def _sniff_pick_iface(prefer: str | None = None) -> str | None:
         return None
     if prefer and prefer in iftypes:
         return prefer
-    mon = [i for i, t in iftypes.items() if t == "monitor"]
-    if mon:
-        return mon[0]
-    for k in iftypes.keys():
-        return k
+    if prefer:
+        _sniff_note_error(f"配置的默认网卡未检测到: {prefer}")
+        return None
+    _sniff_note_error("未绑定默认网卡，请打开 OOBE 或设置页选择网卡")
     return None
+
 def _sniff_is_no_device_error(ex: Exception) -> bool:
     s = str(ex or "")
     return (
@@ -2585,14 +2694,21 @@ def interface_detect(prefer: str | None = None) -> str | None:
         m2 = re.match(r"\s*type\s+(\S+)", line)
         if m2 and cur: iftypes[cur] = m2.group(1)
 
+    if not prefer:
+        msg = "未绑定默认网卡，请进入 OOBE 或设置页选择固定网卡"
+        _log(f"[WARN] {msg}")
+        _sniff_note_error(msg)
+        _set_oobe_required(msg, True)
+        return None
     if prefer and prefer in iftypes:
         iface = prefer
     else:
-        mon = [i for i,t in iftypes.items() if t=="monitor"]
-        iface = mon[0] if mon else (list(iftypes.keys())[0] if iftypes else None)
+        iface = None
     if not iface:
-        _log(f"[WARN] {NO_IFACE_DEGRADE_HINT}")
-        _sniff_note_error(NO_IFACE_DEGRADE_HINT)
+        msg = f"默认网卡未检测到: {prefer}" if iftypes else NO_IFACE_DEGRADE_HINT
+        _log(f"[WARN] {msg}")
+        _sniff_note_error(msg + "。请打开 OOBE 或设置页检查默认网卡。")
+        _set_oobe_required(msg, True)
         return None
 
     mode = iftypes.get(iface, "unknown")
@@ -3571,6 +3687,7 @@ def _state_snapshot() -> dict:
             "sniff_idle_sec": sniff_meta.get("idle_sec"),
             "sniff_last_pkt": sniff_meta.get("last_pkt"),
             "sniff_last_err_at": sniff_meta.get("last_err_at"),
+            "oobe": _oobe_state(),
             "alert_zone": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zone"),
             "alert_zones": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zones"),
             "settings_path": "/settings",
@@ -3592,7 +3709,7 @@ def _api_meta() -> dict:
         "version": API_VERSION,
         "time": _api_iso_now(),
         "web_auth": {
-            "type": "basic+session",
+            "type": "login+session",
             "enabled": bool(_auth_enabled()),
             "configured": bool(auth_configured),
             "realm": str(AUTH_CFG.get("realm") or "Light RID Scanner"),
@@ -3619,6 +3736,8 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "GET", "path": "/api/v1/tracks/{sn}", "desc": "Track by SN"},
         {"method": "GET", "path": "/api/v1/aps", "desc": "Realtime AP list"},
         {"method": "GET", "path": "/api/v1/logs?type=event|scan|ap&limit=200", "desc": "Logs"},
+        {"method": "GET", "path": "/api/logs/view?type=runtime|operation|scan|scan_diff|ap", "desc": "Built-in page log viewer"},
+        {"method": "GET", "path": "/api/logs/export?type=all|runtime|operation|scan|scan_diff|ap", "desc": "Built-in page log export"},
         {"method": "POST", "path": "/api/v1/history/clear", "desc": "Clear history cache"},
         {"method": "POST", "path": "/api/v1/history/delete", "desc": "Delete one history item"},
         {"method": "POST", "path": "/api/v1/tracks/clear", "desc": "Clear tracks"},
@@ -3668,6 +3787,281 @@ def _api_token_docs_payload() -> dict:
         "endpoints": _api_endpoint_index(),
     }
 
+def _settings_runtime_payload(limit: int = 180) -> dict:
+    try:
+        n = max(20, min(1000, int(limit)))
+    except Exception:
+        n = 180
+    aps, aps_seq, aps_total = _ap_snapshot()
+    with log_lock:
+        event_logs = list(log_buf)[-n:]
+        scan_logs = list(scan_buf)[-n:]
+        ap_logs = list(ap_buf)[-n:]
+    return {
+        "ok": True,
+        "aps": aps,
+        "aps_seq": aps_seq,
+        "aps_total": aps_total,
+        "event_logs": event_logs,
+        "scan_logs": scan_logs,
+        "ap_logs": ap_logs,
+    }
+
+def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:
+    try:
+        n = max(1, min(5000, int(limit)))
+    except Exception:
+        n = 500
+    kind = str(log_type or "runtime").strip().lower()
+    with log_lock:
+        runtime_rows = list(log_buf)[-n:]
+        operation_rows = list(op_buf)[-n:]
+        scan_rows = list(scan_buf)[-n:]
+        ap_rows = list(ap_buf)[-n:]
+    if kind in ("op", "ops", "operation", "audit"):
+        kind = "operation"
+        rows = operation_rows
+    elif kind in ("scan", "scanner"):
+        kind = "scan"
+        rows = scan_rows
+    elif kind in ("ap", "ap_scan"):
+        kind = "ap"
+        rows = ap_rows
+    elif kind in ("diff", "scan_diff"):
+        kind = "scan_diff"
+        rows = list(difflib.unified_diff(
+            runtime_rows,
+            scan_rows,
+            fromfile="runtime.log",
+            tofile="scan.log",
+            lineterm="",
+        ))[-n:]
+    else:
+        kind = "runtime"
+        rows = runtime_rows
+    return {
+        "ok": True,
+        "type": kind,
+        "limit": n,
+        "count": len(rows),
+        "items": rows,
+        "available": ["runtime", "operation", "scan", "scan_diff", "ap"],
+    }
+
+def _logs_export_bytes(log_type: str = "all", limit: int = 5000) -> tuple[bytes, str, str]:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    kind = str(log_type or "all").strip().lower()
+    if kind == "all":
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for name in ("runtime", "operation", "scan", "scan_diff", "ap"):
+                snap = _logs_snapshot(name, limit=limit)
+                zf.writestr(f"{name}.log", "\n".join(str(x) for x in snap.get("items") or []) + "\n")
+        return buf.getvalue(), f"light-rid-logs-{stamp}.zip", "application/zip"
+    snap = _logs_snapshot(kind, limit=limit)
+    body = ("\n".join(str(x) for x in snap.get("items") or []) + "\n").encode("utf-8")
+    return body, f"light-rid-{snap.get('type')}-{stamp}.log", "text/plain; charset=utf-8"
+
+def _oobe_status_payload() -> dict:
+    cfg = load_app_config(APP_CONFIG_PATH) if APP_CONFIG_PATH else default_app_config()
+    basic = cfg.get("basic") if isinstance(cfg, dict) else {}
+    web = cfg.get("web") if isinstance(cfg, dict) else {}
+    auth = cfg.get("auth") if isinstance(cfg, dict) else {}
+    if not isinstance(basic, dict): basic = {}
+    if not isinstance(web, dict): web = {}
+    if not isinstance(auth, dict): auth = {}
+    return {
+        "ok": True,
+        "oobe": _oobe_state(),
+        "config_path": APP_CONFIG_PATH or "",
+        "interfaces": _iface_options_snapshot(),
+        "selected_iface": _cfg_preferred_iface_from_cfg(cfg),
+        "channel": basic.get("channel"),
+        "base_name": str(web.get("base_name") or "基站"),
+        "base_lat": web.get("base_lat"),
+        "base_lon": web.get("base_lon"),
+        "auth_enabled": bool(auth.get("enabled")),
+        "auth_configured": _auth_hashes_present(auth),
+        "host": _host_resource_snapshot(),
+    }
+
+def _oobe_save_config(body: dict | None) -> dict:
+    if not APP_CONFIG_PATH:
+        return {"ok": False, "error": "config path missing"}
+    payload = body if isinstance(body, dict) else {}
+    iface = str(payload.get("iface") or "").strip()
+    if not iface:
+        return {"ok": False, "error": "必须选择默认网卡"}
+    safe_iface = _hw_safe_iface(iface)
+    if not safe_iface:
+        return {"ok": False, "error": f"网卡不可用: {iface}"}
+    iface = safe_iface
+    try:
+        channel = int(payload.get("channel") or 6)
+    except Exception:
+        channel = 6
+    if channel < 1 or channel > 196:
+        return {"ok": False, "error": "信道超出范围"}
+    cfg = load_app_config(APP_CONFIG_PATH) if APP_CONFIG_PATH else default_app_config()
+    basic = cfg.setdefault("basic", {})
+    web = cfg.setdefault("web", {})
+    auth = cfg.setdefault("auth", {})
+    if not isinstance(basic, dict): basic = {}; cfg["basic"] = basic
+    if not isinstance(web, dict): web = {}; cfg["web"] = web
+    if not isinstance(auth, dict): auth = {}; cfg["auth"] = auth
+    basic["iface"] = iface
+    basic["channel"] = channel
+    basic["no_tui"] = True
+    basic["auto_self_heal"] = True
+    web["base_name"] = str(payload.get("base_name") or web.get("base_name") or "基站").strip() or "基站"
+    for k, lo, hi in (("base_lat", -90.0, 90.0), ("base_lon", -180.0, 180.0)):
+        raw_v = payload.get(k)
+        if raw_v in (None, ""):
+            continue
+        try:
+            val = float(raw_v)
+        except Exception:
+            return {"ok": False, "error": f"{k} 格式错误"}
+        if not (lo <= val <= hi):
+            return {"ok": False, "error": f"{k} 超出范围"}
+        web[k] = val
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    if username or password:
+        if not username or not password:
+            return {"ok": False, "error": "账号和密码必须同时填写"}
+        auth["enabled"] = True
+        auth["username_sha256"] = _sha256_hex(username)
+        auth["password_sha256"] = _sha256_hex(password)
+        auth["realm"] = str(auth.get("realm") or "Light RID Scanner")
+    b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="oobe")
+    if not b_ok:
+        return {"ok": False, "error": f"backup failed: {backup_path}"}
+    ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
+    if not ok:
+        return {"ok": False, "error": f"save failed: {msg}"}
+    cfg_loaded = load_app_config(APP_CONFIG_PATH)
+    r_ok, r_msg = reload_runtime_config(cfg_loaded)
+    if not r_ok:
+        restore_config_backup(APP_CONFIG_PATH, backup_path)
+        return {"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}
+    _set_oobe_required("", False)
+    _op_log("oobe-save", f"iface={iface} channel={channel} backup={backup_path}", ok=True)
+    return {
+        "ok": True,
+        "saved_to": APP_CONFIG_PATH,
+        "backup_path": backup_path,
+        "iface": iface,
+        "channel": channel,
+        "reload_msg": r_msg,
+        "login_required": bool(_normalize_auth_cfg(cfg_loaded).get("enabled")),
+        "next": ("/login" if bool(_normalize_auth_cfg(cfg_loaded).get("enabled")) else "/"),
+    }
+
+def _diagnostic_run(cmd: str, timeout: int = 8) -> str:
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        out = (r.stdout or "")
+        err = (r.stderr or "")
+        text = out
+        if err:
+            text += ("\n--- STDERR ---\n" + err)
+        if not text.strip():
+            text = f"(empty, rc={getattr(r, 'returncode', '')})\n"
+        return text
+    except Exception as e:
+        return f"command failed: {e}\n"
+
+def _diagnostic_redact(obj):
+    sensitive = ("token", "password", "secret", "webhook", "key", "sha256", "authorization", "cookie")
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            ks = str(k).lower()
+            if any(s in ks for s in sensitive):
+                out[k] = "***REDACTED***" if v not in (None, "", []) else v
+            else:
+                out[k] = _diagnostic_redact(v)
+        return out
+    if isinstance(obj, list):
+        return [_diagnostic_redact(x) for x in obj]
+    return obj
+
+def _diagnostic_zip_bytes() -> tuple[bytes, str]:
+    now_wall = time.time()
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now_wall))
+    buf = io.BytesIO()
+    now_mono = time.monotonic()
+    meta = {
+        "generated_at": _fmt_wall_ts(now_wall),
+        "uptime_sec": int(max(0.0, now_wall - APP_START_WALL)),
+        "cwd": APP_START_CWD,
+        "config_path": APP_CONFIG_PATH or "",
+        "history_store": HISTORY_STORE_PATH or "",
+        "python": sys.version,
+        "platform": platform.platform(),
+        "argv": list(sys.argv),
+        "current_channel": current_channel,
+        "sniff": _sniff_health_meta(now_mono, now_wall),
+        "api": _api_meta(),
+    }
+    with log_lock:
+        event_logs = list(log_buf)
+        scan_logs = list(scan_buf)
+        ap_logs = list(ap_buf)
+        operation_logs = list(op_buf)
+    with state_lock:
+        state_summary = {
+            "live_count": len(state_table),
+            "history_count": len(history_table),
+            "live_keys": sorted([str(k) for k in state_table.keys()])[:500],
+            "history_keys": sorted([str(k) for k in history_table.keys()])[:500],
+        }
+    commands = {
+        "system_uname.txt": "uname -a",
+        "system_uptime.txt": "uptime",
+        "system_free.txt": "free -h",
+        "system_df.txt": "df -h",
+        "system_ip_addr.txt": "ip addr",
+        "system_ip_link.txt": "ip link",
+        "wifi_iw_dev.txt": "iw dev",
+        "wifi_iw_info.txt": "iw dev 2>/dev/null",
+        "wifi_iw_phy.txt": "iw phy",
+        "wifi_rfkill.txt": "rfkill list",
+        "usb_lsusb.txt": "lsusb",
+        "service_status.txt": "systemctl status light-rid-scanner.service --no-pager -l",
+        "service_journal.txt": "journalctl -u light-rid-scanner.service -n 500 --no-pager",
+        "process_ps.txt": "ps -eo pid,ppid,stat,pcpu,pmem,comm,args --sort=-pcpu | head -80",
+    }
+    if sniff_iface_name:
+        safe_iface = shlex.quote(str(sniff_iface_name))
+        commands[f"wifi_{sniff_iface_name}_info.txt"] = f"iw dev {safe_iface} info"
+        commands[f"wifi_{sniff_iface_name}_link.txt"] = f"iw dev {safe_iface} link"
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.writestr("README.txt", (
+            "Light RID Scanner quality report\n"
+            "Sensitive config values are redacted. Logs may still contain observed SN/MAC/location data.\n"
+        ))
+        zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        zf.writestr("state_summary.json", json.dumps(state_summary, ensure_ascii=False, indent=2))
+        zf.writestr("snapshot.json", json.dumps(_state_snapshot(), ensure_ascii=False, indent=2))
+        zf.writestr("config_redacted.json", json.dumps(_diagnostic_redact(APP_CONFIG), ensure_ascii=False, indent=2))
+        zf.writestr("logs/event.log", "\n".join(event_logs) + ("\n" if event_logs else ""))
+        zf.writestr("logs/scan.log", "\n".join(scan_logs) + ("\n" if scan_logs else ""))
+        zf.writestr("logs/ap.log", "\n".join(ap_logs) + ("\n" if ap_logs else ""))
+        zf.writestr("logs/operation.log", "\n".join(operation_logs) + ("\n" if operation_logs else ""))
+        for name, cmd in commands.items():
+            zf.writestr("commands/" + name, "$ " + cmd + "\n\n" + _diagnostic_run(cmd, timeout=10))
+    data = buf.getvalue()
+    if len(data) < 128:
+        fallback = io.BytesIO()
+        with zipfile.ZipFile(fallback, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.writestr("README.txt", "Light RID Scanner quality report fallback\n")
+            zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        data = fallback.getvalue()
+    filename = f"light-rid-quality-{stamp}.zip"
+    return data, filename
+
 def _path_uses_api_token(req_path: str | None) -> bool:
     path = str(req_path or "").split("?", 1)[0]
     if path == "/api/docs":
@@ -3679,6 +4073,21 @@ def _path_uses_api_token(req_path: str | None) -> bool:
 def _path_is_page_api(req_path: str | None) -> bool:
     path = str(req_path or "").split("?", 1)[0]
     return path.startswith("/api/") and (not _path_uses_api_token(path))
+
+def _path_is_oobe_public(req_path: str | None) -> bool:
+    path = str(req_path or "").split("?", 1)[0]
+    return path in ("/oobe", "/oobe.html", "/api/oobe/status", "/api/oobe/save", "/api/health")
+
+def _oobe_redirect_required(req_path: str | None) -> bool:
+    if not _oobe_state().get("required"):
+        return False
+    path = str(req_path or "").split("?", 1)[0]
+    if _path_is_oobe_public(path):
+        return False
+    return True
+
+def _oobe_auth_required() -> bool:
+    return bool(_oobe_state().get("required")) and _auth_enabled() and _auth_hashes_present(AUTH_CFG)
 
 def _auth_enabled() -> bool:
     return bool(AUTH_CFG.get("enabled"))
@@ -3693,6 +4102,21 @@ def _auth_check_userpass(username: str, password: str) -> bool:
     u_ok = hmac.compare_digest(_sha256_hex(username), u_hash)
     p_ok = hmac.compare_digest(_sha256_hex(password), p_hash)
     return bool(u_ok and p_ok)
+
+def _auth_check_userpass_hash(username_sha256: str, password_sha256: str) -> bool:
+    if not _auth_enabled():
+        return True
+    u_hash = str(AUTH_CFG.get("username_sha256") or "").strip().lower()
+    p_hash = str(AUTH_CFG.get("password_sha256") or "").strip().lower()
+    u_in = str(username_sha256 or "").strip().strip("'\"").lower()
+    p_in = str(password_sha256 or "").strip().strip("'\"").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", u_in or ""):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", p_in or ""):
+        return False
+    if not u_hash or not p_hash:
+        return False
+    return bool(hmac.compare_digest(u_in, u_hash) and hmac.compare_digest(p_in, p_hash))
 
 def _auth_check_basic_header(header_value: str | None) -> bool:
     if not _auth_enabled():
@@ -3711,6 +4135,50 @@ def _auth_check_basic_header(header_value: str | None) -> bool:
         return False
     user, pwd = text.split(":", 1)
     return _auth_check_userpass(user, pwd)
+
+def _rate_key(scope: str, ip: str | None, subject: str | None = "") -> str:
+    return f"{str(scope or 'default')}:{str(ip or '-')}:{str(subject or '-')[:96]}"
+
+def _rate_limited(scope: str, ip: str | None, subject: str | None = "", *, limit: int = 8, window_sec: int = 300, block_sec: int = 900) -> tuple[bool, int]:
+    now_wall = time.time()
+    key = _rate_key(scope, ip, subject)
+    with security_rate_lock:
+        st = security_rate_state.get(key) or {"fails": [], "blocked_until": 0.0}
+        blocked_until = float(st.get("blocked_until") or 0.0)
+        if blocked_until > now_wall:
+            return True, int(max(1.0, blocked_until - now_wall))
+        fails = [float(x) for x in (st.get("fails") or []) if now_wall - float(x) <= float(window_sec)]
+        st["fails"] = fails
+        security_rate_state[key] = st
+        if len(security_rate_state) > 4096:
+            stale = [k for k, v in security_rate_state.items()
+                     if float((v or {}).get("blocked_until") or 0.0) <= now_wall and not (v or {}).get("fails")]
+            for k in stale[:2048]:
+                security_rate_state.pop(k, None)
+        if len(fails) >= int(limit):
+            st["blocked_until"] = now_wall + float(block_sec)
+            return True, int(block_sec)
+    return False, 0
+
+def _rate_note(scope: str, ip: str | None, subject: str | None = "", *, success: bool, limit: int = 8, window_sec: int = 300, block_sec: int = 900) -> None:
+    key = _rate_key(scope, ip, subject)
+    now_wall = time.time()
+    with security_rate_lock:
+        if success:
+            security_rate_state.pop(key, None)
+            return
+        st = security_rate_state.get(key) or {"fails": [], "blocked_until": 0.0}
+        fails = [float(x) for x in (st.get("fails") or []) if now_wall - float(x) <= float(window_sec)]
+        fails.append(now_wall)
+        st["fails"] = fails
+        if len(fails) >= int(limit):
+            st["blocked_until"] = now_wall + float(block_sec)
+            _op_log("rate-limit", f"scope={scope} subject={str(subject or '-')[:96]} blocked={block_sec}s fails={len(fails)}", ip=str(ip or "-"), ok=False)
+        security_rate_state[key] = st
+        if len(security_rate_state) > 4096:
+            ordered = sorted(security_rate_state.items(), key=lambda kv: max([float(x) for x in ((kv[1] or {}).get("fails") or [0.0])] + [float((kv[1] or {}).get("blocked_until") or 0.0)]), reverse=True)
+            security_rate_state.clear()
+            security_rate_state.update(dict(ordered[:2048]))
 
 def _auth_cookie_parse(cookie_header: str | None, key: str) -> str:
     raw = str(cookie_header or "")
@@ -3889,6 +4357,61 @@ def _host_mem_stats() -> dict:
         return {"percent": None, "used_mb": None, "total_mb": None}
 
 
+def _host_temperature_c() -> float | None:
+    paths: list[str] = []
+    for root in ("/sys/class/thermal", "/sys/class/hwmon"):
+        try:
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    if name == "temp" or (name.startswith("temp") and name.endswith("_input")):
+                        paths.append(os.path.join(dirpath, name))
+        except Exception:
+            continue
+    for path in paths[:24]:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                raw = f.read().strip()
+            if not raw:
+                continue
+            value = float(raw)
+            if abs(value) > 250:
+                value = value / 1000.0
+            if -40.0 <= value <= 140.0:
+                return round(value, 1)
+        except Exception:
+            continue
+    try:
+        out = subprocess.run("vcgencmd measure_temp", shell=True, capture_output=True, text=True, timeout=3)
+        m = re.search(r"(-?\d+(?:\.\d+)?)", (out.stdout or "") + (out.stderr or ""))
+        if m:
+            return round(float(m.group(1)), 1)
+    except Exception:
+        pass
+    return None
+
+
+def _host_local_ips() -> list[str]:
+    ips: list[str] = []
+    try:
+        text = subprocess.run("hostname -I", shell=True, capture_output=True, text=True, timeout=3).stdout or ""
+        for part in text.split():
+            s = part.strip()
+            if s and s not in ips:
+                ips.append(s)
+    except Exception:
+        pass
+    if not ips:
+        try:
+            host = socket.gethostname()
+            for item in socket.getaddrinfo(host, None):
+                addr = str(item[4][0] or "").strip()
+                if addr and not addr.startswith("127.") and addr != "::1" and addr not in ips:
+                    ips.append(addr)
+        except Exception:
+            pass
+    return ips[:12]
+
+
 def _host_resource_snapshot() -> dict:
     mem = _host_mem_stats()
     uptime_sec = None
@@ -3909,6 +4432,8 @@ def _host_resource_snapshot() -> dict:
         "mem_percent": mem.get("percent"),
         "mem_used_mb": mem.get("used_mb"),
         "mem_total_mb": mem.get("total_mb"),
+        "temperature_c": _host_temperature_c(),
+        "local_ips": _host_local_ips(),
         "load1": (None if load1 is None else round(float(load1), 2)),
         "load5": (None if load5 is None else round(float(load5), 2)),
         "load15": (None if load15 is None else round(float(load15), 2)),
@@ -3917,9 +4442,11 @@ def _host_resource_snapshot() -> dict:
 
 
 def _hw_status_snapshot() -> dict:
+    items = _iface_options_snapshot()
     host = _host_resource_snapshot()
+    host["ifaces"] = items
     return {
-        "items": _iface_options_snapshot(),
+        "items": items,
         "active_iface": str(sniff_iface_name or ""),
         "sniff_state": _sniff_health_meta(time.monotonic(), time.time()),
         "current_channel": int(current_channel or 0),
@@ -4359,6 +4886,7 @@ body.bottom-all-collapsed{
   display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;white-space:nowrap;
 }
 .map-mini-list .mini-item .sn{overflow:hidden;text-overflow:ellipsis}
+.map-mini-list .mini-item .mini-model{margin-left:auto;max-width:42%;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
 .panel.map-panel.fullscreen .map-mini-list{display:block}
 
 /* -- Log Box -- */
@@ -4443,7 +4971,7 @@ tbody td.hl{
 }
 .raw-empty{color:var(--dim);font-size:13px}
 .info-card-body .mono{font-family:var(--font-mono)}
-.aplist{flex:1;overflow:auto;background:var(--panel);font-size:13px;line-height:1.45;padding:6px 8px}
+.aplist{flex:1;min-height:0;max-height:min(34vh,360px);overflow:auto;background:var(--panel);font-size:13px;line-height:1.45;padding:6px 8px}
 .aplist .ap-empty{color:var(--dim);padding:14px 8px}
 .aprow{display:grid;grid-template-columns:42px minmax(116px, 15ch) 62px 86px minmax(0,1.15fr) minmax(0,1fr);gap:8px;padding:6px 6px;border-bottom:1px solid color-mix(in srgb, var(--border) 70%, transparent);align-items:start}
 .aprow:hover{background:color-mix(in srgb, var(--blue) 6%, var(--panel))}
@@ -4576,21 +5104,21 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 </style>
 </head><body>
 <header>
-  <h1>&#x2708; Light RID Scanner</h1><p>v1.1.0</p>
+  <h1>✈ Light RID Scanner</h1><p>v1.1.0</p>
   <div class="head-stats">
-  <span class="stat">&#x5728;&#x7EBF; <b id="n-live">-</b></span>
-  <span class="stat ls">&#x79BB;&#x7EBF; <b id="n-lost">-</b></span>
-  <span class="stat cs">&#x4FE1;&#x9053; <b id="cur-ch">-</b></span>
-  <span class="stat ts">&#x66F4;&#x65B0; <b id="cur-ts">-</b></span>
-  <span class="stat"><span id="dot-ws"></span><span id="ws-status">&#x8FDE;&#x63A5;&#x4E2D;</span></span>
-  <button class="btn-mini" id="btn-clear-history" type="button">&#x6E05;&#x7A7A;&#x5386;&#x53F2;</button>
+  <span class="stat">在线 <b id="n-live">-</b></span>
+  <span class="stat ls">离线 <b id="n-lost">-</b></span>
+  <span class="stat cs">信道 <b id="cur-ch">-</b></span>
+  <span class="stat ts">更新 <b id="cur-ts">-</b></span>
+  <span class="stat"><span id="dot-ws"></span><span id="ws-status">连接中</span></span>
+  <button class="btn-mini" id="btn-clear-history" type="button">清空历史</button>
   </div>
 </header>
 
 <div class="tbl-wrap">
 <table id="dtable">
 <thead><tr>
-  <th><div class="sel-wrap"><input id="sel-all" class="sel-sn" type="checkbox" title="全选"></div></th><th>#</th><th>SN</th><th>&#x673A;&#x578B;</th><th>&#x4FE1;&#x53F7;</th><th>&#x5305;</th><th>&#x65B9;&#x5411;</th><th>&#x6570;&#x636E;&#x66F4;&#x65B0;</th><th>&#x672B;&#x6B21;&#x53D1;&#x73B0;</th><th>&#x6700;&#x540E;&#x6570;&#x636E;&#x5305;</th>
+  <th><div class="sel-wrap"><input id="sel-all" class="sel-sn" type="checkbox" title="全选"></div></th><th>#</th><th>SN</th><th>机型</th><th>信号</th><th>包</th><th>方向</th><th>数据更新</th><th>末次发现</th><th>最后数据包</th>
 </tr></thead>
 <tbody id="tbody"></tbody>
 </table>
@@ -4599,15 +5127,15 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 <div class="bottom">
   <div class="panel">
     <div class="panel-hdr">
-      &#x1F5FA; &#x5730;&#x56FE;
-      <span class="sub" id="map-hint">&#x7B49;&#x5F85;&#x5750;&#x6807;...</span>
+      🗺 地图
+      <span class="sub" id="map-hint">等待坐标...</span>
     </div>
     <div id="map"></div>
   </div>
   <div class="panel">
     <div class="panel-hdr">
-      &#x1F4E1; AP &#x626B;&#x63CF;&#x65E5;&#x5FD7;
-      <label><input type="checkbox" id="autoscroll" checked>&#x81EA;&#x52A8;&#x6EDA;&#x52A8;</label>
+      📡 AP 扫描日志
+      <label><input type="checkbox" id="autoscroll" checked>自动滚动</label>
     </div>
     <div class="logbox" id="logbox"></div>
   </div>
@@ -4625,6 +5153,7 @@ var restartBusy = false;
 var metaState = {};
 var uiFrozen = false;
 var frozenPendingData = null;
+var homeFreezeAfterFirstRender = false;
 var uiTheme = 'dark';
 var infoCardEscBound = false;
 var webNotifyEnabled = false;
@@ -4638,6 +5167,7 @@ var latestApsRows = [];
 var latestApsTotal = 0;
 var selectedSnSet = {};
 var selectedMacSet = {};
+var historyHiddenSnSet = {};
 var autoTrackSnSet = {};
 var rowClickTimer = null;
 var trackCache = {};
@@ -4646,8 +5176,13 @@ var prefRealtimeTrack = true;
 var prefTrack2hOnly = false;
 var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
 var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
-var AUTO_TRACK_OFFLINE_HIDE_SEC = 120;
+var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
+var LIVE_TRACK_WINDOW_SEC = 300;
+var AUTO_TRACK_OFFLINE_HIDE_SEC = LIVE_TRACK_WINDOW_SEC;
 var TRACK_FILTER_WINDOW_SEC = 7200;
+var replayState = {min:null,max:null,start:null,end:null,cursor:null,playing:false,speed:1,timer:null,userRange:false};
+var replayMarkers = {};
+var replayUiSig = '';
 var HL_FADE_IN_MS = 0;
 var HL_HOLD_MS = 0;
 var HL_FADE_OUT_MS = 2000;
@@ -4749,6 +5284,13 @@ function syncTrackPrefsUi(){
   var f2h = qs('opt-track-2h');
   if(f2h) f2h.checked = !!prefTrack2hOnly;
 }
+function consumeFreezeOnHomeRequest(){
+  try{
+    homeFreezeAfterFirstRender = (localStorage.getItem(FREEZE_ON_HOME_KEY) === '1');
+  }catch(_e){
+    homeFreezeAfterFirstRender = false;
+  }
+}
 function refreshAutoTrackSelection(rows){
   autoTrackSnSet = {};
   if(!prefRealtimeTrack) return;
@@ -4776,18 +5318,51 @@ function effectiveTrackSnList(){
   }
   return Object.keys(out).filter(function(sn){ return !!sn; });
 }
+function historyVisibleSnList(rows){
+  var out = [];
+  (Array.isArray(rows) ? rows : []).forEach(function(e){
+    var sn = String((e && e.sn) || '');
+    if(!sn || historyHiddenSnSet[sn]) return;
+    out.push(sn);
+  });
+  return out;
+}
+function displayTrackSnList(page, rows){
+  if(page === 'history'){
+    return historyVisibleSnList(rows);
+  }
+  return effectiveTrackSnList();
+}
+function isHistoryTrackVisible(sn){
+  sn = String(sn || '');
+  return !!sn && !historyHiddenSnSet[sn];
+}
+function isSnCheckedForCurrentPage(sn){
+  return currentAppPage() === 'history' ? isHistoryTrackVisible(sn) : isSnSelected(sn);
+}
 function _trackTsSec(p){
   var ts = Number((p && p.ts) || 0);
   return (isFinite(ts) && ts > 0) ? ts : null;
 }
-function filterTrackByPrefs(track){
+function filterTrackForDisplay(track, page){
   var arr = Array.isArray(track) ? track.slice() : [];
-  if(!prefTrack2hOnly) return arr;
-  var threshold = (Date.now() / 1000) - TRACK_FILTER_WINDOW_SEC;
-  return arr.filter(function(p){
-    var ts = _trackTsSec(p);
-    return ts == null ? true : (ts >= threshold);
-  });
+  if(page === 'live'){
+    var liveThreshold = (Date.now() / 1000) - LIVE_TRACK_WINDOW_SEC;
+    arr = arr.filter(function(p){
+      var ts = _trackTsSec(p);
+      return ts == null ? true : (ts >= liveThreshold);
+    });
+  }else if(prefTrack2hOnly){
+    var threshold = (Date.now() / 1000) - TRACK_FILTER_WINDOW_SEC;
+    arr = arr.filter(function(p){
+      var ts = _trackTsSec(p);
+      return ts == null ? true : (ts >= threshold);
+    });
+  }
+  if(page === 'history'){
+    arr = filterTrackByReplay(arr);
+  }
+  return arr;
 }
 function baseFromMeta(meta){
   meta = (meta && typeof meta === 'object') ? meta : {};
@@ -4795,7 +5370,7 @@ function baseFromMeta(meta){
   var lon = numOrNull(meta.base_lon);
   var zoom = intOrDefault(meta.base_zoom, 13);
   zoom = Math.max(3, Math.min(30, zoom));
-  var name = String(meta.base_name || '\u57fa\u7ad9').trim() || '\u57fa\u7ad9';
+  var name = String(meta.base_name || '基站').trim() || '基站';
   if(lat==null || lon==null) return {ok:false, name:name, lat:null, lon:null, zoom:zoom};
   if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return {ok:false, name:name, lat:null, lon:null, zoom:zoom};
   return {ok:true, name:name, lat:lat, lon:lon, zoom:zoom};
@@ -4815,12 +5390,12 @@ function infoRowHtml(label, value){
 }
 function snSourceText(e){
   var idType = String((e && e.id_type) || '').toUpperCase();
-  return (idType === 'SSID') ? '\u0053\u0053\u0049\u0044' : '\u0052\u0049\u0044\u5305';
+  return (idType === 'SSID') ? 'SSID' : 'RID包';
 }
 function scanTypeText(e){
   var k = String((e && e.scan_type_key) || '').toLowerCase();
-  if(k === 'phone') return '\u624b\u673a\u5feb\u4f20';
-  return '\u0052\u0049\u0044\u62a5\u9001';
+  if(k === 'phone') return '手机快传';
+  return 'RID报送';
 }
 function buildInfoHtml(e){
   e = e || {};
@@ -4947,11 +5522,44 @@ function setSnSelected(sn, on){
   }
   if(on) ensureTrackLoaded(sn, false);
   syncTableSelectionUi();
+  renderLiveCards(latestDroneRows);
   renderMapMiniList(latestDroneRows);
   refreshTrackMgrOptions(latestDroneRows);
   updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
+function setHistorySnVisible(sn, on){
+  sn = String(sn || '');
+  if(!sn) return;
+  if(on){
+    delete historyHiddenSnSet[sn];
+    ensureTrackLoaded(sn, false);
+  }else{
+    historyHiddenSnSet[sn] = true;
+  }
+  syncTableSelectionUi();
+  renderMapMiniList(latestDroneRows);
+  refreshReplayBounds(false);
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
 function setAllVisibleSelected(on){
+  if(currentAppPage() === 'history'){
+    var hRows = Array.isArray(latestDroneRows) ? latestDroneRows : [];
+    hRows.forEach(function(e){
+      var sn = String((e && e.sn) || '');
+      if(!sn) return;
+      if(on){
+        delete historyHiddenSnSet[sn];
+        ensureTrackLoaded(sn, false);
+      }else{
+        historyHiddenSnSet[sn] = true;
+      }
+    });
+    syncTableSelectionUi();
+    renderMapMiniList(latestDroneRows);
+    refreshReplayBounds(false);
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    return;
+  }
   var rows = Array.isArray(latestDroneRows) ? latestDroneRows : [];
   rows.forEach(function(e){
     var sn = String((e && e.sn) || '');
@@ -4967,6 +5575,7 @@ function setAllVisibleSelected(on){
     }
   });
   syncTableSelectionUi();
+  renderLiveCards(latestDroneRows);
   renderMapMiniList(latestDroneRows);
   refreshTrackMgrOptions(latestDroneRows);
   updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
@@ -5002,12 +5611,27 @@ function hideInfoCard(){
   if(!modal) return;
   modal.classList.remove('show');
 }
+function stripUnsafeHtml(html){
+  var t = document.createElement('template');
+  t.innerHTML = String(html || '');
+  t.content.querySelectorAll('script,iframe,object,embed,link[rel="import"]').forEach(function(n){ n.remove(); });
+  t.content.querySelectorAll('*').forEach(function(n){
+    Array.prototype.slice.call(n.attributes || []).forEach(function(a){
+      var name = String(a.name || '').toLowerCase();
+      var val = String(a.value || '').trim().toLowerCase();
+      if(name.indexOf('on') === 0 || name === 'srcdoc' || ((name === 'href' || name === 'src') && val.indexOf('javascript:') === 0)){
+        n.removeAttribute(a.name);
+      }
+    });
+  });
+  return t.innerHTML;
+}
 function showInfoCard(msg, asHtml){
   var modal = qs('info-modal');
   var body = qs('info-card-body');
   if(!modal || !body) return;
   if(asHtml){
-    body.innerHTML = String(msg || '');
+    body.innerHTML = stripUnsafeHtml(msg);
   }else{
     body.textContent = String(msg || '无详情');
   }
@@ -5138,10 +5762,10 @@ function showBanner(text, kind, timeoutMs){
   }, ttl);
 }
 function notifyBtnText(){
-  if(!('Notification' in window)) return '\u7f51\u9875\u901a\u77e5(\u4e0d\u652f\u6301)';
-  if(webNotifyEnabled && Notification.permission === 'granted') return '\u7f51\u9875\u901a\u77e5(\u5df2\u5f00)';
-  if(Notification.permission === 'denied') return '\u7f51\u9875\u901a\u77e5(\u5df2\u62d2\u7edd)';
-  return '\u7f51\u9875\u901a\u77e5';
+  if(!('Notification' in window)) return '网页通知(不支持)';
+  if(webNotifyEnabled && Notification.permission === 'granted') return '网页通知(已开)';
+  if(Notification.permission === 'denied') return '网页通知(已拒绝)';
+  return '网页通知';
 }
 function updateNotifyButton(){
   var btn = qs('btn-web-notify');
@@ -5195,7 +5819,7 @@ function handleDroneNotifications(list){
       return;
     }
     if(droneStatePrev[sn] !== isLost){
-      var title = isLost ? '\u98de\u673a\u4e0b\u7ebf' : '\u98de\u673a\u4e0a\u7ebf';
+      var title = isLost ? '飞机下线' : '飞机上线';
       var body = nowLabel + '  ' + sn + '\\n' + String(e.model || 'N/A') + '  ' +
         (e.rssi == null ? 'N/A' : (e.rssi + 'dBm'));
       pushWebNotification(title, body, 'rid-'+sn+'-'+(isLost?'off':'on'));
@@ -5246,8 +5870,8 @@ function applyTheme(theme){
   try{ localStorage.setItem('rid_ui_theme', uiTheme); }catch(_e){}
   var btn = qs('btn-theme');
   if(btn){
-    btn.textContent = light ? '\u6df1\u8272' : '\u6d45\u8272';
-    btn.title = light ? '\u5207\u6362\u4e3a\u6df1\u8272' : '\u5207\u6362\u4e3a\u6d45\u8272';
+    btn.textContent = light ? '深色' : '浅色';
+    btn.title = light ? '切换为深色' : '切换为浅色';
   }
 }
 function toggleTheme(){
@@ -5422,7 +6046,7 @@ async function loadIfaceOptions(force){
   try{
     var data = await getJson('/api/interfaces');
     var items = Array.isArray(data.items) ? data.items : [];
-    var html = '<option value="">(auto)</option>';
+    var html = '<option value="">请选择默认网卡</option>';
     items.forEach(function(it){
       it = it || {};
       var name = String(it.name || '');
@@ -5454,7 +6078,7 @@ function setFreezeState(frozen){
   uiFrozen = !!frozen;
   var btn = qs('btn-freeze');
   if(btn){
-    btn.textContent = uiFrozen ? '\u6062\u590d\u540c\u6b65' : '\u51bb\u7ed3\u5217\u8868';
+    btn.textContent = uiFrozen ? '恢复同步' : '冻结列表';
     btn.classList.toggle('warn', uiFrozen);
   }
 }
@@ -5479,7 +6103,7 @@ function setLogPanelCollapsed(collapsed){
   if(collapsed) panel.classList.add('collapsed');
   else panel.classList.remove('collapsed');
   var btn = qs('log-panel-toggle');
-  if(btn) btn.textContent = collapsed ? '\u5c55\u5f00' : '\u6536\u8d77';
+  if(btn) btn.textContent = collapsed ? '展开' : '收起';
   syncBottomPanelLayout();
 }
 
@@ -5495,7 +6119,7 @@ function setMapPanelCollapsed(collapsed){
   if(collapsed) panel.classList.add('collapsed');
   else panel.classList.remove('collapsed');
   var btn = qs('map-panel-toggle');
-  if(btn) btn.textContent = collapsed ? '\u5c55\u5f00' : '\u6536\u8d77';
+  if(btn) btn.textContent = collapsed ? '展开' : '收起';
   syncBottomPanelLayout();
   if(!collapsed && map){
     setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 0);
@@ -5514,7 +6138,7 @@ function setApPanelCollapsed(collapsed){
   if(collapsed) panel.classList.add('collapsed');
   else panel.classList.remove('collapsed');
   var btn = qs('ap-panel-toggle');
-  if(btn) btn.textContent = collapsed ? '\u5c55\u5f00' : '\u6536\u8d77';
+  if(btn) btn.textContent = collapsed ? '展开' : '收起';
   syncBottomPanelLayout();
 }
 
@@ -5566,6 +6190,13 @@ function ensureMapMiniList(){
 function updateMapFullscreenButton(){
   var btn = qs('btn-map-fullscreen');
   if(!btn) return;
+  var allow = currentAppPage() === 'history';
+  btn.style.display = allow ? '' : 'none';
+  btn.disabled = !allow;
+  if(!allow){
+    btn.textContent = '全屏';
+    return;
+  }
   btn.textContent = isMapFullscreen() ? '退出全屏' : '全屏';
 }
 
@@ -5593,6 +6224,10 @@ function syncMapFullscreenUi(){
 async function toggleMapFullscreen(){
   var panel = qs('map-panel');
   if(!panel) return;
+  if(currentAppPage() !== 'history'){
+    showBanner('实时页不提供地图全屏，请切到历史记录使用。', 'info', 2600);
+    return;
+  }
   try{
     if(isMapFullscreen()){
       if(document.exitFullscreen) await document.exitFullscreen();
@@ -5631,9 +6266,8 @@ function renderMapMiniList(list){
   var box = ensureMapMiniList();
   if(!box) return;
   var panel = qs('map-panel');
-  var show = isMapFullscreen()
-    || !!(panel && panel.classList && panel.classList.contains('fullscreen'))
-    || ((document.body.getAttribute('data-page') || 'map') === 'map');
+  var show = currentAppPage() === 'history'
+    && (isMapFullscreen() || !!(panel && panel.classList && panel.classList.contains('fullscreen')));
   box.style.display = show ? 'block' : '';
   var rows = (Array.isArray(list) ? list : []).slice().filter(function(e){
     return !!String((e && e.sn) || '');
@@ -5652,21 +6286,23 @@ function renderMapMiniList(list){
     box.innerHTML = '<div class="mini-title">暂无飞机</div>';
     return;
   }
-  var html = '<div class="mini-title">勾选后显示轨迹</div>';
+  var html = '<div class="mini-title">历史记录 · 选择飞机查看轨迹</div>';
   rows.forEach(function(e, idx){
     e = e || {};
     var sn = String(e.sn || '');
     if(!sn) return;
-    var checked = isSnSelected(sn) ? ' checked' : '';
+    var model = String(e.model || 'N/A');
+    var checked = isHistoryTrackVisible(sn) ? ' checked' : '';
+    var chip = '<span class="track-color-chip" style="--track-color:'+escAttr(trackColorForSn(sn))+';'+(checked ? '' : 'display:none')+'" title="轨迹颜色"></span>';
     html += '<label class="mini-item"><input class="mini-sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+
-      '<span class="mono">#'+(idx+1)+'</span><span class="sn" title="'+esc(sn)+'">'+esc(sn)+'</span></label>';
+      chip+'<span class="mono">#'+(idx+1)+'</span><span class="sn" title="'+esc(sn)+'">'+esc(sn)+'</span><span class="mini-model" title="'+esc(model)+'">'+esc(model)+'</span></label>';
   });
   box.innerHTML = html;
   var cbs = box.querySelectorAll('.mini-sel-sn');
   for(var i=0;i<cbs.length;i++){
     cbs[i].addEventListener('change', function(ev){
       var sn = ev.target.getAttribute('data-sn') || '';
-      setSnSelected(sn, !!ev.target.checked);
+      setHistorySnVisible(sn, !!ev.target.checked);
       syncTableSelectionUi();
     });
   }
@@ -5697,9 +6333,14 @@ function syncTableSelectionUi(){
   var cbs = document.querySelectorAll('#tbody .sel-sn');
   var total = 0;
   var checked = 0;
+  var page = currentAppPage();
   for(var i=0;i<cbs.length;i++){
     var sn = String(cbs[i].getAttribute('data-sn') || '');
-    cbs[i].checked = isSnSelected(sn);
+    cbs[i].checked = (page === 'history') ? isHistoryTrackVisible(sn) : isSnSelected(sn);
+    var chip = cbs[i].parentNode ? cbs[i].parentNode.querySelector('.track-color-chip') : null;
+    if(chip) chip.style.display = cbs[i].checked ? '' : 'none';
+    var tr = cbs[i].closest ? cbs[i].closest('tr[data-sn]') : null;
+    if(tr) tr.classList.toggle('selected', !!cbs[i].checked);
     total += 1;
     if(cbs[i].checked) checked += 1;
   }
@@ -5720,12 +6361,18 @@ function buildExtraUi(){
     modal.id = 'info-modal';
     modal.className = 'info-modal';
     modal.innerHTML =
-      '<div class="info-card" role="dialog" aria-modal="true" aria-label="\u8be6\u60c5\u4fe1\u606f">'+
+      '<div class="info-card" role="dialog" aria-modal="true" aria-label="详情信息">'+
       '  <div class="info-card-hd"><span>详情信息</span><button id="info-card-close" class="info-card-close" type="button" title="关闭">×</button></div>'+
       '  <div id="info-card-body" class="info-card-body"></div>'+
       '</div>';
     document.body.appendChild(modal);
     modal.addEventListener('click', function(ev){
+      var btn = ev.target && ev.target.closest ? ev.target.closest('.export-track-btn[data-sn]') : null;
+      if(btn){
+        ev.preventDefault();
+        exportTrackForSn(btn.getAttribute('data-sn') || '');
+        return;
+      }
       if(ev.target === modal) hideInfoCard();
     });
   }
@@ -5744,7 +6391,7 @@ function buildExtraUi(){
   if(clearBtn && !qs('sniff-state')){
     var sniffStat = document.createElement('span');
     sniffStat.className = 'stat snf';
-    sniffStat.innerHTML = '\u91c7\u96c6 <b id="sniff-state" class="warn">-</b>';
+    sniffStat.innerHTML = '采集 <b id="sniff-state" class="warn">-</b>';
     clearBtn.parentNode.insertBefore(sniffStat, clearBtn);
   }
   if(clearBtn && !qs('btn-theme')){
@@ -5752,7 +6399,7 @@ function buildExtraUi(){
     themeBtn.className = 'btn-mini';
     themeBtn.id = 'btn-theme';
     themeBtn.type = 'button';
-    themeBtn.textContent = '\u6d45\u8272';
+    themeBtn.textContent = '浅色';
     clearBtn.parentNode.insertBefore(themeBtn, clearBtn);
   }
   if(clearBtn && !qs('btn-dji-lookup')){
@@ -5760,7 +6407,7 @@ function buildExtraUi(){
     djiBtn.className = 'btn-mini';
     djiBtn.id = 'btn-dji-lookup';
     djiBtn.type = 'button';
-    djiBtn.textContent = 'DJI\u67e5\u8be2';
+    djiBtn.textContent = 'DJI查询';
     clearBtn.parentNode.insertBefore(djiBtn, clearBtn);
   }
   if(clearBtn && !qs('btn-freeze')){
@@ -5768,7 +6415,7 @@ function buildExtraUi(){
     freezeBtn.className = 'btn-mini';
     freezeBtn.id = 'btn-freeze';
     freezeBtn.type = 'button';
-    freezeBtn.textContent = '\u51bb\u7ed3\u5217\u8868';
+    freezeBtn.textContent = '冻结列表';
     clearBtn.parentNode.insertBefore(freezeBtn, clearBtn);
   }
   if(clearBtn && !qs('btn-web-notify')){
@@ -5776,7 +6423,7 @@ function buildExtraUi(){
     notifyBtn.className = 'btn-mini';
     notifyBtn.id = 'btn-web-notify';
     notifyBtn.type = 'button';
-    notifyBtn.textContent = '\u7f51\u9875\u901a\u77e5';
+    notifyBtn.textContent = '网页通知';
     clearBtn.parentNode.insertBefore(notifyBtn, clearBtn);
   }
   if(clearBtn && !qs('btn-hw-assistant')){
@@ -5784,7 +6431,7 @@ function buildExtraUi(){
     hwBtn.className = 'btn-mini';
     hwBtn.id = 'btn-hw-assistant';
     hwBtn.type = 'button';
-    hwBtn.textContent = '\u786c\u4ef6\u52a9\u624b';
+    hwBtn.textContent = '硬件助手';
     clearBtn.parentNode.insertBefore(hwBtn, clearBtn);
   }
   if(clearBtn && !qs('btn-adv-open')){
@@ -5792,7 +6439,7 @@ function buildExtraUi(){
     advBtn.className = 'btn-mini';
     advBtn.id = 'btn-adv-open';
     advBtn.type = 'button';
-    advBtn.textContent = '\u9ad8\u7ea7\u8bbe\u7f6e';
+    advBtn.textContent = '高级设置';
     clearBtn.parentNode.insertBefore(advBtn, clearBtn);
   }
 
@@ -5808,92 +6455,92 @@ function buildExtraUi(){
     modal.className = 'adv-modal';
     modal.id = 'adv-modal';
     modal.innerHTML =
-      '<div class="adv-window" role="dialog" aria-modal="true" aria-label="\u9ad8\u7ea7\u8bbe\u7f6e">'+
-      '<div class="adv-window-hd"><span>\u9ad8\u7ea7\u8bbe\u7f6e</span><button class="btn-mini" id="btn-adv-close" type="button">\u5173\u95ed</button></div>'+
+      '<div class="adv-window" role="dialog" aria-modal="true" aria-label="高级设置">'+
+      '<div class="adv-window-hd"><span>高级设置</span><button class="btn-mini" id="btn-adv-close" type="button">关闭</button></div>'+
       '<div class="adv-body">'+
       '  <div class="adv-col">'+
       '    <div class="adv-row">'+
-      '      <label for="restart-args">\u53c2\u6570</label>'+
-      '      <input id="restart-args" class="adv-input" type="text" placeholder="\u4f8b\u5982: --no-tui --channel 6">'+
+      '      <label for="restart-args">参数</label>'+
+      '      <input id="restart-args" class="adv-input" type="text" placeholder="例如: --no-tui --channel 6">'+
       '    </div>'+
       '    <div class="adv-row" id="hw-assistant-row">'+
-      '      <label for="iface-select">\u786c\u4ef6\u914d\u7f6e\u52a9\u624b</label>'+
-      '      <select id="iface-select" class="adv-input"><option value="">(auto)</option></select>'+
-      '      <button class="btn-mini" id="btn-iface-refresh" type="button">\u5237\u65b0\u7f51\u5361</button>'+
+      '      <label for="iface-select">硬件配置助手</label>'+
+      '      <select id="iface-select" class="adv-input"><option value="">请选择默认网卡</option></select>'+
+      '      <button class="btn-mini" id="btn-iface-refresh" type="button">刷新网卡</button>'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label><input id="scan-wifi-fast" type="checkbox"> \u626b\u63cfWiFi\u5feb\u4f20(5GHz\u5e38\u89c1\u4fe1\u9053)</label>'+
+      '      <label><input id="scan-wifi-fast" type="checkbox"> 扫描WiFi快传(5GHz常见信道)</label>'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label><input id="opt-realtime-track" type="checkbox"> \u5b9e\u65f6\u8f68\u8ff9\uff08\u5728\u7ebf\u81ea\u52a8\u5c55\u793a\uff0c\u79bb\u7ebf2\u5206\u949f\u9690\u85cf\uff09</label>'+
+      '      <label><input id="opt-realtime-track" type="checkbox"> 实时轨迹（在线自动展示，离线2分钟隐藏）</label>'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label><input id="opt-track-2h" type="checkbox"> \u81ea\u52a8\u7b5b\u9009 2 \u5c0f\u65f6\u5185\u8f68\u8ff9</label>'+
+      '      <label><input id="opt-track-2h" type="checkbox"> 自动筛选 2 小时内轨迹</label>'+
       '    </div>'+
-      '    <div class="adv-note">\u8f68\u8ff9\u504f\u597d\u5df2\u4fdd\u5b58\u5230 Cookie</div>'+
+      '    <div class="adv-note">轨迹偏好已保存到 Cookie</div>'+
       '    <div class="adv-row">'+
-      '      <label for="base-name">\u57fa\u7ad9\u540d\u79f0</label>'+
-      '      <input id="base-name" class="adv-input" type="text" placeholder="\u4f8b\u5982: \u57fa\u7ad9A">'+
-      '    </div>'+
-      '    <div class="adv-row">'+
-      '      <label for="base-lat">\u57fa\u7ad9\u7eac\u5ea6</label>'+
-      '      <input id="base-lat" class="adv-input" type="text" inputmode="decimal" placeholder="\u4f8b\u5982: 30.0678192">'+
+      '      <label for="base-name">基站名称</label>'+
+      '      <input id="base-name" class="adv-input" type="text" placeholder="例如: 基站A">'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label for="base-lon">\u57fa\u7ad9\u7ecf\u5ea6</label>'+
-      '      <input id="base-lon" class="adv-input" type="text" inputmode="decimal" placeholder="\u4f8b\u5982: 121.1854406">'+
+      '      <label for="base-lat">基站纬度</label>'+
+      '      <input id="base-lat" class="adv-input" type="text" inputmode="decimal" placeholder="例如: 30.0678192">'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label for="base-zoom">\u57fa\u7ad9\u7f29\u653e</label>'+
+      '      <label for="base-lon">基站经度</label>'+
+      '      <input id="base-lon" class="adv-input" type="text" inputmode="decimal" placeholder="例如: 121.1854406">'+
+      '    </div>'+
+      '    <div class="adv-row">'+
+      '      <label for="base-zoom">基站缩放</label>'+
       '      <input id="base-zoom" class="adv-input" type="number" min="3" max="30" step="1" placeholder="13">'+
-      '      <button class="btn-mini" id="btn-base-save" type="button">\u4fdd\u5b58\u57fa\u7ad9</button>'+
+      '      <button class="btn-mini" id="btn-base-save" type="button">保存基站</button>'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label for="heading-ref">\u53c2\u8003\u822a\u5411(\u00b0)</label>'+
+      '      <label for="heading-ref">参考航向(°)</label>'+
       '      <input id="heading-ref" class="adv-input" type="number" min="0" max="359.99" step="0.1" placeholder="0">'+
       '    </div>'+
       '    <div class="adv-row">'+
-      '      <label for="map-idle-sec">\u81ea\u52a8\u56de\u4e2d\u51b7\u5374(s)</label>'+
+      '      <label for="map-idle-sec">自动回中冷却(s)</label>'+
       '      <input id="map-idle-sec" class="adv-input" type="number" min="5" max="600" step="1" placeholder="20">'+
       '    </div>'+
       '    <div class="adv-note" id="base-status">-</div>'+
       '    <div class="adv-note" id="iface-status">-</div>'+
       '    <div class="adv-actions">'+
-      '      <button class="btn-mini" id="btn-save-iface-default" type="button">\u4fdd\u5b58\u9ed8\u8ba4\u7f51\u5361</button>'+
+      '      <button class="btn-mini" id="btn-save-iface-default" type="button">保存默认网卡</button>'+
       '    </div>'+
       '    <div class="adv-actions">'+
-      '      <button class="btn-mini" id="btn-restart-once" type="button">\u4ec5\u672c\u6b21\u91cd\u542f</button>'+
-      '      <button class="btn-mini warn" id="btn-restart-save" type="button">\u4fdd\u5b58\u5e76\u91cd\u542f</button>'+
+      '      <button class="btn-mini" id="btn-restart-once" type="button">仅本次重启</button>'+
+      '      <button class="btn-mini warn" id="btn-restart-save" type="button">保存并重启</button>'+
       '    </div>'+
-      '    <div class="adv-note">DJI\u5730\u5740: <code id="dji-url-text">-</code></div>'+
-      '    <div class="adv-note">\u5f53\u524d\u53c2\u6570: <code id="restart-current-args">-</code></div>'+
-      '    <div class="adv-note">\u5df2\u4fdd\u5b58\u53c2\u6570: <code id="restart-saved-args">-</code></div>'+
+      '    <div class="adv-note">DJI地址: <code id="dji-url-text">-</code></div>'+
+      '    <div class="adv-note">当前参数: <code id="restart-current-args">-</code></div>'+
+      '    <div class="adv-note">已保存参数: <code id="restart-saved-args">-</code></div>'+
       '  </div>'+
       '  <div class="adv-col">'+
       '    <div class="adv-actions">'+
-      '      <button class="btn-mini" id="btn-config-load" type="button">\u8bfb\u53d6\u914d\u7f6e</button>'+
-      '      <button class="btn-mini" id="btn-config-save" type="button">\u4fdd\u5b58\u5e76\u70ed\u91cd\u8f7d</button>'+
+      '      <button class="btn-mini" id="btn-config-load" type="button">读取配置</button>'+
+      '      <button class="btn-mini" id="btn-config-save" type="button">保存并热重载</button>'+
       '    </div>'+
       '    <div class="adv-note" id="config-editor-status">-</div>'+
-      '    <textarea id="config-editor" class="cfg-editor" spellcheck="false" placeholder="\u5728\u8fd9\u91cc\u7f16\u8f91 rid_config.json"></textarea>'+
+      '    <textarea id="config-editor" class="cfg-editor" spellcheck="false" placeholder="在这里编辑 rid_config.json"></textarea>'+
       '    <div class="adv-row">'+
-      '      <label for="track-sn-select">\u5386\u53f2/\u8f68\u8ff9</label>'+
-      '      <select id="track-sn-select" class="adv-input"><option value="">\u8bf7\u9009\u62e9\u98de\u673a</option></select>'+
+      '      <label for="track-sn-select">历史/轨迹</label>'+
+      '      <select id="track-sn-select" class="adv-input"><option value="">请选择飞机</option></select>'+
       '    </div>'+
       '    <div class="adv-actions">'+
-      '      <button class="btn-mini warn" id="btn-history-delete" type="button">\u5220\u9664\u8be5\u98de\u673a</button>'+
-      '      <button class="btn-mini" id="btn-track-clear-one" type="button">\u6e05\u7a7a\u8be5\u673a\u8f68\u8ff9</button>'+
-      '      <button class="btn-mini warn" id="btn-track-clear-all" type="button">\u6e05\u7a7a\u5168\u90e8\u8f68\u8ff9</button>'+
+      '      <button class="btn-mini warn" id="btn-history-delete" type="button">删除该飞机</button>'+
+      '      <button class="btn-mini" id="btn-track-clear-one" type="button">清空该机轨迹</button>'+
+      '      <button class="btn-mini warn" id="btn-track-clear-all" type="button">清空全部轨迹</button>'+
       '    </div>'+
       '    <div class="adv-note">TOOLS</div>'+
       '    <div class="adv-actions">'+
-      '      <button class="btn-mini" id="btn-tools-export-all" type="button">\u5bfc\u51fa\u5168\u90e8\u8be6\u60c5</button>'+
-      '      <button class="btn-mini" id="btn-tools-import-all" type="button">\u5bfc\u5165\u5168\u90e8\u8be6\u60c5</button>'+
+      '      <button class="btn-mini" id="btn-tools-export-all" type="button">导出全部详情</button>'+
+      '      <button class="btn-mini" id="btn-tools-import-all" type="button">导入全部详情</button>'+
       '      <input id="tools-import-all-file" type="file" accept=".json,application/json" style="display:none">'+
       '    </div>'+
       '    <div class="adv-actions">'+
-      '      <button class="btn-mini" id="btn-tools-export-track" type="button">\u5bfc\u51fa\u5355\u673a\u8f68\u8ff9</button>'+
-      '      <button class="btn-mini" id="btn-tools-import-track" type="button">\u5bfc\u5165\u5355\u673a\u8f68\u8ff9</button>'+
+      '      <button class="btn-mini" id="btn-tools-export-track" type="button">导出单机轨迹</button>'+
+      '      <button class="btn-mini" id="btn-tools-import-track" type="button">导入单机轨迹</button>'+
       '      <input id="tools-import-track-file" type="file" accept=".json,application/json" style="display:none">'+
       '    </div>'+
       '    <div class="adv-note" id="tools-status">-</div>'+
@@ -5911,7 +6558,7 @@ function buildExtraUi(){
     var panel = document.createElement('div');
     panel.className = 'panel ap-panel';
     panel.innerHTML =
-      '<div class="panel-hdr">&#x1F4CB; \u5b9e\u65f6AP\u5217\u8868 <span class="sub" id="ap-list-count">0</span></div>'+
+      '<div class="panel-hdr">📋 实时AP列表 <span class="sub" id="ap-list-count">0</span></div>'+
       '<div class="aplist" id="aplist"></div>';
     bottom.appendChild(panel);
   }
@@ -5920,7 +6567,7 @@ function buildExtraUi(){
     restoreBtn.className = 'btn-mini';
     restoreBtn.id = 'bottom-restore';
     restoreBtn.type = 'button';
-    restoreBtn.textContent = '\u5c55\u5f00\u5e95\u90e8\u9762\u677f';
+    restoreBtn.textContent = '展开底部面板';
     restoreBtn.addEventListener('click', function(){
       setMapPanelCollapsed(false);
       setLogPanelCollapsed(false);
@@ -6083,7 +6730,8 @@ function buildExtraUi(){
     if(cb){
       ev.stopPropagation();
       var snCb = cb.getAttribute('data-sn') || '';
-      setSnSelected(snCb, !!cb.checked);
+      if(currentAppPage() === 'history') setHistorySnVisible(snCb, !!cb.checked);
+      else setSnSelected(snCb, !!cb.checked);
       return;
     }
     var btn = ev.target && ev.target.closest ? ev.target.closest('.copy-sn') : null;
@@ -6124,9 +6772,9 @@ function buildExtraUi(){
     setSnSelected(sn, true);
     hideInfoCard();
     if(typeof window.__ridNavSet === 'function'){
-      window.__ridNavSet('map');
+      window.__ridNavSet('history');
     }else{
-      document.body.setAttribute('data-page', 'map');
+      document.body.setAttribute('data-page', 'history');
       setTimeout(function(){ if(map) map.invalidateSize(false); }, 80);
     }
   });
@@ -6170,7 +6818,7 @@ function applyMeta(meta){
   }
   var baseNameInput = qs('base-name');
   if(baseNameInput && !baseNameInput.dataset.edited){
-    baseNameInput.value = String(metaState.base_name || '\u57fa\u7ad9');
+    baseNameInput.value = String(metaState.base_name || '基站');
   }
   var baseLatInput = qs('base-lat');
   if(baseLatInput && !baseLatInput.dataset.edited){
@@ -6202,9 +6850,9 @@ function applyMeta(meta){
   var baseStatus = qs('base-status');
   if(baseStatus){
     if(baseCfg.ok){
-      baseStatus.textContent = '\u57fa\u7ad9: ' + baseCfg.name + ' (' + baseCfg.lat.toFixed(6) + ', ' + baseCfg.lon.toFixed(6) + ') z' + baseCfg.zoom + ' | \u53c2\u8003\u822a\u5411 ' + mapHeadingRefDeg.toFixed(1) + '\u00b0 | \u56de\u4e2d\u51b7\u5374 ' + mapAutoCenterIdleSec + 's';
+      baseStatus.textContent = '基站: ' + baseCfg.name + ' (' + baseCfg.lat.toFixed(6) + ', ' + baseCfg.lon.toFixed(6) + ') z' + baseCfg.zoom + ' | 参考航向 ' + mapHeadingRefDeg.toFixed(1) + '° | 回中冷却 ' + mapAutoCenterIdleSec + 's';
     } else {
-      baseStatus.textContent = '\u57fa\u7ad9\u672a\u914d\u7f6e | \u53c2\u8003\u822a\u5411 ' + mapHeadingRefDeg.toFixed(1) + '\u00b0 | \u56de\u4e2d\u51b7\u5374 ' + mapAutoCenterIdleSec + 's';
+      baseStatus.textContent = '基站未配置 | 参考航向 ' + mapHeadingRefDeg.toFixed(1) + '° | 回中冷却 ' + mapAutoCenterIdleSec + 's';
     }
   }
   var newBaseSig = baseSignature(metaState);
@@ -6258,13 +6906,13 @@ function applySniffStatus(meta){
     badge.classList.remove('ok','warn','err');
     if(state === 'ok'){
       badge.classList.add('ok');
-      badge.textContent = '\u6b63\u5e38';
+      badge.textContent = '正常';
     } else if(state === 'error'){
       badge.classList.add('err');
-      badge.textContent = '\u5f02\u5e38';
+      badge.textContent = '异常';
     } else {
       badge.classList.add('warn');
-      badge.textContent = '\u8b66\u544a';
+      badge.textContent = '警告';
     }
   }
 
@@ -6277,10 +6925,10 @@ function applySniffStatus(meta){
     sniffBannerPrevState = state;
     return;
   }
-  var tip = (state === 'error' ? '\u91c7\u96c6\u5f02\u5e38\uff1a' : '\u91c7\u96c6\u544a\u8b66\uff1a') + (msg || '\u672a\u77e5');
+  var tip = (state === 'error' ? '采集异常：' : '采集告警：') + (msg || '未知');
   if(iface) tip += ' [iface: '+iface+']';
   if(idle > 0) tip += ' (' + Math.round(idle) + 's)';
-  if(lastPkt && lastPkt !== '-') tip += '  \u4e0a\u6b21\u5e27: ' + lastPkt;
+  if(lastPkt && lastPkt !== '-') tip += '  上次帧: ' + lastPkt;
   banner.textContent = tip;
   banner.className = 'sniff-banner ' + (state === 'error' ? 'error' : 'warn');
   banner.style.display = 'block';
@@ -6303,7 +6951,7 @@ function openHardwareAssistant(){
 function openDjiLookup(){
   var url = String(metaState.dji_lookup_url || '');
   if(!url){
-    alert('\u672a\u914d\u7f6eDJI\u67e5\u8be2\u5730\u5740');
+    alert('未配置DJI查询地址');
     return;
   }
   var mobile = false;
@@ -6352,17 +7000,17 @@ async function copySn(sn){
   if(btn){
     var old = btn.textContent;
     btn.classList.add('done');
-    btn.textContent = ok ? '\u5df2' : '!';
+    btn.textContent = ok ? '已' : '!';
     setTimeout(function(){ btn.classList.remove('done'); btn.textContent = old; }, 1200);
   }
 }
 
 async function clearHistory(){
   if(clearHistoryBusy) return;
-  if(!confirm('\u6e05\u7a7a\u5386\u53f2\u65e0\u4eba\u673a\u8bb0\u5f55\uff0c\u5e76\u5220\u9664\u672c\u5730\u7f13\u5b58\u6587\u4ef6\uff1f')) return;
+  if(!confirm('清空历史无人机记录，并删除本地缓存文件？')) return;
   var btn = qs('btn-clear-history');
   clearHistoryBusy = true;
-  if(btn){ btn.disabled = true; btn.textContent = '\u6e05\u7a7a\u4e2d...'; }
+  if(btn){ btn.disabled = true; btn.textContent = '清空中...'; }
   try{
     var data = await postJson('/api/history/clear', {});
     selectedSnSet = {};
@@ -6372,7 +7020,7 @@ async function clearHistory(){
   }catch(e){
     showBanner('清空失败: ' + ((e && e.message) ? e.message : e), 'warn', 4200);
   }finally{
-    if(btn){ btn.disabled = false; btn.textContent = '\u6e05\u7a7a\u5386\u53f2'; }
+    if(btn){ btn.disabled = false; btn.textContent = '清空历史'; }
     clearHistoryBusy = false;
   }
 }
@@ -6445,7 +7093,7 @@ async function restartProgram(saveCfg){
   var ifaceSel = qs('iface-select');
   var iface = ifaceSel ? String(ifaceSel.value || '').trim() : '';
   var scanFast = !!(qs('scan-wifi-fast') && qs('scan-wifi-fast').checked);
-  var tip = saveCfg ? '\u4fdd\u5b58\u914d\u7f6e\u5e76\u91cd\u542f\u7a0b\u5e8f\uff1f' : '\u6309\u5f53\u524d\u8f93\u5165\u53c2\u6570\u91cd\u542f\u7a0b\u5e8f\uff08\u4ec5\u672c\u6b21\uff09\uff1f';
+  var tip = saveCfg ? '保存配置并重启程序？' : '按当前输入参数重启程序（仅本次）？';
   if(!confirm(tip)) return;
   restartBusy = true;
   applyMeta(metaState);
@@ -6518,7 +7166,7 @@ async function saveBaseConfig(){
   var zoomRaw = zoomInput ? String(zoomInput.value || '').trim() : '';
   var headingRaw = headingInput ? String(headingInput.value || '').trim() : '';
   var idleRaw = idleInput ? String(idleInput.value || '').trim() : '';
-  if(!name) name = '\u57fa\u7ad9';
+  if(!name) name = '基站';
 
   var lat = (latRaw === '') ? null : numOrNull(latRaw);
   var lon = (lonRaw === '') ? null : numOrNull(lonRaw);
@@ -6528,25 +7176,25 @@ async function saveBaseConfig(){
   zoom = Math.max(3, Math.min(30, zoom));
   idleSec = Math.max(5, Math.min(600, idleSec));
   if(headingRef == null || !isFinite(Number(headingRef))){
-    if(st) st.textContent = '\u53c2\u8003\u822a\u5411\u9700\u4e3a\u6570\u5b57';
+    if(st) st.textContent = '参考航向需为数字';
     return;
   }
   headingRef = normDeg(headingRef);
 
   if((lat === null) !== (lon === null)){
-    if(st) st.textContent = '\u57fa\u7ad9\u5750\u6807\u9700\u8981\u540c\u65f6\u586b\u5199\u7ecf\u7eac\u5ea6';
+    if(st) st.textContent = '基站坐标需要同时填写经纬度';
     return;
   }
   if(lat !== null && (lat < -90 || lat > 90)){
-    if(st) st.textContent = '\u7eac\u5ea6\u8303\u56f4\u9700\u5728 -90 ~ 90';
+    if(st) st.textContent = '纬度范围需在 -90 ~ 90';
     return;
   }
   if(lon !== null && (lon < -180 || lon > 180)){
-    if(st) st.textContent = '\u7ecf\u5ea6\u8303\u56f4\u9700\u5728 -180 ~ 180';
+    if(st) st.textContent = '经度范围需在 -180 ~ 180';
     return;
   }
 
-  if(st) st.textContent = '\u4fdd\u5b58\u4e2d...';
+  if(st) st.textContent = '保存中...';
   if(btn) btn.disabled = true;
   try{
     var data = await postJson('/api/web/base/save', {
@@ -6574,12 +7222,12 @@ async function saveBaseConfig(){
     applyMeta(metaState);
     applyBaseMarker(true);
     if(st){
-      st.textContent = '\u57fa\u7ad9\u5df2\u4fdd\u5b58: ' + String(data.base_name || '\u57fa\u7ad9');
+      st.textContent = '基站已保存: ' + String(data.base_name || '基站');
     }
-    showBanner('\u57fa\u7ad9\u914d\u7f6e\u5df2\u4fdd\u5b58', 'ok', 2200);
+    showBanner('基站配置已保存', 'ok', 2200);
   }catch(e){
-    if(st) st.textContent = '\u4fdd\u5b58\u5931\u8d25: ' + ((e && e.message) ? e.message : e);
-    showBanner('\u57fa\u7ad9\u4fdd\u5b58\u5931\u8d25', 'warn', 4200);
+    if(st) st.textContent = '保存失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('基站保存失败', 'warn', 4200);
   }finally{
     if(btn) btn.disabled = false;
   }
@@ -6607,7 +7255,7 @@ async function saveDefaultIfaceConfig(){
     if(scanFastEl){ delete scanFastEl.dataset.edited; }
     applyMeta(metaState);
     if(st){
-      st.textContent = '默认网卡已保存: ' + (data.iface_selected || '(auto)') + '，WiFi快传=' + (data.scan_wifi_fast ? '开' : '关');
+      st.textContent = '默认网卡已保存: ' + (data.iface_selected || '未设置') + '，WiFi快传=' + (data.scan_wifi_fast ? '开' : '关');
     }
     showBanner('默认网卡配置已保存', 'ok', 2200);
   }catch(e){
@@ -6629,7 +7277,7 @@ function renderAps(aps, total){
     qs('ap-list-count').textContent = (t > rows.length) ? (rows.length + '/' + t) : String(rows.length);
   }
   if(!rows.length){
-    box.innerHTML = '<div class="ap-empty">\u6682\u65e0AP\u6570\u636e</div>';
+    box.innerHTML = '<div class="ap-empty">暂无AP数据</div>';
     return;
   }
   var wide = (Number(box.clientWidth || 0) >= 780);
@@ -6642,19 +7290,15 @@ function renderAps(aps, total){
     return br - ar;
   });
   var html = '';
-  html += '<div class="aprow hd"><div class="idx">#</div><div>MAC</div><div>\u4fe1\u53f7</div><div>\u7c7b\u578b</div><div>SSID</div><div>\u8bbe\u5907</div></div>';
+  html += '<div class="aprow hd"><div class="idx">#</div><div>MAC</div><div>信号</div><div>类型</div><div>SSID</div><div>设备</div></div>';
   for(var i=0;i<rows.length;i++){
     var a = rows[i] || {};
     var rssi = (a.rssi==null) ? 'N/A' : (a.rssi+'dBm');
     var mac = String(a.mac || '');
     var ssid = String(a.ssid || '(hidden)');
     var vt = String(a.vendor_type || 'AP');
-    var vn = String(a.vendor || '\u672a\u77e5');
-    if(vt === '\u9397\u5b34\u6e80/\u9424\u5059') vt = '\u624b\u673a/\u70ed\u70b9';
-    if(vt === '\u7487\u6550/AP') vt = '\u8def\u7531/AP';
-    if(vt === '\u9429\u78cb\u7e5b/Wi-Fi') vt = '\u76f4\u8fde/Wi-Fi';
-    if(vn === '\u93c8\u7141') vn = '\u672a\u77e5';
-    if(vn === '\u52a0\u8f7d\u4e2d' && Number(a.age || 0) >= 10) vn = '\u672a\u77e5';
+    var vn = String(a.vendor || '未知');
+    if(vn === '加载中' && Number(a.age || 0) >= 10) vn = '未知';
     html += '<div class="aprow">'+
       '<div class="idx">'+(i+1)+'</div>'+
       '<div class="mono ap-mac" title="'+esc(mac)+'">'+esc(wide ? mac : shortMac(mac))+'</div>'+
@@ -6664,6 +7308,60 @@ function renderAps(aps, total){
       '<div class="vendor-col"><div class="vendor" title="'+esc(vn)+'">'+esc(vn)+'</div></div>'+
       '</div>';
   }
+  box.innerHTML = html;
+}
+
+function renderLiveCards(list){
+  var box = qs('live-card-list');
+  if(!box) return;
+  var rows = liveRecentRows(list).slice();
+  rows.sort(function(a,b){
+    var al = !!(a && a.lost), bl = !!(b && b.lost);
+    if(al !== bl) return al ? 1 : -1;
+    var ar = (a && a.rssi != null) ? Number(a.rssi) : -9999;
+    var br = (b && b.rssi != null) ? Number(b.rssi) : -9999;
+    return br - ar;
+  });
+  if(qs('live-card-count')) qs('live-card-count').textContent = String(rows.length);
+  if(!rows.length){
+    box.innerHTML = '<div class="ap-empty">暂无实时目标</div>';
+    return;
+  }
+  var html = '';
+  rows.forEach(function(e, idx){
+    e = e || {};
+    var sn = String(e.sn || '');
+    var selected = isSnSelected(sn);
+    var cls = 'live-card' + (selected ? ' selected' : '') + (e.lost ? ' lost' : '');
+    var rssi = e.rssi == null ? 'N/A' : (String(e.rssi) + 'dBm');
+    var model = String(e.model || 'N/A');
+    var latlon = (e.lat == null || e.lon == null) ? 'N/A' : (fmt(e.lat,6,'') + ', ' + fmt(e.lon,6,''));
+    var pilot = (e.pilot_lat == null || e.pilot_lon == null) ? 'N/A' : (fmt(e.pilot_lat,6,'') + ', ' + fmt(e.pilot_lon,6,''));
+    var alt = fmt(e.alt,1,'m');
+    var spd = fmt(e.spd,2,'m/s');
+    var heading = String(e.dir || '-');
+    var stateCls = e.lost ? 'lost' : 'live';
+    var stateTxt = e.lost ? '5分钟内离线' : '在线';
+    html += '<article class="'+cls+'" data-sn="'+escAttr(sn)+'">'
+      + '<div class="live-card-top">'
+      +   '<div class="live-card-title" title="'+esc(model)+'">'+esc(model)+'</div>'
+      +   '<div class="live-card-actions">'
+      +     '<label class="live-card-pick"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+(selected?' checked':'')+'><span>选中</span></label>'
+      +     '<span class="live-card-state '+stateCls+'">'+esc(stateTxt)+'</span>'
+      +   '</div>'
+      + '</div>'
+      + '<div class="live-card-snrow"><span class="label">SN</span><span class="live-card-sntext" title="'+esc(sn)+'">'+esc(sn || '-')+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制 SN">⧉</button></div>'
+      + '<div class="live-card-grid">'
+      +   '<div class="live-card-item"><div class="k">经纬度</div><div class="v">'+esc(latlon)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">高度</div><div class="v">'+esc(alt)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">速度</div><div class="v">'+esc(spd)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">航向</div><div class="v">'+esc(heading)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">飞手坐标</div><div class="v">'+esc(pilot)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">信号 / 更新</div><div class="v">'+esc(rssi + ' / ' + String(e.age_text || fmtAge(e.age)))+'</div></div>'
+      + '</div>'
+      + '<div class="live-card-foot"><span>最后数据包 '+esc(String(e.last_pkt_time || e.capture_time || '-'))+'</span><span>#'+(idx+1)+'</span></div>'
+      + '</article>';
+  });
   box.innerHTML = html;
 }
 
@@ -6684,7 +7382,7 @@ function connect(){
 }
 function setWsState(ok){
   qs('dot-ws').className = ok ? 'on' : '';
-  qs('ws-status').textContent = ok ? '\u5b9e\u65f6' : '\u91cd\u8fde\u4e2d';
+  qs('ws-status').textContent = ok ? '实时' : '重连中';
 }
 
 function onData(d){
@@ -6702,17 +7400,18 @@ function onData(d){
   latestDroneRows = list.slice();
   syncSelectedFromRows(latestDroneRows);
   refreshAutoTrackSelection(latestDroneRows);
-  effectiveTrackSnList().forEach(function(sn){ ensureTrackLoaded(sn, false); });
+  displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){ ensureTrackLoaded(sn, false); });
 
   var rows='';
+  var page = currentAppPage();
   if(!list.length){
-    rows='<tr><td colspan="10" class="empty">\u6682\u65e0\u6570\u636e</td></tr>';
+    rows='<tr><td colspan="10" class="empty">暂无数据</td></tr>';
   } else {
     list.forEach(function(e, idx){
       e = e || {};
       var sn = String(e.sn || '');
       if(sn) latestDroneMap[sn] = e;
-      var selected = isSnSelected(sn);
+      var selected = (page === 'history') ? isHistoryTrackVisible(sn) : isSnSelected(sn);
       var snSrc = snSourceText(e);
       var scanType = scanTypeText(e);
       var cls = e.lost ? 'lost' : (sn.indexOf('MAC:')===0 ? 'mac' : 'live');
@@ -6726,10 +7425,11 @@ function onData(d){
       var lastSeenCls = fieldCellAttrs(sn, 'last_seen', 'mono');
       var lastPktCls = fieldCellAttrs(sn, 'last_pkt_time', 'mono');
       var checked = selected ? ' checked' : '';
+      var chip = '<span class="track-color-chip" style="--track-color:'+escAttr(trackColorForSn(sn))+';'+(selected ? '' : 'display:none')+'" title="轨迹颜色"></span>';
       rows += '<tr class="'+cls+' data-row" data-sn="'+escAttr(sn)+'">'+
-        '<td><div class="sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'></div></td>'+
+        '<td><div class="sel-wrap track-sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+chip+'</div></td>'+
         '<td class="idx-cell">'+(idx+1)+'</td>'+
-        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+esc(sn)+'" title="\u590d\u5236SN">&#x29C9;</button></div></td>'+
+        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+esc(sn)+'" title="复制SN">⧉</button></div></td>'+
         '<td'+modelCls+'>'+esc(e.model || 'N/A')+'</td>'+
         '<td'+rssiCls+'>'+fmt(e.rssi,0,'dBm')+'</td>'+
         '<td'+pktCls+'>'+esc(e.pkts==null?'0':e.pkts)+'</td>'+
@@ -6742,14 +7442,16 @@ function onData(d){
   }
   qs('tbody').innerHTML = rows;
   syncTableSelectionUi();
+  renderLiveCards(list);
   renderMapMiniList(list);
   refreshTrackMgrOptions(list);
   ensureHighlightAnimation();
 
   var box = qs('logbox');
-  var auto = qs('autoscroll').checked;
+  var autoEl = qs('autoscroll');
+  var auto = !autoEl || autoEl.checked;
   var logs = Array.isArray(d.logs) ? d.logs : [];
-  if(lastLogsSeq !== d.logs_seq || box.childElementCount !== logs.length){
+  if(box && (lastLogsSeq !== d.logs_seq || box.childElementCount !== logs.length)){
     box.innerHTML='';
     var frag=document.createDocumentFragment();
     for(var i=0;i<logs.length;i++){
@@ -6763,7 +7465,7 @@ function onData(d){
     box.appendChild(frag);
     lastLogsSeq = d.logs_seq;
   }
-  if(auto) box.scrollTop=box.scrollHeight;
+  if(box && auto) box.scrollTop=box.scrollHeight;
 
   if(lastApsSeq !== d.aps_seq){
     renderAps(d.aps || [], d.aps_total || 0);
@@ -6771,7 +7473,7 @@ function onData(d){
   }
 
   latestMapRows = Array.isArray(d.map_drones) ? d.map_drones : (Array.isArray(d.drones) ? d.drones : []);
-  effectiveTrackSnList().forEach(function(sn){
+  displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){
     var e = latestDroneMap[sn];
     if(e && Number(e.track_count || 0) !== Number((trackCache[sn] || []).length)){
       ensureTrackLoaded(sn, true);
@@ -6782,6 +7484,7 @@ function onData(d){
 }
 
 loadTrackPrefs();
+consumeFreezeOnHomeRequest();
 applyTheme(loadThemePref());
 buildExtraUi();
 connect();
@@ -6791,12 +7494,26 @@ var motionState = {};
 var COLORS = ['#58a6ff','#3fb950','#d29922','#d2a8ff','#79c0ff','#ff7b72'];
 var TRACK_COLORS = ['#1f9dff','#12b886','#ff8f1f','#ff4d6d','#8b5cf6','#06b6d4','#84cc16','#eab308'];
 var colorIdx = {};
+var LIVE_RECENT_WINDOW_SEC = LIVE_TRACK_WINDOW_SEC;
 window.addEventListener('resize', function(){
   if(map) map.invalidateSize(false);
   if(latestApsRows.length){
     renderAps(latestApsRows, latestApsTotal);
   }
 });
+function currentAppPage(){
+  var p = String(document.body.getAttribute('data-page') || 'live');
+  return p === 'history' ? 'history' : 'live';
+}
+function liveRecentRows(rows){
+  return (Array.isArray(rows) ? rows : []).filter(function(e){
+    if(!e || e.archived) return false;
+    if(e.lost) return false;
+    var age = Number(e.age || 0);
+    if(!isFinite(age) || age < 0) age = 0;
+    return age <= LIVE_RECENT_WINDOW_SEC;
+  });
+}
 
 function _gcjOutOfChina(lat, lon){
   return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
@@ -6891,7 +7608,7 @@ function initMap(){
     subdomains:['1','2','3','4'],
     maxZoom:30,
     maxNativeZoom:18,
-    attribution:'&copy; \u9ad8\u5fb7\u5730\u56fe'
+    attribution:'&copy; 高德地图'
   }).addTo(map);
   var b = baseFromMeta(metaState);
   if(b.ok) map.setView([b.lat, b.lon], b.zoom);
@@ -6950,6 +7667,266 @@ function trackColorForSn(sn){
   return TRACK_COLORS[h % TRACK_COLORS.length];
 }
 
+function fmtReplayTime(ts){
+  var n = Number(ts);
+  if(!isFinite(n) || n <= 0) return '-';
+  try{
+    return new Date(n * 1000).toLocaleString();
+  }catch(_e){
+    return '-';
+  }
+}
+function replaySliderToTs(val){
+  if(replayState.min == null || replayState.max == null) return null;
+  var span = Number(replayState.max) - Number(replayState.min);
+  if(!isFinite(span) || span <= 0) return Number(replayState.min);
+  var v = Math.max(0, Math.min(1000, Number(val || 0)));
+  return Number(replayState.min) + span * (v / 1000);
+}
+function replayTsToSlider(ts){
+  if(replayState.min == null || replayState.max == null) return 0;
+  var span = Number(replayState.max) - Number(replayState.min);
+  if(!isFinite(span) || span <= 0) return 0;
+  var v = (Number(ts) - Number(replayState.min)) / span;
+  return Math.max(0, Math.min(1000, Math.round(v * 1000)));
+}
+function ensureTrackReplayCard(){
+  var panel = qs('map-panel');
+  if(!panel) return null;
+  var card = qs('track-replay-card');
+  if(card) return card;
+  card = document.createElement('aside');
+  card.id = 'track-replay-card';
+  card.className = 'track-replay-card';
+  card.innerHTML =
+    '<div class="track-replay-head"><div><div class="track-replay-title">轨迹重放</div><div id="track-replay-count" class="track-replay-sub">-</div></div><button class="btn-mini" id="btn-replay-play" type="button">播放</button></div>'+
+    '<div class="track-replay-time" id="track-replay-time">-</div>'+
+    '<div class="track-replay-ranges">'+
+    '  <input id="replay-range-start" type="range" min="0" max="1000" step="1" value="0" aria-label="重放开始时间">'+
+    '  <input id="replay-range-end" type="range" min="0" max="1000" step="1" value="1000" aria-label="重放结束时间">'+
+    '</div>'+
+    '<div class="track-replay-controls">'+
+    '  <button class="btn-mini" id="btn-replay-reset" type="button">全段</button>'+
+    '  <label class="track-speed-label">速度<select id="replay-speed"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select></label>'+
+    '</div>'+
+    '<div class="track-replay-status" id="track-replay-status">选择历史轨迹后可重放。</div>';
+  panel.appendChild(card);
+  var start = qs('replay-range-start');
+  var end = qs('replay-range-end');
+  if(start) start.addEventListener('input', onReplayRangeInput);
+  if(end) end.addEventListener('input', onReplayRangeInput);
+  var play = qs('btn-replay-play');
+  if(play) play.addEventListener('click', function(){ setReplayPlaying(!replayState.playing); });
+  var reset = qs('btn-replay-reset');
+  if(reset) reset.addEventListener('click', resetReplayRange);
+  var speed = qs('replay-speed');
+  if(speed) speed.addEventListener('change', function(){ replayState.speed = Math.max(0.25, Number(speed.value || 1)); });
+  return card;
+}
+function collectReplayBounds(){
+  var minTs = null;
+  var maxTs = null;
+  displayTrackSnList('history', latestDroneRows).forEach(function(sn){
+    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    for(var i=0;i<tr.length;i++){
+      var ts = _trackTsSec(tr[i]);
+      if(ts == null) continue;
+      if(minTs == null || ts < minTs) minTs = ts;
+      if(maxTs == null || ts > maxTs) maxTs = ts;
+    }
+  });
+  return {min:minTs, max:maxTs};
+}
+function refreshReplayBounds(keepRange){
+  ensureTrackReplayCard();
+  var b = collectReplayBounds();
+  if(b.min == null || b.max == null || b.max <= b.min){
+    stopReplayTimer();
+    replayState.min = replayState.max = replayState.start = replayState.end = replayState.cursor = null;
+    replayState.userRange = false;
+    renderReplayCard();
+    clearReplayMarkers();
+    return;
+  }
+  var oldMin = replayState.min;
+  var oldMax = replayState.max;
+  replayState.min = b.min;
+  replayState.max = b.max;
+  if(!keepRange || !replayState.userRange || replayState.start == null || replayState.end == null || oldMin == null || oldMax == null){
+    replayState.start = b.min;
+    replayState.end = b.max;
+    replayState.cursor = b.min;
+  }else{
+    replayState.start = Math.max(b.min, Math.min(b.max, Number(replayState.start)));
+    replayState.end = Math.max(replayState.start, Math.min(b.max, Number(replayState.end)));
+    replayState.cursor = Math.max(replayState.start, Math.min(replayState.end, Number(replayState.cursor || replayState.start)));
+  }
+  renderReplayCard();
+}
+function renderReplayCard(){
+  var card = ensureTrackReplayCard();
+  if(!card) return;
+  var page = currentAppPage();
+  card.style.display = (page === 'history') ? '' : 'none';
+  var count = displayTrackSnList('history', latestDroneRows).length;
+  var countEl = qs('track-replay-count');
+  if(countEl) countEl.textContent = count ? ('显示 ' + count + ' 条轨迹') : '暂无轨迹';
+  var startEl = qs('replay-range-start');
+  var endEl = qs('replay-range-end');
+  var hasRange = replayState.min != null && replayState.max != null && replayState.max > replayState.min;
+  if(startEl) startEl.disabled = !hasRange;
+  if(endEl) endEl.disabled = !hasRange;
+  if(startEl && hasRange) startEl.value = String(replayTsToSlider(replayState.start));
+  if(endEl && hasRange) endEl.value = String(replayTsToSlider(replayState.end));
+  var play = qs('btn-replay-play');
+  if(play){
+    play.disabled = !hasRange;
+    play.textContent = replayState.playing ? '暂停' : '播放';
+  }
+  var reset = qs('btn-replay-reset');
+  if(reset) reset.disabled = !hasRange;
+  var time = qs('track-replay-time');
+  if(time){
+    time.textContent = hasRange
+      ? (fmtReplayTime(replayState.start) + ' 至 ' + fmtReplayTime(replayState.end))
+      : '暂无可重放轨迹';
+  }
+  var status = qs('track-replay-status');
+  if(status){
+    if(!hasRange) status.textContent = count ? '轨迹正在加载或时间点不足。' : '历史记录默认显示全部轨迹。';
+    else status.textContent = replayState.playing ? ('播放到 ' + fmtReplayTime(replayState.cursor)) : '拖动区间滑条筛选轨迹，点击播放开始重放。';
+  }
+}
+function onReplayRangeInput(){
+  if(replayState.min == null || replayState.max == null) return;
+  var startEl = qs('replay-range-start');
+  var endEl = qs('replay-range-end');
+  var startTs = replaySliderToTs(startEl ? startEl.value : 0);
+  var endTs = replaySliderToTs(endEl ? endEl.value : 1000);
+  if(startTs == null || endTs == null) return;
+  if(startTs > endTs){
+    var tmp = startTs;
+    startTs = endTs;
+    endTs = tmp;
+  }
+  replayState.start = startTs;
+  replayState.end = endTs;
+  replayState.userRange = true;
+  replayState.cursor = Math.max(startTs, Math.min(endTs, Number(replayState.cursor || startTs)));
+  renderReplayCard();
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
+function resetReplayRange(){
+  if(replayState.min == null || replayState.max == null) return;
+  replayState.start = replayState.min;
+  replayState.end = replayState.max;
+  replayState.cursor = replayState.start;
+  replayState.userRange = false;
+  renderReplayCard();
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
+function stopReplayTimer(){
+  if(replayState.timer){
+    clearInterval(replayState.timer);
+    replayState.timer = null;
+  }
+  replayState.playing = false;
+}
+function setReplayPlaying(on){
+  if(!on){
+    stopReplayTimer();
+    renderReplayCard();
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    return;
+  }
+  if(replayState.start == null || replayState.end == null || replayState.end <= replayState.start) return;
+  if(replayState.cursor == null || replayState.cursor >= replayState.end){
+    replayState.cursor = replayState.start;
+  }
+  replayState.playing = true;
+  if(replayState.timer) clearInterval(replayState.timer);
+  replayState.timer = setInterval(function(){
+    var span = Math.max(1, Number(replayState.end) - Number(replayState.start));
+    var step = Math.max(1, span / 240) * Math.max(0.25, Number(replayState.speed || 1));
+    replayState.cursor = Math.min(Number(replayState.end), Number(replayState.cursor || replayState.start) + step);
+    if(replayState.cursor >= replayState.end){
+      stopReplayTimer();
+    }
+    renderReplayCard();
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+  }, 250);
+  renderReplayCard();
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
+function replayWindowEnd(){
+  if(replayState.playing && replayState.cursor != null) return replayState.cursor;
+  return replayState.end;
+}
+function filterTrackByReplay(track){
+  var arr = Array.isArray(track) ? track.slice() : [];
+  if(currentAppPage() !== 'history') return arr;
+  if(replayState.start == null || replayState.end == null) return arr;
+  var start = Number(replayState.start);
+  var end = Number(replayWindowEnd());
+  if(!isFinite(start) || !isFinite(end) || end < start) return arr;
+  return arr.filter(function(p){
+    var ts = _trackTsSec(p);
+    return ts == null ? true : (ts >= start && ts <= end);
+  });
+}
+function clearReplayMarkers(){
+  if(!map) return;
+  Object.keys(replayMarkers).forEach(function(sn){
+    try{ map.removeLayer(replayMarkers[sn]); }catch(_e){}
+    delete replayMarkers[sn];
+  });
+}
+function updateReplayMarkers(){
+  if(!map) return;
+  if(currentAppPage() !== 'history' || replayState.start == null || replayWindowEnd() == null){
+    clearReplayMarkers();
+    return;
+  }
+  var active = {};
+  var end = Number(replayWindowEnd());
+  var start = Number(replayState.start);
+  displayTrackSnList('history', latestDroneRows).forEach(function(sn){
+    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    var point = null;
+    for(var i=0;i<tr.length;i++){
+      var p = tr[i] || {};
+      var ts = _trackTsSec(p);
+      if(ts == null || ts < start || ts > end) continue;
+      point = p;
+    }
+    if(!point) return;
+    var lat = Number(point.lat), lon = Number(point.lon);
+    if(!isFinite(lat) || !isFinite(lon)) return;
+    active[sn] = true;
+    var pos = toMapLatLng(lat, lon);
+    var col = trackColorForSn(sn);
+    var popup = '<b>'+esc(sn)+'</b><br>重放位置<br>'+fmtReplayTime(point.ts);
+    if(replayMarkers[sn]){
+      replayMarkers[sn].setLatLng(pos).setStyle({color:'#fff', fillColor:col}).setPopupContent(popup);
+    }else{
+      replayMarkers[sn] = L.circleMarker(pos, {
+        radius:7,
+        color:'#fff',
+        weight:2,
+        fillColor:col,
+        fillOpacity:0.96,
+        opacity:0.95
+      }).addTo(map).bindPopup(popup);
+    }
+  });
+  Object.keys(replayMarkers).forEach(function(sn){
+    if(!active[sn]){
+      map.removeLayer(replayMarkers[sn]);
+      delete replayMarkers[sn];
+    }
+  });
+}
+
 function droneIcon(color, lost, headingDeg, selected, indexNo){
   var op = lost ? 0.34 : 1.0;
   var rot = Number(headingDeg);
@@ -6978,7 +7955,7 @@ function pilotIcon(color, lost){
   var fill = color || '#ffb84d';
   var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24">'
     +'<rect x="3.5" y="3.5" width="17" height="17" rx="4" ry="4" fill="'+fill+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.4"/>'
-    +'<text x="12" y="16" text-anchor="middle" font-size="12" fill="#fff" font-family="monospace" font-weight="bold">&#x1F464;</text>'
+    +'<text x="12" y="16" text-anchor="middle" font-size="12" fill="#fff" font-family="monospace" font-weight="bold">👤</text>'
     +'</svg>';
   return L.divIcon({
     html: svg, className:'', iconSize:[48,48], iconAnchor:[24,24], popupAnchor:[0,-20]
@@ -6989,28 +7966,35 @@ function updateMap(drones){
   if(!map) return;
   applyBaseMarker(false);
   var autoState = mapAutoState();
+  var page = currentAppPage();
   var rows = Array.isArray(drones) ? drones : [];
-  var selected = selectedSnList();
+  var selected = (page === 'history') ? historyVisibleSnList(rows) : selectedSnList();
   var selectedSet = {};
   selected.forEach(function(sn){ selectedSet[sn] = true; });
-  var trackSn = effectiveTrackSnList();
-  var liveAir = rows.filter(function(e){
+  var recentRows = liveRecentRows(rows);
+  var trackSn = displayTrackSnList(page, rows);
+  var liveAir = (page === 'live' ? recentRows : rows).filter(function(e){
     var sn = String((e && e.sn) || '');
     if(!sn) return false;
-    if(!selectedSet[sn]) return false;
+    if(page === 'history' && !selectedSet[sn]) return false;
     if(e.lat==null || e.lon==null) return false;
     return true;
   });
-  var livePilot = rows.filter(function(e){
+  var livePilot = (page === 'live' ? recentRows : rows).filter(function(e){
     var sn = String((e && e.sn) || '');
-    if(!selectedSet[sn]) return false;
+    if(!sn) return false;
+    if(page === 'history' && !selectedSet[sn]) return false;
     if(e.pilot_lat==null || e.pilot_lon==null) return false;
     return true;
   });
-  var mapHintTxt =
-    '\u663e\u793a\u98de\u673a:' + liveAir.length + '  \u5df2\u9009:' + selected.length + '  \u8f68\u8ff9:' + trackSn.length + '  \u98de\u624b:' + livePilot.length;
+  var mapHintTxt = '';
+  if(page === 'live'){
+    mapHintTxt = '实时目标:' + recentRows.length + '  飞机:' + liveAir.length + '  飞手:' + livePilot.length + '  时窗:5分钟';
+  }else{
+    mapHintTxt = '显示飞机:' + liveAir.length + '  已选:' + selected.length + '  轨迹:' + trackSn.length + '  飞手:' + livePilot.length;
+  }
   if(!autoState.allow){
-    mapHintTxt += '  |  \u81ea\u52a8\u56de\u4e2d\u51b7\u5374 ' + Math.ceil(autoState.remain) + 's';
+    mapHintTxt += '  |  自动回中冷却 ' + Math.ceil(autoState.remain) + 's';
   }
   document.getElementById('map-hint').textContent = mapHintTxt;
 
@@ -7058,12 +8042,12 @@ function updateMap(drones){
 
     var popup = '<b>'+sn+'</b><br>'+e.model+'<br>'
       +(e.lat!=null?e.lat.toFixed(5):'-')+', '+(e.lon!=null?e.lon.toFixed(5):'-')
-      +'<br>\u9ad8\u5ea6: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
-      +'<br>\u901f\u5ea6: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
-      +'<br>\u4fe1\u53f7: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
-      +'<br>\u822a\u5411: '+(isFinite(Number(heading))?Number(heading).toFixed(1)+'°':'N/A')
-      +'<br>\u822a\u5411\u5dee: '+(isFinite(Number(headingDelta))?((headingDelta>=0?'+':'')+Number(headingDelta).toFixed(1)+'°'):'N/A')
-      +'<br>\u6570\u636e\u66f4\u65b0: '+esc(String(e.age_text || fmtAge(e.age)));
+      +'<br>高度: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
+      +'<br>速度: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
+      +'<br>信号: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
+      +'<br>航向: '+(isFinite(Number(heading))?Number(heading).toFixed(1)+'°':'N/A')
+      +'<br>航向差: '+(isFinite(Number(headingDelta))?((headingDelta>=0?'+':'')+Number(headingDelta).toFixed(1)+'°'):'N/A')
+      +'<br>数据更新: '+esc(String(e.age_text || fmtAge(e.age)));
 
     var airPos = toMapLatLng(latRaw, lonRaw);
     var dispNo = idx + 1;
@@ -7076,12 +8060,13 @@ function updateMap(drones){
         .addTo(map).bindPopup(popup);
       (function(snLocal){
         markers[snLocal].on('click', function(){
-          setSnSelected(snLocal, true);
+          if(currentAppPage() === 'history') setHistorySnVisible(snLocal, true);
+          else setSnSelected(snLocal, true);
         });
       })(sn);
     }
 
-    if(isSel && isFinite(Number(heading))){
+    if(page === 'history' && isSel && isFinite(Number(heading))){
       var spd = Number(e.spd);
       var refSpd = (isFinite(spd) && spd > 0) ? spd : 8.0;
       var startOffset = 22;
@@ -7114,9 +8099,9 @@ function updateMap(drones){
     var col = colorIdx[sn] || '#ffb84d';
     var ptxt = String(e.pilot_loc_type_text || e.pilot_loc_type || 'unknown');
     var pilotPos = toMapLatLng(e.pilot_lat, e.pilot_lon);
-    var popup = '<b>'+sn+'</b><br>\u98de\u624b\u4f4d\u7f6e<br>'
+    var popup = '<b>'+sn+'</b><br>飞手位置<br>'
       +(e.pilot_lat!=null?e.pilot_lat.toFixed(5):'-')+', '+(e.pilot_lon!=null?e.pilot_lon.toFixed(5):'-')
-      +'<br>\u7c7b\u578b: '+esc(ptxt);
+      +'<br>类型: '+esc(ptxt);
     if(pilotMarkers[sn]){
       pilotMarkers[sn].setLatLng(pilotPos)
         .setIcon(pilotIcon(col, e.lost))
@@ -7126,17 +8111,19 @@ function updateMap(drones){
         .addTo(map).bindPopup(popup);
       (function(snLocal){
         pilotMarkers[snLocal].on('click', function(){
-          setSnSelected(snLocal, true);
+          if(currentAppPage() === 'history') setHistorySnVisible(snLocal, true);
+          else setSnSelected(snLocal, true);
         });
       })(sn);
     }
   });
 
   var activeTrack = {};
+  var trackLatLngsAll = [];
   trackSn.forEach(function(sn){
     sn = String(sn || '');
     if(!sn) return;
-    var tr = filterTrackByPrefs(Array.isArray(trackCache[sn]) ? trackCache[sn] : []);
+    var tr = filterTrackForDisplay(Array.isArray(trackCache[sn]) ? trackCache[sn] : [], page);
     if(tr.length < 2){
       if(trackLines[sn]){
         map.removeLayer(trackLines[sn]);
@@ -7148,7 +8135,11 @@ function updateMap(drones){
     for(var i=0;i<tr.length;i++){
       var p = tr[i] || {};
       var lat = Number(p.lat), lon = Number(p.lon);
-      if(isFinite(lat) && isFinite(lon)) latlngs.push(toMapLatLng(lat, lon));
+      if(isFinite(lat) && isFinite(lon)){
+        var ll = toMapLatLng(lat, lon);
+        latlngs.push(ll);
+        trackLatLngsAll.push(ll);
+      }
     }
     if(latlngs.length < 2){
       if(trackLines[sn]){
@@ -7201,6 +8192,14 @@ function updateMap(drones){
 
   if(!liveAir.length){
     var b = baseFromMeta(metaState);
+    if(page === 'history' && trackLatLngsAll.length && autoState.allow && (!map._rid_fitted || !!map._rid_user_moved)){
+      if(trackLatLngsAll.length === 1) map.setView(trackLatLngsAll[0], 15);
+      else map.fitBounds(L.latLngBounds(trackLatLngsAll).pad(0.14));
+      map._rid_fitted = true;
+      map._rid_user_moved = false;
+      document.getElementById('map-hint').textContent = '历史轨迹 ' + trackSn.length + ' 架';
+      return;
+    }
     if(b.ok){
       if(autoState.allow && (!map._rid_base_fitted || !!map._rid_user_moved)){
         map.setView([b.lat, b.lon], b.zoom);
@@ -7208,18 +8207,23 @@ function updateMap(drones){
         map._rid_user_moved = false;
       }
       if(autoState.allow){
-        document.getElementById('map-hint').textContent='\u672a\u52fe\u9009\u98de\u673a\u6216\u65e0\u53ef\u663e\u793a\u5750\u6807';
+        document.getElementById('map-hint').textContent = (page === 'live')
+          ? '实时页暂无可显示目标'
+          : '未勾选飞机或无可显示坐标';
       }else{
-        document.getElementById('map-hint').textContent='\u672a\u52fe\u9009\u98de\u673a\u6216\u65e0\u53ef\u663e\u793a\u5750\u6807 | \u81ea\u52a8\u56de\u4e2d\u51b7\u5374 ' + Math.ceil(autoState.remain) + 's';
+        document.getElementById('map-hint').textContent = ((page === 'live')
+          ? '实时页暂无可显示目标'
+          : '未勾选飞机或无可显示坐标')
+          + ' | 自动回中冷却 ' + Math.ceil(autoState.remain) + 's';
       }
     } else {
-      document.getElementById('map-hint').textContent='\u65e0\u5750\u6807\u6570\u636e';
+      document.getElementById('map-hint').textContent='无坐标数据';
     }
     return;
   }
 
   // first-time fit bounds for visible aircraft only
-  var latlngs = liveAir.map(function(e){ return toMapLatLng(e.lat, e.lon); });
+  var latlngs = liveAir.map(function(e){ return toMapLatLng(e.lat, e.lon); }).concat(page === 'history' ? trackLatLngsAll : []);
   if(latlngs.length && autoState.allow && (!map._rid_fitted || !!map._rid_user_moved)){
     if(latlngs.length === 1) map.setView(latlngs[0], 14);
     else map.fitBounds(L.latLngBounds(latlngs).pad(0.3));
@@ -7240,7 +8244,7 @@ _HW_PAGE_HTML = """<!doctype html><html lang="zh"><head>
   --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
   --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
   --bg:#201f1e;--bg2:#252423;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;
-  --muted:#c8c6c4;--blue:#2899f5;--green:#92c353;--warn:#f7630c;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03)
+  --muted:#c8c6c4;--blue:#2899f5;--green:#92c353;--warn:#f7630c;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03);--app-vh:100dvh
 }
 body.theme-light{
   --bg:#f3f2f1;--bg2:#edebe9;--card:#ffffff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;
@@ -7304,7 +8308,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
         <h2>当前状态</h2>
         <div class="status-grid">
           <div class="status-tile"><div class="k">采集状态</div><div class="v" id="tile-state">-</div><div class="s" id="tile-msg">-</div></div>
-          <div class="status-tile"><div class="k">当前网卡</div><div class="v" id="tile-active-iface">-</div><div class="s" id="tile-selected-iface">默认/自动</div></div>
+          <div class="status-tile"><div class="k">当前网卡</div><div class="v" id="tile-active-iface">-</div><div class="s" id="tile-selected-iface">默认/未设置</div></div>
           <div class="status-tile"><div class="k">当前信道</div><div class="v" id="tile-channel">-</div><div class="s" id="tile-extra">-</div></div>
         </div>
         <div id="status" class="status-line" style="margin-top:12px">-</div>
@@ -7312,7 +8316,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
       <div class="card">
         <h2>控制面板</h2>
         <div class="grid">
-          <div class="field"><label for="iface">目标网卡</label><select id="iface"><option value="">(auto)</option></select></div>
+          <div class="field"><label for="iface">目标网卡</label><select id="iface"><option value="">请选择默认网卡</option></select></div>
           <div class="field"><label for="channel">目标信道</label><input id="channel" type="number" min="1" max="196" value="6"></div>
         </div>
         <div class="btn-group" style="margin-top:14px">
@@ -7420,7 +8424,7 @@ async function refreshStatus(){
     const items = Array.isArray(d.items) ? d.items : [];
     const sel = qs('iface');
     const old = sel.value;
-    sel.innerHTML = '<option value="">(auto)</option>' + items.map(it=>{
+    sel.innerHTML = '<option value="">请选择固定网卡</option>' + items.map(it=>{
       const n = String(it.name||'');
       const m = String(it.mode||'');
       const g = it.supports_5g ? '5G' : '2.4G';
@@ -7431,7 +8435,7 @@ async function refreshStatus(){
     qs('tile-state').textContent = String(snf.state || '-');
     qs('tile-msg').textContent = String(snf.msg || '-');
     qs('tile-active-iface').textContent = String(d.active_iface || '-');
-    qs('tile-selected-iface').textContent = '选择: ' + String(curIface() || '(auto)');
+    qs('tile-selected-iface').textContent = '选择: ' + String(curIface() || '未绑定');
     qs('tile-channel').textContent = String((snf.channel || d.current_channel || '-') || '-');
     qs('tile-extra').textContent = '网卡数: ' + String(items.length || 0);
     showStatus(`采集网卡: ${d.active_iface||'-'}\n状态: ${snf.state||'-'}\n说明: ${snf.msg||'-'}`);
@@ -7472,6 +8476,11 @@ refreshStatus();
 </body></html>"""
 
 _MAIN_PAGE_PATCH_CSS = r"""
+:root{
+  --app-vh:100dvh;
+  --rid-home-header-height:108px;
+  --rid-home-content-height:calc(var(--app-vh) - var(--rid-home-header-height));
+}
 header.app-shell-header{
   margin:12px 12px 0;
   padding:10px 12px;
@@ -7544,8 +8553,8 @@ header.app-shell-header h1{
 }
 .main-live-stats .stat b{font-weight:700}
 .app-tab-nav{
-  display:inline-grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:3px;
-  width:auto;min-width:320px;margin:0;
+  display:inline-grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;padding:3px;
+  width:auto;min-width:300px;margin:0;
   border:1px solid var(--border);background:var(--panel2);border-radius:4px;
   box-shadow:0 1px 2px rgba(0,0,0,.05)
 }
@@ -7604,19 +8613,73 @@ body.theme-light .btn-mini,body.theme-light .header-link-btn,body.theme-light .a
 }
 body.theme-light .btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 40%, var(--border));color:var(--warn)}
 body.app-paged{grid-template-rows:auto minmax(0,1fr) auto}
-.app-pages{min-height:0;padding:0 14px 10px;display:block}
+.app-pages{min-height:0;padding:0 14px 10px;display:block;height:max(320px,var(--rid-home-content-height))}
 .app-page{display:none;min-height:0;height:100%}
-body[data-page="map"] .app-page[data-page="map"],
-body[data-page="list"] .app-page[data-page="list"],
-body[data-page="more"] .app-page[data-page="more"]{display:block}
-body[data-page="map"] .app-page[data-page="map"] .panel{height:calc(100dvh - 108px)}
-body[data-page="map"] .app-page[data-page="map"] #map{height:100%}
-body[data-page="list"] .tbl-wrap{height:calc(100dvh - 110px);overflow:auto}
-body[data-page="list"] .tbl-wrap table{min-width:100%}
-body[data-page="more"] .bottom{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:14px;height:calc(100dvh - 110px)}
-body[data-page="more"] .bottom .panel{min-height:0;display:flex;flex-direction:column}
-body[data-page="more"] .bottom .panel .logbox,
-body[data-page="more"] .bottom .panel .aplist{flex:1;min-height:0;max-height:none}
+body[data-page="live"] .app-page[data-page="live"],
+body[data-page="history"] .app-page[data-page="history"]{display:block}
+.live-layout{display:grid;grid-template-columns:minmax(340px,30vw) minmax(0,1fr);gap:14px;height:100%;min-height:0}
+.live-card-panel{border:1px solid var(--border);background:var(--panel);border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08);display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.live-card-head{padding:12px 14px;border-bottom:1px solid var(--border);font:600 14px/1 var(--font-ui);color:var(--txt);display:flex;justify-content:space-between;gap:10px}
+.live-card-list{padding:10px;display:grid;gap:10px;overflow:auto;min-height:0;align-content:start}
+.live-card{border:1px solid var(--border);background:var(--panel2);border-radius:4px;padding:12px;display:grid;gap:10px;cursor:pointer;transition:background-color .14s ease,border-color .14s ease,transform .14s ease,box-shadow .14s ease}
+.live-card:hover{transform:translateY(-1px);border-color:var(--blue);box-shadow:0 2px 8px var(--glow)}
+.live-card.selected{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 10%, var(--panel2))}
+.live-card.lost{opacity:.72}
+.live-card-top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}
+.live-card-title{font:700 20px/1.12 var(--font-ui);letter-spacing:.01em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live-card-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.live-card-pick{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
+.live-card-state{display:inline-flex;align-items:center;padding:3px 8px;border:1px solid var(--border);border-radius:999px;font:600 11px/1 var(--font-ui);color:var(--dim)}
+.live-card-state.live{color:var(--green);border-color:color-mix(in srgb, var(--green) 40%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--panel2))}
+.live-card-state.lost{color:var(--warn);border-color:color-mix(in srgb, var(--warn) 38%, var(--border));background:color-mix(in srgb, var(--warn) 8%, var(--panel2))}
+.live-card-snrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center}
+.live-card-snrow .label{font-size:11px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}
+.live-card-sntext{font:700 13px/1.25 var(--font-mono);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live-card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.live-card-item{border:1px solid color-mix(in srgb, var(--border) 84%, transparent);border-radius:4px;padding:8px 9px;background:color-mix(in srgb, var(--panel) 74%, var(--panel2))}
+.live-card-item .k{font-size:11px;color:var(--dim);line-height:1;text-transform:uppercase;letter-spacing:.04em}
+.live-card-item .v{margin-top:6px;font:600 13px/1.35 var(--font-ui);word-break:break-word}
+.live-card-foot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--dim);font-size:12px}
+.live-map-slot{min-height:0;height:100%;display:flex;flex-direction:column}
+.live-map-slot .panel{height:100%}
+.live-map-slot #map{height:100%}
+.history-layout{display:grid;grid-template-rows:minmax(240px,1fr) minmax(240px,1fr);gap:14px;height:100%;min-height:0}
+.history-table-slot,.history-map-slot{min-height:0;display:flex;flex-direction:column}
+.history-table-slot .tbl-wrap,.history-map-slot .panel{height:100%;min-height:0}
+.history-table-slot .tbl-wrap{overflow:auto}
+.history-table-slot .tbl-wrap table{min-width:100%}
+.history-map-slot #map{height:100%}
+.track-sel-wrap{gap:6px}
+.track-color-chip{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--track-color,#1f9dff);box-shadow:0 0 0 2px color-mix(in srgb, var(--track-color,#1f9dff) 24%, transparent);flex:0 0 auto}
+.track-replay-card{
+  display:none;
+  position:absolute;
+  right:14px;
+  top:62px;
+  bottom:14px;
+  z-index:1200;
+  width:clamp(260px,25%,360px);
+  border:1px solid var(--border);
+  border-radius:4px;
+  background:color-mix(in srgb, var(--panel) 94%, transparent);
+  backdrop-filter:blur(8px);
+  box-shadow:0 12px 24px rgba(0,0,0,.18);
+  padding:12px;
+  overflow:auto;
+}
+#map-panel.history-mounted .track-replay-card{display:block}
+.track-replay-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px}
+.track-replay-title{font:700 15px/1.2 var(--font-ui);color:var(--txt)}
+.track-replay-sub,.track-replay-status{margin-top:5px;color:var(--dim);font-size:12px;line-height:1.45}
+.track-replay-time{border:1px solid var(--border);border-radius:4px;background:var(--panel2);padding:8px 10px;font-size:12px;line-height:1.45;color:var(--txt);margin-bottom:10px}
+.track-replay-ranges{display:grid;gap:8px;margin:10px 0}
+.track-replay-ranges input{width:100%;accent-color:var(--blue)}
+.track-replay-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.track-speed-label{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
+.track-speed-label select{height:30px;border:1px solid var(--border);border-radius:4px;background:var(--panel2);color:var(--txt);padding:4px 6px}
+.app-page[data-page="ops"]{display:none!important}
+.app-page[data-page="ops"] .bottom .panel .logbox,
+.app-page[data-page="ops"] .bottom .panel .aplist{flex:1;min-height:0;max-height:none}
 #map-panel-toggle,#log-panel-toggle,#ap-panel-toggle,#bottom-restore{display:none!important}
 #map-panel .panel-hdr,#log-panel .panel-hdr,#ap-panel .panel-hdr{cursor:default!important}
 .app-page .panel{border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08);animation:officeFade .16s ease-out both}
@@ -7638,11 +8701,7 @@ body[data-page="more"] .bottom .panel .aplist{flex:1;min-height:0;max-height:non
 }
 .app-page .panel-hdr .sub{color:var(--dim)}
 .app-page .panel-hdr label{color:var(--dim)}
-.app-page[data-page="map"] .map-mini-list{display:block}
-.app-page[data-page="map"] .panel.map-panel{position:relative}
-.app-page[data-page="map"] .map-mini-list{
-  width:min(340px,32vw);max-height:42vh;top:58px;right:14px;
-}
+.app-page .panel.map-panel{position:relative}
 .zone-alarm{
   position:fixed;inset:18px;display:none;z-index:90;border:2px solid rgba(255,79,79,.92);
   border-radius:4px;box-shadow:0 0 0 999px rgba(255,0,0,.12), inset 0 0 0 1px rgba(255,80,80,.18);
@@ -7663,12 +8722,18 @@ body[data-page="more"] .bottom .panel .aplist{flex:1;min-height:0;max-height:non
 @media (max-width: 960px){
   header.app-shell-header{gap:8px}
   .app-tab-nav{min-width:286px}
-  body[data-page="more"] .bottom{grid-template-columns:1fr;height:auto}
-  body[data-page="list"] .tbl-wrap{height:auto;max-height:calc(100dvh - 128px)}
-  body[data-page="map"] .app-page[data-page="map"] .panel{height:calc(100dvh - 126px)}
-  .app-page[data-page="map"] .map-mini-list{width:min(94vw,320px);right:8px;top:52px;max-height:40vh}
+  .live-layout{grid-template-columns:1fr;height:auto}
+  .live-card-panel{max-height:40vh}
+  .history-layout{grid-template-rows:minmax(220px,1fr) minmax(300px,1fr);height:auto}
+  .history-table-slot .tbl-wrap{height:auto;max-height:max(260px,var(--rid-home-content-height))}
+  .track-replay-card{left:10px;right:10px;top:auto;bottom:10px;width:auto;max-height:42%}
+  body[data-page="live"] .live-map-slot .panel{height:max(360px,calc(var(--rid-home-content-height) - 40vh - 14px))}
   .main-shell-top,.main-head-side,.main-menu-actions,.main-live-stats{gap:6px}
   header.app-shell-header h1{font-size:18px}
+}
+@media (max-width: 720px){
+  .live-card-grid{grid-template-columns:1fr}
+  .live-card-title{font-size:17px}
 }
 """
 
@@ -7679,6 +8744,24 @@ _MAIN_PAGE_PATCH_JS = r"""
   var alarmRects=[];
   var alarmOverlayHideTimer=null;
   var alarmLastSig='';
+  function syncHomeViewport(){
+    var vp = window.visualViewport;
+    var vh = Math.max(320, Math.round((vp && vp.height) ? vp.height : window.innerHeight || 0));
+    document.documentElement.style.setProperty('--app-vh', vh + 'px');
+    var header = document.querySelector('header.app-shell-header') || document.querySelector('header');
+    var headerBudget = 108;
+    if(header && header.getBoundingClientRect){
+      var rect = header.getBoundingClientRect();
+      var cs = window.getComputedStyle(header);
+      headerBudget = Math.ceil(rect.top + rect.height + (parseFloat(cs.marginBottom) || 0) + 14);
+    }
+    var contentH = Math.max(320, vh - headerBudget);
+    document.documentElement.style.setProperty('--rid-home-header-height', headerBudget + 'px');
+    document.documentElement.style.setProperty('--rid-home-content-height', contentH + 'px');
+    if(map){
+      setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 40);
+    }
+  }
   function ensureZoneOverlay(){
     var el = document.getElementById('zone-alarm');
     if(el) return el;
@@ -7690,18 +8773,50 @@ _MAIN_PAGE_PATCH_JS = r"""
     return el;
   }
   function navSet(page){
-    var p = (page === 'list' || page === 'more') ? page : 'map';
+    var p = (page === 'history') ? 'history' : 'live';
+    if(p === 'live' && isMapFullscreen()){
+      try{
+        if(document.exitFullscreen) document.exitFullscreen();
+        else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+      }catch(_e){}
+    }
     document.body.setAttribute('data-page', p);
     cookieSet(PAGE_COOKIE, p, 365);
     var tabs = document.querySelectorAll('.app-tab-btn');
     for(var i=0;i<tabs.length;i++){
       tabs[i].classList.toggle('active', tabs[i].getAttribute('data-page') === p);
     }
-    if(p === 'map'){
+    mountMainMapPanel(p);
+    displayTrackSnList(p, latestDroneRows).forEach(function(sn){ ensureTrackLoaded(sn, false); });
+    refreshReplayBounds(true);
+    if(p === 'live'){
       setTimeout(function(){ if(map) map.invalidateSize(false); }, 80);
     }
+    renderLiveCards(latestDroneRows);
+    renderMapMiniList(latestDroneRows);
+    syncTableSelectionUi();
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    syncHomeViewport();
   }
   window.__ridNavSet = navSet;
+  function mountMainMapPanel(page){
+    var panel = qs('map-panel');
+    var liveSlot = qs('live-map-slot');
+    var historySlot = qs('history-map-slot');
+    if(!panel || !liveSlot || !historySlot) return;
+    var target = (page === 'history') ? historySlot : liveSlot;
+    if(panel.parentNode !== target){
+      target.appendChild(panel);
+    }
+    panel.classList.toggle('history-mounted', page === 'history');
+    panel.classList.toggle('live-mounted', page !== 'history');
+    ensureTrackReplayCard();
+    renderReplayCard();
+    updateMapFullscreenButton();
+    if(map){
+      setTimeout(function(){ try{ map.invalidateSize(false); }catch(_e){} }, 40);
+    }
+  }
   function neutralizeCollapseHeader(hdr){
     if(!hdr || hdr.getAttribute('data-no-collapse') === '1') return;
     hdr.setAttribute('data-no-collapse', '1');
@@ -7781,13 +8896,12 @@ _MAIN_PAGE_PATCH_JS = r"""
       nav.id = 'app-tab-nav';
       nav.className = 'app-tab-nav';
       nav.innerHTML =
-        '<button class="app-tab-btn" data-page="map" type="button">地图</button>'+
-        '<button class="app-tab-btn" data-page="list" type="button">飞机列表</button>'+
-        '<button class="app-tab-btn" data-page="more" type="button">其他</button>';
+        '<button class="app-tab-btn" data-page="live" type="button">实时</button>'+
+        '<button class="app-tab-btn" data-page="history" type="button">历史记录</button>';
       nav.addEventListener('click', function(ev){
         var btn = ev.target && ev.target.closest ? ev.target.closest('.app-tab-btn') : null;
         if(!btn) return;
-        navSet(btn.getAttribute('data-page') || 'map');
+        navSet(btn.getAttribute('data-page') || 'live');
       });
       header.appendChild(nav);
     }
@@ -7801,6 +8915,19 @@ _MAIN_PAGE_PATCH_JS = r"""
       btn.addEventListener('click', function(){ location.href = '/settings'; });
       clearBtn.parentNode.insertBefore(btn, clearBtn);
     }
+    if(clearBtn && !qs('btn-logs')){
+      var logBtn = document.createElement('button');
+      logBtn.id = 'btn-logs';
+      logBtn.className = 'btn-mini header-link-btn';
+      logBtn.type = 'button';
+      logBtn.textContent = '日志';
+      logBtn.addEventListener('click', function(){ location.href = '/logs'; });
+      clearBtn.parentNode.insertBefore(logBtn, clearBtn);
+    }
+    ['btn-freeze','btn-web-notify','btn-clear-history'].forEach(function(id){
+      var node = qs(id);
+      if(node && node.parentNode) node.parentNode.removeChild(node);
+    });
     var advBtn = qs('btn-adv-open'); if(advBtn && advBtn.parentNode) advBtn.parentNode.removeChild(advBtn);
     var hwBtn = qs('btn-hw-assistant'); if(hwBtn && hwBtn.parentNode) hwBtn.parentNode.removeChild(hwBtn);
     var advModal = qs('adv-modal'); if(advModal && advModal.parentNode) advModal.parentNode.removeChild(advModal);
@@ -7817,7 +8944,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     var bottom = document.querySelector('.bottom');
     var mapEl = qs('map');
     var mapPanel = mapEl && mapEl.closest ? mapEl.closest('.panel') : null;
-    if(!header || !listWrap || !bottom || !mapPanel) return;
+    if(!header || !listWrap || !mapPanel) return;
     document.body.classList.add('app-paged');
     var pages = document.getElementById('app-pages');
     if(!pages){
@@ -7835,11 +8962,62 @@ _MAIN_PAGE_PATCH_JS = r"""
       pages.appendChild(el);
       return el;
     }
-    ensurePage('map').appendChild(mapPanel);
-    ensurePage('list').appendChild(listWrap);
-    ensurePage('more').appendChild(bottom);
+    var livePage = ensurePage('live');
+    var liveLayout = qs('live-layout');
+    if(!liveLayout){
+      liveLayout = document.createElement('div');
+      liveLayout.id = 'live-layout';
+      liveLayout.className = 'live-layout';
+      liveLayout.innerHTML = '<aside class="live-card-panel"><div class="live-card-head"><span>实时目标</span><span id="live-card-count">0</span></div><div id="live-card-list" class="live-card-list"></div></aside><div id="live-map-slot" class="live-map-slot"></div>';
+      livePage.appendChild(liveLayout);
+    }
+    var historyPage = ensurePage('history');
+    var historyLayout = qs('history-layout');
+    if(!historyLayout){
+      historyLayout = document.createElement('div');
+      historyLayout.id = 'history-layout';
+      historyLayout.className = 'history-layout';
+      historyLayout.innerHTML = '<div id="history-table-slot" class="history-table-slot"></div><div id="history-map-slot" class="history-map-slot"></div>';
+      historyPage.appendChild(historyLayout);
+    }
+    var liveCards = qs('live-card-list');
+    if(liveCards && liveCards.getAttribute('data-bound') !== '1'){
+      liveCards.setAttribute('data-bound', '1');
+      liveCards.addEventListener('click', function(ev){
+        var copyBtn = ev.target && ev.target.closest ? ev.target.closest('.copy-sn') : null;
+        if(copyBtn){
+          ev.preventDefault();
+          ev.stopPropagation();
+          copySn(copyBtn.getAttribute('data-sn') || '');
+          return;
+        }
+        var cb = ev.target && ev.target.closest ? ev.target.closest('.sel-sn') : null;
+        var card = ev.target && ev.target.closest ? ev.target.closest('.live-card[data-sn]') : null;
+        if(!card) return;
+        var sn = card.getAttribute('data-sn') || '';
+        if(cb){
+          setSnSelected(sn, !!cb.checked);
+          return;
+        }
+        setSnSelected(sn, true);
+        var e = latestDroneMap[sn];
+        if(e) showInfoCard(buildInfoHtml(e), true);
+        updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+        renderLiveCards(latestDroneRows);
+      });
+    }
+    var historyTableSlot = qs('history-table-slot');
+    if(historyTableSlot && listWrap.parentNode !== historyTableSlot){
+      historyTableSlot.appendChild(listWrap);
+    }
+    if(bottom){
+      bottom.style.display = 'none';
+      bottom.setAttribute('aria-hidden', 'true');
+    }
+    mountMainMapPanel(cookieGet(PAGE_COOKIE) || 'live');
     pageReady = true;
-    navSet(cookieGet(PAGE_COOKIE) || 'map');
+    syncHomeViewport();
+    navSet(cookieGet(PAGE_COOKIE) || 'live');
   }
   function buildInfoSection(title, rows){
     var html = '<section class="info-block"><h3>'+esc(title)+'</h3><div class="info-grid">';
@@ -7892,7 +9070,7 @@ _MAIN_PAGE_PATCH_JS = r"""
         ['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]
       ];
       var html = '<div class="info-actions">'+
-        '<button class="btn-mini" type="button" data-sn="'+escAttr(String(e.sn||''))+'" onclick="exportTrackForSn(this.getAttribute(&quot;data-sn&quot;))">导出轨迹</button>'+
+        '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(String(e.sn||''))+'">导出轨迹</button>'+
         '</div><div class="info-sections">';
       html += buildInfoSection('飞机位置信息', dronePos);
       html += buildInfoSection('飞手位置信息', pilotPos);
@@ -8016,18 +9194,39 @@ _MAIN_PAGE_PATCH_JS = r"""
     neutralizeLegacyCollapsers();
     drawAlarmZones();
   };
+  var _origOnData = onData;
+  onData = function(d){
+    _origOnData(d);
+    if(homeFreezeAfterFirstRender && !uiFrozen){
+      homeFreezeAfterFirstRender = false;
+      try{ localStorage.removeItem(FREEZE_ON_HOME_KEY); }catch(_e){}
+      setFreezeState(true);
+      showBanner('列表已冻结，刷新或恢复同步后继续更新。', 'ok', 2600);
+    }
+  };
   var _origUpdateMap = updateMap;
   updateMap = function(drones){
+    refreshReplayBounds(true);
     _origUpdateMap(drones);
     drawAlarmZones();
     setZoneAlarm(drones);
+    renderReplayCard();
+    updateReplayMarkers();
   };
   document.addEventListener('DOMContentLoaded', function(){
     patchInfoCard();
     ensureMainPages();
     neutralizeLegacyCollapsers();
     drawAlarmZones();
+    syncHomeViewport();
   });
+  window.addEventListener('resize', syncHomeViewport);
+  if(window.visualViewport){
+    try{
+      window.visualViewport.addEventListener('resize', syncHomeViewport);
+      window.visualViewport.addEventListener('scroll', syncHomeViewport);
+    }catch(_e){}
+  }
 })();
 """
 
@@ -8044,6 +9243,215 @@ def _build_html() -> str:
     html_src = _inject_html_once(html_src, "</body>", "<script>\n" + _MAIN_PAGE_PATCH_JS + "\n</script>\n")
     return html_src
 
+def _build_login_html(next_path: str = "/") -> str:
+    safe_next = str(next_path or "/")
+    if not safe_next.startswith("/") or safe_next.startswith("//"):
+        safe_next = "/"
+    return f"""<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 - Light RID Scanner</title>
+<style>
+*{{box-sizing:border-box}}
+:root{{
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --bg:#f3f2f1;--card:#fff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;--muted:#605e5c;--blue:#0078d4;--warn:#d83b01
+}}
+@media (prefers-color-scheme:dark){{
+  :root{{--bg:#201f1e;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;--muted:#c8c6c4;--blue:#2899f5;--warn:#f7630c}}
+}}
+html,body{{margin:0;min-height:100dvh;background:linear-gradient(180deg,var(--bg),var(--card2));color:var(--txt);font-family:var(--font-ui)}}
+body{{display:grid;place-items:center;padding:22px}}
+.card{{width:min(420px,100%);border:1px solid var(--border);background:var(--card);box-shadow:0 16px 34px rgba(0,0,0,.16);border-radius:4px;padding:26px;animation:fade .18s ease-out both}}
+.brand{{font:700 24px/1.1 var(--font-ui);letter-spacing:.01em;margin:0 0 6px}}
+.desc{{color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 22px}}
+.field{{display:grid;gap:7px;margin-top:14px}}
+label{{font:600 12px/1 var(--font-ui);color:var(--muted)}}
+input{{height:42px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:10px 12px;font:600 15px/1.2 var(--font-ui);outline:none;transition:border-color .14s ease,box-shadow .14s ease}}
+input:focus{{border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 34%, transparent)}}
+.row{{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:20px}}
+button{{height:42px;border:1px solid var(--blue);background:var(--blue);color:white;border-radius:4px;padding:0 18px;font:700 14px/1 var(--font-ui);cursor:pointer;transition:transform .14s ease,filter .14s ease}}
+button:hover{{transform:translateY(-1px);filter:brightness(1.05)}}
+.status{{min-height:20px;margin-top:14px;color:var(--muted);font-size:13px;white-space:pre-wrap}}
+.status.err{{color:var(--warn)}}
+@keyframes fade{{from{{opacity:0;transform:translateY(5px)}}to{{opacity:1;transform:none}}}}
+</style></head><body>
+<main class="card">
+  <h1 class="brand">Light RID Scanner</h1>
+  <p class="desc">登录后进入监控台。外部 API 继续使用独立 Token，不走网页登录会话。</p>
+  <form id="login-form">
+    <div class="field"><label for="user">账号</label><input id="user" autocomplete="username" autofocus></div>
+    <div class="field"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>
+    <div class="row"><span class="status" id="status"></span><button id="submit" type="submit">登录</button></div>
+  </form>
+</main>
+<script>
+const nextPath = {json.dumps(safe_next, ensure_ascii=False)};
+const form = document.getElementById('login-form');
+const statusEl = document.getElementById('status');
+function setStatus(text, err){{ statusEl.textContent = text || ''; statusEl.classList.toggle('err', !!err); }}
+form.addEventListener('submit', async function(ev){{
+  ev.preventDefault();
+  const btn = document.getElementById('submit');
+  btn.disabled = true;
+  setStatus('正在验证...', false);
+  try{{
+    const r = await fetch('/login', {{
+      method:'POST',
+      headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{username:document.getElementById('user').value || '', password:document.getElementById('password').value || ''}})
+    }});
+    const d = await r.json().catch(() => ({{}}));
+    if(!r.ok || d.ok === false) throw new Error(d.error || '登录失败');
+    location.href = nextPath || d.next || '/';
+  }}catch(e){{
+    setStatus(e.message || String(e), true);
+  }}finally{{
+    btn.disabled = false;
+  }}
+}});
+</script>
+</body></html>"""
+
+def _build_logs_html() -> str:
+    return """<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日志 - Light RID Scanner</title>
+<style>
+*{box-sizing:border-box}
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --bg:#201f1e;--bg2:#252423;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;
+  --muted:#c8c6c4;--blue:#2899f5;--warn:#f7630c;--green:#92c353;--glow:rgba(40,153,245,.12)
+}
+body.theme-light{--bg:#f3f2f1;--bg2:#edebe9;--card:#ffffff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;--muted:#605e5c;--blue:#0078d4;--warn:#d83b01;--green:#107c10;--glow:rgba(0,120,212,.10)}
+html,body{margin:0;min-height:100dvh;background:linear-gradient(180deg,var(--bg),var(--bg2));color:var(--txt);font-family:var(--font-ui)}
+.wrap{width:min(1500px,calc(100vw - 24px));margin:0 auto;padding:16px 12px 26px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.title{font:700 28px/1 var(--font-ui)}
+.actions,.tabs{display:flex;gap:8px;flex-wrap:wrap}
+.btn,.tab{border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:10px 13px;font:700 14px/1 var(--font-ui);cursor:pointer;transition:background-color .14s ease,border-color .14s ease,transform .14s ease,box-shadow .14s ease}
+.btn:hover,.tab:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb,var(--blue) 10%,var(--card2));box-shadow:0 2px 8px var(--glow)}
+.tab.active{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 14%,var(--card2))}
+.panel{border:1px solid var(--border);background:var(--card);border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:hidden}
+.toolbar{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;padding:12px;border-bottom:1px solid var(--border)}
+.meta{color:var(--muted);font-size:13px}
+select,input{height:40px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:8px 10px;font:600 14px/1 var(--font-ui)}
+pre{margin:0;height:calc(100dvh - 176px);min-height:420px;overflow:auto;padding:14px;background:#0e1116;color:#d6deeb;font:13px/1.55 var(--font-mono);white-space:pre-wrap;word-break:break-word}
+body.theme-light pre{background:#fbfbfb;color:#24292f}
+.status{padding:8px 12px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+@media(max-width:720px){.wrap{width:calc(100vw - 10px);padding:10px 5px}.title{font-size:22px}pre{height:calc(100dvh - 230px);font-size:12px}}
+</style></head><body><div class="wrap">
+  <div class="topbar">
+    <div><div class="title">日志</div><div class="meta">运行、操作、扫描与扫描差异。</div></div>
+    <div class="actions">
+      <button class="btn" id="btn-back" type="button">返回主页</button>
+      <button class="btn" id="btn-settings" type="button">设置</button>
+      <button class="btn" id="btn-theme" type="button">浅色</button>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="toolbar">
+      <div class="tabs">
+        <button class="tab active" data-type="runtime" type="button">运行日志</button>
+        <button class="tab" data-type="operation" type="button">操作日志</button>
+        <button class="tab" data-type="scan" type="button">扫描日志</button>
+        <button class="tab" data-type="scan_diff" type="button">扫描 Diff</button>
+      </div>
+      <div class="actions">
+        <input id="limit" type="number" min="20" max="5000" value="500" title="行数">
+        <button class="btn" id="btn-refresh" type="button">刷新</button>
+        <button class="btn" id="btn-export" type="button">导出当前</button>
+        <button class="btn" id="btn-export-all" type="button">导出全部</button>
+      </div>
+    </div>
+    <pre id="log-view">正在加载...</pre>
+    <div id="status" class="status">-</div>
+  </div>
+</div>
+<script>
+function qs(id){return document.getElementById(id)}
+function enc(v){return String(v==null?'':v)}
+function pageHeaders(extra){var h={'X-LightRID-Page':'1'}; if(extra){Object.keys(extra).forEach(function(k){h[k]=extra[k]})} return h}
+function apiUrl(path){return new URL(path, location.origin).toString()}
+function loadTheme(){try{var s=localStorage.getItem('rid_ui_theme'); if(s==='light'||s==='dark') return s}catch(_e){} return (matchMedia && matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}
+function applyTheme(t){var light=t==='light'; document.body.classList.toggle('theme-light', light); try{localStorage.setItem('rid_ui_theme', light?'light':'dark')}catch(_e){} qs('btn-theme').textContent=light?'深色':'浅色'}
+var currentType='runtime';
+async function loadLogs(){
+  var limit=Math.max(20, Math.min(5000, Number(qs('limit').value||500)));
+  qs('status').textContent='读取中...';
+  var r=await fetch(apiUrl('/api/logs/view?type='+encodeURIComponent(currentType)+'&limit='+limit), {cache:'no-store', headers:pageHeaders()});
+  var d=await r.json().catch(function(){return {}});
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
+  qs('log-view').textContent=(d.items||[]).join('\\n') || '(empty)';
+  qs('status').textContent=String(d.type||currentType)+' · '+String(d.count||0)+' 行';
+}
+function setType(t){
+  currentType=t||'runtime';
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active', x.getAttribute('data-type')===currentType)});
+  loadLogs().catch(function(e){qs('status').textContent=e.message||String(e)});
+}
+async function downloadLogs(type){
+  var limit=Math.max(20, Math.min(5000, Number(qs('limit').value||500)));
+  var r=await fetch(apiUrl('/api/logs/export?type='+encodeURIComponent(type||currentType)+'&limit='+limit), {cache:'no-store', headers:pageHeaders()});
+  if(!r.ok) throw new Error('导出失败 HTTP '+r.status);
+  var blob=await r.blob();
+  if(!blob || !blob.size) throw new Error('导出内容为空');
+  var cd=r.headers.get('Content-Disposition')||'';
+  var m=/filename="([^"]+)"/.exec(cd);
+  var name=m?m[1]:'light-rid-logs.log';
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click();
+  setTimeout(function(){URL.revokeObjectURL(url); if(a.parentNode)a.parentNode.removeChild(a)}, 8000);
+}
+document.querySelectorAll('.tab').forEach(function(btn){btn.addEventListener('click', function(){setType(btn.getAttribute('data-type'))})});
+qs('btn-refresh').addEventListener('click', function(){loadLogs().catch(function(e){qs('status').textContent=e.message||String(e)})});
+qs('btn-export').addEventListener('click', function(){downloadLogs(currentType).catch(function(e){qs('status').textContent=e.message||String(e)})});
+qs('btn-export-all').addEventListener('click', function(){downloadLogs('all').catch(function(e){qs('status').textContent=e.message||String(e)})});
+qs('btn-back').addEventListener('click', function(){location.href='/'});
+qs('btn-settings').addEventListener('click', function(){location.href='/settings'});
+qs('btn-theme').addEventListener('click', function(){applyTheme(document.body.classList.contains('theme-light')?'dark':'light')});
+applyTheme(loadTheme());
+loadLogs().catch(function(e){qs('status').textContent=e.message||String(e)});
+</script></body></html>"""
+
+def _build_oobe_html() -> str:
+    return """<!doctype html><html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>初始化 - Light RID Scanner</title>
+<style>
+*{box-sizing:border-box}:root{--font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;--bg:#f3f2f1;--card:#fff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;--muted:#605e5c;--blue:#0078d4;--warn:#d83b01}
+@media(prefers-color-scheme:dark){:root{--bg:#201f1e;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;--muted:#c8c6c4;--blue:#2899f5;--warn:#f7630c}}
+html,body{margin:0;min-height:100dvh;background:linear-gradient(180deg,var(--bg),var(--card2));color:var(--txt);font-family:var(--font-ui)}body{display:grid;place-items:center;padding:22px}
+.card{width:min(720px,100%);border:1px solid var(--border);background:var(--card);border-radius:4px;box-shadow:0 16px 34px rgba(0,0,0,.16);padding:24px}
+h1{margin:0 0 8px;font:700 28px/1.1 var(--font-ui)}.desc{color:var(--muted);line-height:1.55;margin-bottom:18px}.reason{border:1px solid color-mix(in srgb,var(--warn) 45%,var(--border));background:color-mix(in srgb,var(--warn) 10%,var(--card2));border-radius:4px;padding:10px 12px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.field{display:grid;gap:7px}.field.full{grid-column:1/-1}label{font:700 12px/1 var(--font-ui);color:var(--muted)}
+input,select{height:42px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:10px 12px;font:600 14px/1.2 var(--font-ui)}input:focus,select:focus{outline:none;border-color:var(--blue)}
+.actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;margin-top:18px}.btn{height:42px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:0 16px;font:700 14px/1 var(--font-ui);cursor:pointer}.btn.primary{border-color:var(--blue);background:var(--blue);color:#fff}.status{margin-top:12px;color:var(--muted);white-space:pre-wrap}.status.err{color:var(--warn)}.micro{font-size:12px;color:var(--muted);line-height:1.5}@media(max-width:720px){body{padding:10px}.grid{grid-template-columns:1fr}.card{padding:18px}}
+</style></head><body><main class="card">
+<h1>Light RID Scanner 初始化</h1>
+<div class="desc">程序需要绑定一张固定无线网卡。不会再自动递增选择其他网卡，避免多网卡环境下抓错设备。</div>
+<div class="reason" id="reason">正在读取状态...</div>
+<div class="grid">
+  <div class="field full"><label>默认网卡</label><select id="iface"><option value="">正在扫描...</option></select><div class="micro">如果没有网卡，请插入支持 monitor 的无线网卡后刷新。</div></div>
+  <div class="field"><label>RID 信道</label><input id="channel" type="number" min="1" max="196" value="6"><div class="micro">默认 CH6，通常无需修改。</div></div>
+  <div class="field"><label>基站名称</label><input id="base-name" value="基站"></div>
+  <div class="field"><label>基站纬度</label><input id="base-lat" type="number" step="0.000001"></div>
+  <div class="field"><label>基站经度</label><input id="base-lon" type="number" step="0.000001"></div>
+  <div class="field"><label>网页登录账号</label><input id="username" autocomplete="username" placeholder="可选"></div>
+  <div class="field"><label>网页登录密码</label><input id="password" type="password" autocomplete="new-password" placeholder="可选"></div>
+</div>
+<div class="actions"><button class="btn" id="btn-refresh" type="button">刷新网卡</button><button class="btn" id="btn-location" type="button">读取浏览器位置</button><button class="btn primary" id="btn-save" type="button">保存并进入系统</button></div>
+<div id="status" class="status">-</div>
+</main><script>
+function qs(id){return document.getElementById(id)}function pageHeaders(extra){var h={'X-LightRID-Page':'1'};if(extra){Object.keys(extra).forEach(function(k){h[k]=extra[k]})}return h}function setStatus(t,e){qs('status').textContent=t||'-';qs('status').classList.toggle('err',!!e)}function enc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+async function loadStatus(){const r=await fetch('/api/oobe/status',{cache:'no-store',headers:pageHeaders()});const d=await r.json().catch(()=>({}));if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));qs('reason').textContent=(d.oobe&&d.oobe.reason)||'需要完成基础配置。';var opts=['<option value="">请选择默认网卡</option>'];(d.interfaces||[]).forEach(function(it){var name=String(it.name||'');if(name)opts.push('<option value="'+enc(name)+'">'+enc(name+' ['+(it.mode||'')+'] '+(it.supports_5g?'5G':'2.4G'))+'</option>')});qs('iface').innerHTML=opts.join('');qs('iface').value=d.selected_iface||'';qs('channel').value=String(d.channel||6);qs('base-name').value=String(d.base_name||'基站');qs('base-lat').value=d.base_lat==null?'':String(d.base_lat);qs('base-lon').value=d.base_lon==null?'':String(d.base_lon);setStatus((d.interfaces||[]).length?'请选择网卡后保存。':'未检测到无线网卡。',!(d.interfaces||[]).length)}
+async function save(){var body={iface:qs('iface').value,channel:Number(qs('channel').value||6),base_name:qs('base-name').value,base_lat:qs('base-lat').value,base_lon:qs('base-lon').value,username:qs('username').value,password:qs('password').value};setStatus('正在保存...',false);const r=await fetch('/api/oobe/save',{method:'POST',headers:pageHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});const d=await r.json().catch(()=>({}));if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));setStatus(d.login_required?'已保存，请先登录。':'已保存，正在进入系统...',false);setTimeout(function(){location.href=String(d.next||'/')},600)}
+qs('btn-refresh').addEventListener('click',function(){loadStatus().catch(e=>setStatus(e.message||String(e),true))});qs('btn-save').addEventListener('click',function(){save().catch(e=>setStatus(e.message||String(e),true))});qs('btn-location').addEventListener('click',function(){if(!navigator.geolocation){setStatus('浏览器不支持定位',true);return}navigator.geolocation.getCurrentPosition(function(pos){qs('base-lat').value=String(pos.coords.latitude||'');qs('base-lon').value=String(pos.coords.longitude||'');setStatus('已读取浏览器位置',false)},function(err){setStatus('定位失败: '+(err&&err.message?err.message:err),true)},{enableHighAccuracy:true,timeout:12000,maximumAge:0})});loadStatus().catch(e=>setStatus(e.message||String(e),true));
+</script></body></html>"""
+
 def _build_settings_html() -> str:
     return """<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
@@ -8055,15 +9463,15 @@ def _build_settings_html() -> str:
   --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
   --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
   --bg:#201f1e;--bg2:#252423;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;
-  --muted:#c8c6c4;--blue:#2899f5;--green:#92c353;--warn:#f7630c;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03)
+  --muted:#c8c6c4;--blue:#2899f5;--green:#92c353;--warn:#f7630c;--glow:rgba(40,153,245,.12);--soft:rgba(255,255,255,.03);--app-vh:100dvh
 }
 body.theme-light{
   --bg:#f3f2f1;--bg2:#edebe9;--card:#ffffff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;
   --muted:#605e5c;--blue:#0078d4;--green:#107c10;--warn:#d83b01;--glow:rgba(0,120,212,.10);--soft:rgba(0,0,0,.018)
 }
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
-body{min-height:100vh;background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
-.wrap{max-width:1380px;margin:0 auto;padding:22px 18px 36px}
+body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
+.wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
 .title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
 .sub{color:var(--muted);margin-top:6px;max-width:780px;line-height:1.55}
@@ -8100,12 +9508,15 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .field.full{grid-column:1/-1}
 .field label{font:600 12px/1.15 var(--font-ui);letter-spacing:.01em;color:var(--muted)}
 .field input,.field select,.field textarea{width:100%;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:10px 12px;font:600 14px/1.35 var(--font-ui);transition:border-color .14s ease,box-shadow .14s ease,background-color .14s ease}
+.field input:not([type="checkbox"]),.field select,.token-actions input{height:42px}
+.field-inline .btn,.token-actions .btn{height:42px}
 .field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 38%, transparent)}
 .field textarea{min-height:440px;resize:vertical;font-family:var(--font-mono);font-size:13px}
 .field-inline{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
 .field-inline input[disabled]{opacity:.9;background:color-mix(in srgb, var(--card2) 92%, black)}
 .checks{display:flex;flex-wrap:wrap;gap:12px}
 .checks label{display:flex;align-items:center;gap:8px;font-size:15px;color:var(--txt)}
+.checks.pref-checks{display:grid;grid-template-columns:1fr;gap:10px}
 .row-actions{display:flex;gap:10px;flex-wrap:wrap}
 .token-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .token-actions input{flex:1 1 260px}
@@ -8124,6 +9535,14 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .stat{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
 .stat .k{font:600 12px/1 var(--font-ui);color:var(--muted);letter-spacing:.01em}
 .stat .v{margin-top:8px;font:600 20px/1.1 var(--font-ui)}
+.stat .v.ip-lines{font:600 13px/1.45 var(--font-mono);display:grid;gap:5px;max-width:100%}
+.ip-line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;min-width:0}
+.ip-text{display:block;min-width:0;max-width:100%;white-space:nowrap;overflow-x:auto;overflow-y:hidden;text-overflow:clip;scrollbar-width:thin}
+.ip-len{font:600 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 5px;background:var(--card)}
+.settings-ap-scroll{max-height:min(42vh,420px);overflow:auto;padding-right:4px}
+.settings-ap-row-grid{display:grid;grid-template-columns:46px minmax(120px,.9fr) minmax(0,1.2fr) 86px;gap:10px;align-items:center;min-width:0}
+.settings-ap-row-grid>*{min-width:0}
+.settings-ap-row-grid .clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 details.advanced{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
 details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-spacing:.01em}
 .split-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
@@ -8131,6 +9550,13 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 .modal-mask.show{display:flex}
 .modal-card{width:min(480px,100%);border:1px solid var(--border);border-radius:4px;background:var(--card);padding:18px;box-shadow:0 18px 32px rgba(0,0,0,.18)}
 .modal-card h3{margin:0 0 10px;font:600 20px/1 var(--font-ui)}
+.toast-stack{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:72;width:min(420px,calc(100vw - 28px));pointer-events:none}
+.toast{border:1px solid var(--border);border-radius:4px;background:color-mix(in srgb, var(--card) 96%, transparent);padding:12px 14px;box-shadow:0 14px 28px rgba(0,0,0,.18);opacity:0;transform:translateY(6px);transition:opacity .18s ease,transform .18s ease,border-color .18s ease;background-clip:padding-box;pointer-events:auto}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.ok{border-color:color-mix(in srgb, var(--green) 38%, var(--border))}
+.toast.warn{border-color:color-mix(in srgb, var(--warn) 42%, var(--border))}
+.toast-title{font:600 14px/1.2 var(--font-ui);margin-bottom:5px}
+.toast-text{font-size:13px;line-height:1.5;color:var(--muted);white-space:pre-wrap}
 @keyframes officeFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @media (max-width:1360px){
   .hook-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -8138,6 +9564,14 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   .hook-layout .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
 }
 @media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.hook-layout,.zone-layout,.field-inline{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}}
+@media (max-width:700px){
+  .wrap{width:min(100vw - 12px,1420px);padding:10px 6px 18px}
+  .topbar,.draft-bar{gap:10px}
+  .actions,.draft-actions{width:100%}
+  .actions .btn,.draft-actions .btn{flex:1 1 140px}
+  .card{padding:14px}
+  .toast-stack{right:10px;left:10px;bottom:10px;width:auto}
+}
 </style></head><body><div class="wrap">
   <div class="topbar">
     <div>
@@ -8146,6 +9580,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
+      <button class="btn" id="btn-logs" type="button">日志</button>
       <button class="btn" id="btn-theme" type="button">浅色</button>
       <button class="btn" id="btn-reload-view" type="button">刷新</button>
     </div>
@@ -8176,7 +9611,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             </div>
           </div>
           <div class="grid" style="margin-top:14px">
-            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">(auto)</option></select></div>
+            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">请选择默认网卡</option></select></div>
             <div class="field">
               <label>固定信道</label>
               <div class="field-inline">
@@ -8263,7 +9698,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="grid" style="margin-top:14px">
             <div class="field"><label>重上线冷却(s)</label><input id="cfg-reonline" type="number"></div>
             <div class="field"><label>通知超时(s)</label><input id="cfg-send-timeout" type="number"></div>
-            <div class="field"><label>登录提示标题</label><input id="cfg-auth-realm" type="text"><div class="micro">显示在浏览器登录弹窗里。</div></div>
+            <div class="field"><label>登录标题</label><input id="cfg-auth-realm" type="text"><div class="micro">用于登录页面和接口提示。</div></div>
             <div class="field"><label>网页登录账号</label><input id="cfg-auth-user" type="text" placeholder="留空则保持不变"></div>
             <div class="field"><label>网页登录密码</label><input id="cfg-auth-pass" type="password" placeholder="留空则保持不变"></div>
             <div class="field full"><label>当前 API Token</label>
@@ -8300,7 +9735,47 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div id="host-meta" class="micro">-</div>
           <div class="row-actions" style="margin-top:14px">
             <button class="btn" id="btn-open-hw" type="button">打开硬件助手</button>
+            <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
           </div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>首页操作</h2>
+              <div class="section-copy">这些动作会影响主页的显示和浏览器权限。</div>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-home-freeze" type="button">返回主页并冻结列表</button>
+            <button class="btn" id="btn-settings-web-notify" type="button">网页通知</button>
+            <button class="btn warn" id="btn-settings-clear-history" type="button">清空历史</button>
+          </div>
+          <div id="status-home-actions" class="status">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>页面偏好</h2>
+              <div class="section-copy">只保存在当前浏览器。</div>
+            </div>
+          </div>
+          <div class="checks pref-checks" style="margin-top:14px">
+            <label><input id="pref-realtime-track" type="checkbox"> 实时轨迹</label>
+            <label><input id="pref-track-2h" type="checkbox"> 只显示近 2 小时轨迹</label>
+          </div>
+          <div class="micro">关闭实时轨迹后，地图只显示手动勾选目标的轨迹。</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>AP 与扫描日志</h2>
+              <div class="section-copy">运行侧数据，刷新页面不会写配置。</div>
+            </div>
+            <button class="btn ghost" id="btn-refresh-runtime" type="button">刷新</button>
+          </div>
+          <div id="settings-ap-list" class="list-wrap" style="margin-top:14px"></div>
+          <div class="field full" style="margin-top:14px"><label>扫描日志</label><textarea id="settings-runtime-log" readonly spellcheck="false" style="min-height:220px"></textarea></div>
+          <div id="status-runtime" class="status">-</div>
         </div>
       </div>
     </div>
@@ -8330,6 +9805,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     </div>
   </div>
 </div>
+<div id="settings-toast-stack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
     <h3>再次验证</h3>
@@ -8362,10 +9838,64 @@ var apiTokenAction = '__KEEP__';
 var apiTokenLastReveal = '';
 var reauthAction = null;
 var settingsState = {visualLoaded:false, rawLoaded:false, apiLoaded:false, channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}};
+var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
+var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
+var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
+function syncSettingsViewport(){
+  var vp = window.visualViewport;
+  var vh = Math.max(320, Math.round((vp && vp.height) ? vp.height : window.innerHeight || 0));
+  document.documentElement.style.setProperty('--app-vh', vh + 'px');
+}
+function cookieGet(name){
+  var key = String(name || '').trim();
+  if(!key) return null;
+  var parts = String(document.cookie || '').split(';');
+  for(var i=0;i<parts.length;i++){
+    var p = String(parts[i] || '').trim();
+    if(!p) continue;
+    var pos = p.indexOf('=');
+    var k = (pos < 0) ? p : p.slice(0, pos).trim();
+    if(k !== key) continue;
+    var raw = (pos < 0) ? '' : p.slice(pos + 1);
+    try{ return decodeURIComponent(raw); }catch(_e){ return raw; }
+  }
+  return null;
+}
+function cookieSet(name, value, days){
+  var key = String(name || '').trim();
+  if(!key) return;
+  var nDays = Number(days);
+  if(!isFinite(nDays) || nDays <= 0) nDays = 365;
+  var secure = (location.protocol === 'https:') ? '; Secure' : '';
+  document.cookie = key + '=' + encodeURIComponent(String(value == null ? '' : value))
+    + '; Max-Age=' + Math.round(nDays * 86400) + '; Path=/; SameSite=Lax' + secure;
+}
+function cookieBool(name, defVal){
+  var v = cookieGet(name);
+  if(v == null || v === '') return !!defVal;
+  v = String(v).toLowerCase();
+  return (v === '1' || v === 'true' || v === 'on' || v === 'yes');
+}
 function setStatus(id, text, err){
   var el = qs(id); if(!el) return;
   el.textContent = String(text || '-');
   el.classList.toggle('err', !!err);
+}
+function showNotice(text, kind, timeoutMs){
+  var host = qs('settings-toast-stack');
+  if(!host) return;
+  var node = document.createElement('div');
+  var tone = (kind === 'warn' || kind === 'error') ? 'warn' : 'ok';
+  node.className = 'toast ' + tone;
+  node.innerHTML = '<div class="toast-title">' + (tone === 'warn' ? '操作结果' : '已完成') + '</div>'
+    + '<div class="toast-text">' + enc(String(text || '')) + '</div>';
+  host.appendChild(node);
+  requestAnimationFrame(function(){ node.classList.add('show'); });
+  var ttl = Math.max(1800, Number(timeoutMs || 3200));
+  window.setTimeout(function(){
+    node.classList.remove('show');
+    window.setTimeout(function(){ if(node.parentNode) node.parentNode.removeChild(node); }, 220);
+  }, ttl);
 }
 function apiUrl(url){
   try{ return new URL(String(url||''), window.location.origin).toString(); }catch(_e){ return String(url||''); }
@@ -8400,6 +9930,51 @@ async function copyTextPlain(text){
     if(ta.parentNode) ta.parentNode.removeChild(ta);
   }
 }
+function parseFilenameFromDisposition(headerValue){
+  var cd = String(headerValue || '');
+  var marker = 'filename=';
+  var pos = cd.toLowerCase().indexOf(marker);
+  if(pos < 0) return '';
+  var raw = cd.slice(pos + marker.length).trim();
+  if(raw.charAt(0) === '"'){
+    var end = raw.indexOf('"', 1);
+    raw = end > 0 ? raw.slice(1, end) : raw.slice(1);
+  }else{
+    var semi = raw.indexOf(';');
+    if(semi >= 0) raw = raw.slice(0, semi);
+  }
+  return raw.trim();
+}
+async function downloadQualityReport(){
+  showNotice('正在生成质量分析包...', 'ok', 2200);
+  const r = await fetch(apiUrl('/api/tools/diagnostic.zip'), {cache:'no-store', headers:pageHeaders()});
+  if(!r.ok){
+    var errText = '';
+    try{
+      var errJson = await r.json();
+      errText = errJson.error || '';
+    }catch(_e){
+      try{ errText = await r.text(); }catch(_e2){}
+    }
+    throw new Error(errText || ('HTTP ' + r.status));
+  }
+  const blob = await r.blob();
+  if(!blob || Number(blob.size || 0) < 128){
+    throw new Error('质量分析包为空，请稍后重试或查看服务日志');
+  }
+  var filename = parseFilenameFromDisposition(r.headers.get('Content-Disposition')) || 'light-rid-quality.zip';
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  window.setTimeout(function(){
+    URL.revokeObjectURL(url);
+    if(a.parentNode) a.parentNode.removeChild(a);
+  }, 15000);
+  showNotice('质量分析包已生成。', 'ok', 3200);
+}
 async function getJson(url){
   const r = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
   const d = await r.json().catch(()=>({}));
@@ -8428,6 +10003,76 @@ function applyTheme(theme){
   document.body.classList.toggle('theme-dark', !light);
   try{ localStorage.setItem('rid_ui_theme', light ? 'light' : 'dark'); }catch(_e){}
   qs('btn-theme').textContent = light ? '深色' : '浅色';
+}
+function loadBrowserPrefs(){
+  var rt = qs('pref-realtime-track');
+  var f2h = qs('pref-track-2h');
+  if(rt) rt.checked = cookieBool(COOKIE_TRACK_REALTIME, true);
+  if(f2h) f2h.checked = cookieBool(COOKIE_TRACK_2H_ONLY, false);
+}
+function saveBrowserPrefs(){
+  var rt = qs('pref-realtime-track');
+  var f2h = qs('pref-track-2h');
+  cookieSet(COOKIE_TRACK_REALTIME, (rt && rt.checked) ? '1' : '0', 365);
+  cookieSet(COOKIE_TRACK_2H_ONLY, (f2h && f2h.checked) ? '1' : '0', 365);
+  showNotice('页面偏好已保存到当前浏览器。', 'ok', 2200);
+}
+function notifySettingsButtonText(){
+  if(!('Notification' in window)) return '网页通知(不支持)';
+  if(Notification.permission === 'granted') return '网页通知(已开)';
+  if(Notification.permission === 'denied') return '网页通知(已拒绝)';
+  return '网页通知';
+}
+function updateHomeActionButtons(){
+  var notifyBtn = qs('btn-settings-web-notify');
+  if(notifyBtn){
+    notifyBtn.textContent = notifySettingsButtonText();
+    notifyBtn.disabled = !('Notification' in window) || Notification.permission === 'denied';
+  }
+}
+async function requestSettingsWebNotify(){
+  if(!('Notification' in window)){
+    setStatus('status-home-actions', '当前浏览器不支持网页通知。', true);
+    return;
+  }
+  try{
+    if(Notification.permission !== 'granted'){
+      await Notification.requestPermission();
+    }
+    updateHomeActionButtons();
+    if(Notification.permission === 'granted'){
+      try{ new Notification('Light RID Scanner 通知已启用', {body:'将推送飞机上下线事件'}); }catch(_e){}
+      setStatus('status-home-actions', '网页通知已启用。', false);
+      showNotice('网页通知已启用。', 'ok', 2400);
+    }else{
+      setStatus('status-home-actions', '网页通知未授权。', true);
+      showNotice('网页通知未授权。', 'warn', 3200);
+    }
+  }catch(e){
+    setStatus('status-home-actions', '网页通知申请失败: ' + (e.message || e), true);
+  }
+}
+function freezeHomeOnReturn(){
+  try{ localStorage.setItem(FREEZE_ON_HOME_KEY, '1'); }catch(_e){}
+  location.href = '/';
+}
+async function clearHistoryFromSettings(){
+  if(!confirm('清空历史无人机记录，并删除本地缓存文件？')) return;
+  var btn = qs('btn-settings-clear-history');
+  if(btn) btn.disabled = true;
+  setStatus('status-home-actions', '清空历史中...', false);
+  try{
+    const data = await postJson('/api/history/clear', {});
+    var msg = '历史已清空' + (typeof data.cleared === 'number' ? ('（' + data.cleared + '架）') : '') + '。';
+    setStatus('status-home-actions', msg, false);
+    showNotice(msg, 'ok', 2600);
+    await loadRuntimePanel().catch(function(){});
+  }catch(e){
+    setStatus('status-home-actions', '清空失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 3800);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
 }
 async function ensureTabLoaded(tab){
   if(tab === 'raw' && !settingsState.rawLoaded){
@@ -8476,24 +10121,69 @@ function renderHostStats(host, basic){
   basic = basic || {};
   var sniff = host.sniff_state || {};
   var sniffLabel = sniff.state === 'ok' ? '正常' : (sniff.state === 'warn' ? '等待数据' : (sniff.state === 'error' ? '异常' : '—'));
+  var localIps = (Array.isArray(host.local_ips) && host.local_ips.length) ? host.local_ips.map(function(ip){
+    ip = String(ip || '');
+    return '<div class="ip-line"><span class="ip-text" title="'+enc(ip)+'">'+enc(ip)+'</span><span class="ip-len">'+ip.length+'</span></div>';
+  }).join('') : '—';
   var items = [
     ['主机', host.hostname || '—'],
+    ['本机 IP', localIps, 'ip-lines'],
     ['CPU', fmtPct(host.cpu_percent)],
     ['内存', fmtPct(host.mem_percent)],
     ['内存容量', fmtMb(host.mem_used_mb, host.mem_total_mb)],
-    ['当前网卡', host.active_iface || basic.iface || '自动'],
+    ['温度', host.temperature_c == null ? '—' : (Number(host.temperature_c).toFixed(1) + '°C')],
+    ['当前网卡', host.active_iface || basic.iface || '未绑定'],
     ['当前信道', String(host.current_channel || basic.channel_effective || 6)]
   ];
   root.innerHTML = items.map(function(row){
-    return '<div class="stat"><div class="k">'+enc(row[0])+'</div><div class="v">'+enc(row[1])+'</div></div>';
+    var cls = row[2] ? ('v ' + row[2]) : 'v';
+    var val = row[2] ? String(row[1]) : enc(row[1]);
+    return '<div class="stat"><div class="k">'+enc(row[0])+'</div><div class="'+cls+'">'+val+'</div></div>';
   }).join('');
   var meta = [];
   if(host.cpu_count) meta.push('核心 ' + String(host.cpu_count));
+  if(Array.isArray(host.ifaces) && host.ifaces.length) meta.push('网卡 ' + host.ifaces.map(function(x){ return String(x.name || ''); }).filter(Boolean).join(', '));
   if(host.load1 != null) meta.push('负载 ' + String(host.load1) + '/' + String(host.load5) + '/' + String(host.load15));
   if(host.uptime_sec != null) meta.push('运行 ' + fmtSecShort(host.uptime_sec));
   if(sniff.state) meta.push('采集 ' + sniffLabel);
   if(sniff.msg) meta.push(String(sniff.msg));
   qs('host-meta').textContent = meta.length ? meta.join(' | ') : '-';
+}
+function renderSettingsRuntime(data){
+  data = data || {};
+  var apRoot = qs('settings-ap-list');
+  if(apRoot){
+    var aps = Array.isArray(data.aps) ? data.aps.slice(0, 40) : [];
+    if(!aps.length){
+      apRoot.innerHTML = '<div class="empty-state">暂无 AP 数据</div>';
+    }else{
+      apRoot.innerHTML = '<div class="settings-ap-scroll">' + aps.map(function(a, idx){
+        var mac = String(a.mac || '-');
+        var ssid = String(a.ssid || '(hidden)');
+        var vendor = String(a.vendor || '未知');
+        var rssi = (a.rssi == null) ? 'N/A' : (String(a.rssi) + 'dBm');
+        return '<div class="list-row"><div class="settings-ap-row-grid">'
+          + '<div class="micro">#'+(idx+1)+'</div>'
+          + '<div class="clip" title="'+enc(ssid)+'"><b>'+enc(ssid)+'</b><div class="micro clip" title="'+enc(vendor)+'">'+enc(vendor)+'</div></div>'
+          + '<div class="micro clip" title="'+enc(mac)+'">'+enc(mac)+'</div>'
+          + '<div>'+enc(rssi)+'</div>'
+          + '</div></div>';
+      }).join('') + '</div>';
+    }
+  }
+  var log = qs('settings-runtime-log');
+  if(log){
+    var lines = [];
+    if(Array.isArray(data.ap_logs) && data.ap_logs.length) lines = lines.concat(['[AP]'], data.ap_logs);
+    if(Array.isArray(data.event_logs) && data.event_logs.length) lines = lines.concat(['', '[EVENT]'], data.event_logs);
+    if(Array.isArray(data.scan_logs) && data.scan_logs.length) lines = lines.concat(['', '[SCAN]'], data.scan_logs);
+    log.value = lines.join('\\n');
+  }
+  setStatus('status-runtime', 'AP ' + String((data.aps || []).length || 0) + '/' + String(data.aps_total || 0), false);
+}
+async function loadRuntimePanel(){
+  const data = await getJson('/api/settings/runtime?limit=220');
+  renderSettingsRuntime(data);
 }
 function collectVisualPayload(){
   return {
@@ -8668,11 +10358,10 @@ async function performTokenReauth(action){
     setStatus('reauth-status', '请输入完整账号和密码。', true);
     return;
   }
-  var basic = 'Basic ' + btoa(unescape(encodeURIComponent(user + ':' + pass)));
   const r = await fetch(apiUrl('/api/settings/api-token/reveal'), {
     method:'POST',
-    headers:pageHeaders({'Authorization':basic, 'Content-Type':'application/json'}),
-    body:'{}'
+    headers:pageHeaders({'Content-Type':'application/json'}),
+    body:JSON.stringify({username:user, password:pass})
   });
   const d = await r.json().catch(()=>({}));
   if(!r.ok || d.ok===false){
@@ -8689,7 +10378,7 @@ async function performTokenReauth(action){
 function fillIfaceOptions(items, selected){
   const sel = qs('cfg-iface');
   if(!sel) return;
-  const opts = ['<option value="">(auto)</option>'];
+  const opts = ['<option value="">请选择默认网卡</option>'];
   (Array.isArray(items)?items:[]).forEach(function(it){
     const name = String(it.name || '');
     if(!name) return;
@@ -8830,6 +10519,7 @@ async function loadVisual(){
   qs('cfg-map-idle').value = String(w.map_auto_center_idle_sec ?? '');
   renderZoneRows(Array.isArray(w.alarm_zones) ? w.alarm_zones : []);
   renderHostStats(data.host || {}, b);
+  loadRuntimePanel().catch(function(){});
   qs('cfg-notify-enabled').checked = !!nt.enabled;
   qs('cfg-notify-reonline').checked = !!nt.notify_reonline;
   qs('cfg-reonline').value = String(nt.reonline_cooldown_sec ?? '');
@@ -8869,18 +10559,18 @@ async function saveVisual(){
   const data = await postJson('/api/settings/visual/save', payload);
   var msg = '测试并保存成功: ' + String(data.saved_to || '-');
   if(data.backup_path) msg += '\\n备份: ' + String(data.backup_path);
-  if(data.notify_test && data.notify_test !== 'skip') msg += '\\n通知测试: ' + String(data.notify_test);
   if(data.reload_msg) msg += '\\n' + String(data.reload_msg);
   setStatus('status-visual', msg, false);
+  showNotice('配置已保存并生效。', 'ok', 3600);
   await loadVisual();
 }
 async function testVisual(){
   const payload = collectVisualPayload();
   const data = await postJson('/api/settings/visual/test', payload);
   var msg = '测试通过，运行配置已回滚。';
-  if(data.notify_test && data.notify_test !== 'skip') msg += '\\n通知测试: ' + String(data.notify_test);
   if(data.reload_msg) msg += '\\n' + String(data.reload_msg);
   setStatus('status-visual', msg, false);
+  showNotice('测试通过，当前运行配置已回滚。', 'ok', 3000);
 }
 async function saveRaw(){
   const data = await postJson('/api/settings/raw/save', {text: String(qs('raw-editor').value || '')});
@@ -8893,10 +10583,26 @@ async function loadApiDocs(){
   setStatus('status-api', 'API 文档已生成。启用 Token 后可在 Header 中使用 X-API-Token 或 Authorization: Bearer。', false);
 }
 qs('btn-back').addEventListener('click', function(){ location.href='/'; });
+qs('btn-logs').addEventListener('click', function(){ location.href='/logs'; });
 qs('btn-theme').addEventListener('click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
 qs('btn-open-hw').addEventListener('click', function(){ location.href='/hardware-assistant'; });
-qs('btn-refresh-host').addEventListener('click', async function(){ try{ await loadVisual(); }catch(e){ setStatus('status-visual', e.message || e, true); } });
-qs('btn-reload-view').addEventListener('click', async function(){ try{ await loadVisual(); }catch(e){ setStatus('status-visual', e.message || e, true); } });
+qs('btn-diagnostic-export').addEventListener('click', async function(){
+  try{
+    qs('btn-diagnostic-export').disabled = true;
+    await downloadQualityReport();
+  }catch(e){
+    setStatus('status-visual', '质量分析包导出失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 4200);
+  }finally{
+    qs('btn-diagnostic-export').disabled = false;
+  }
+});
+qs('btn-refresh-host').addEventListener('click', async function(){ try{ await loadVisual(); }catch(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
+qs('btn-refresh-runtime').addEventListener('click', async function(){ try{ await loadRuntimePanel(); showNotice('运行数据已刷新。', 'ok', 1800); }catch(e){ setStatus('status-runtime', e.message || e, true); showNotice(e.message || e, 'warn', 3600); } });
+qs('btn-reload-view').addEventListener('click', async function(){ try{ await loadVisual(); showNotice('设置已重新读取。', 'ok', 2200); }catch(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
+qs('btn-home-freeze').addEventListener('click', freezeHomeOnReturn);
+qs('btn-settings-web-notify').addEventListener('click', requestSettingsWebNotify);
+qs('btn-settings-clear-history').addEventListener('click', clearHistoryFromSettings);
 qs('btn-channel-edit').addEventListener('click', function(){
   setChannelUi(!settingsState.channelEditing);
 });
@@ -8930,22 +10636,26 @@ qs('btn-reauth-confirm').addEventListener('click', async function(){
     await performTokenReauth(reauthAction || 'copy');
     if(reauthAction === 'copy'){
       setStatus('status-visual', '当前 API Token 已复制到剪贴板。', false);
+      showNotice('当前 API Token 已复制。', 'ok', 2400);
     }else{
       setStatus('status-visual', '当前 API Token 已通过再次验证并显示。', false);
+      showNotice('当前 API Token 已显示。', 'ok', 2400);
     }
     closeReauth();
   }catch(e){
     setStatus('reauth-status', e.message || e, true);
+    showNotice(e.message || e, 'warn', 3600);
   }
 });
-qs('btn-load-raw').addEventListener('click', async function(){ try{ await loadRaw(); }catch(e){ setStatus('status-raw', e.message || e, true); } });
-qs('btn-save-raw').addEventListener('click', async function(){ try{ await saveRaw(); }catch(e){ setStatus('status-raw', e.message || e, true); } });
+qs('btn-load-raw').addEventListener('click', async function(){ try{ await loadRaw(); showNotice('原始配置已读取。', 'ok', 2200); }catch(e){ setStatus('status-raw', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
+qs('btn-save-raw').addEventListener('click', async function(){ try{ await saveRaw(); showNotice('原始配置已保存。', 'ok', 2600); }catch(e){ setStatus('status-raw', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
 qs('btn-test-visual').addEventListener('click', async function(){
   try{
     setVisualActionBusy(true);
     await testVisual();
   }catch(e){
     setStatus('status-visual', e.message || e, true);
+    showNotice(e.message || e, 'warn', 3800);
   }finally{
     setVisualActionBusy(false);
   }
@@ -8958,6 +10668,7 @@ qs('btn-save-visual').addEventListener('click', async function(){
     qs('cfg-api-token-new').value = '';
   }catch(e){
     setStatus('status-visual', e.message || e, true);
+    showNotice(e.message || e, 'warn', 3800);
   }finally{
     setVisualActionBusy(false);
   }
@@ -8983,12 +10694,26 @@ qs('btn-zone-add').addEventListener('click', function(){
 });
 qs('btn-browser-loc').addEventListener('click', useBrowserLocation);
 qs('btn-clear-base-loc').addEventListener('click', function(){ qs('cfg-base-lat').value=''; qs('cfg-base-lon').value=''; updateVisualDraftState(); setStatus('status-visual', '已清空基站坐标，等待测试或保存。', false); });
+['pref-realtime-track','pref-track-2h'].forEach(function(id){
+  var el = qs(id);
+  if(el) el.addEventListener('change', saveBrowserPrefs);
+});
 attachRowRemove('wecom-list', function(){ renderHookRows([]); });
 attachRowRemove('zone-list', function(){ renderZoneRows([]); });
 applyTheme(loadTheme());
 applyTabs();
 bindVisualDraftTracking();
-loadVisual().catch(function(e){ setStatus('status-visual', e.message || e, true); });
+updateHomeActionButtons();
+syncSettingsViewport();
+loadBrowserPrefs();
+window.addEventListener('resize', syncSettingsViewport);
+if(window.visualViewport){
+  try{
+    window.visualViewport.addEventListener('resize', syncSettingsViewport);
+    window.visualViewport.addEventListener('scroll', syncSettingsViewport);
+  }catch(_e){}
+}
+loadVisual().catch(function(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); });
 </script></body></html>"""
 
 def http_server_thread() -> None:
@@ -9022,6 +10747,17 @@ def http_server_thread() -> None:
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
             self.send_header("Permissions-Policy", "geolocation=(self), microphone=(), camera=()")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; "
+                "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; "
+                "script-src 'self' 'unsafe-inline' https://unpkg.com; "
+                "style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; "
+                "font-src 'self' https://fonts.gstatic.com data:; "
+                "img-src 'self' data: blob: https://*.is.autonavi.com; "
+                "connect-src 'self' ws: wss:; "
+                "media-src 'none'"
+            )
             super().end_headers()
 
         def handle(self):
@@ -9045,6 +10781,28 @@ def http_server_thread() -> None:
             except OSError as e:
                 if getattr(e, "errno", None) not in (32, 54, 104, 10053, 10054):
                     raise
+
+        def _send_bytes(self, body: bytes, content_type: str, filename: str | None = None, code: int = 200):
+            body = bytes(body or b"")
+            self.send_response(code)
+            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self.send_header("Cache-Control", "no-store")
+            if filename:
+                safe = re.sub(r'[^A-Za-z0-9._-]+', '_', str(filename or "download.bin")).strip("._") or "download.bin"
+                self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except OSError as e:
+                if getattr(e, "errno", None) not in (32, 54, 104, 10053, 10054):
+                    raise
+
+        def _redirect(self, location: str, code: int = 302):
+            self.send_response(code)
+            self.send_header("Location", str(location or "/"))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _read_json_body(self) -> dict:
             try:
@@ -9073,8 +10831,6 @@ def http_server_thread() -> None:
 
         def _auth_fail(self):
             self.send_response(401)
-            realm = str(AUTH_CFG.get("realm") or "Light RID Scanner").replace('"', "")
-            self.send_header("WWW-Authenticate", f'Basic realm="{realm}", charset="UTF-8"')
             self.send_header("Content-Type", "application/json; charset=utf-8")
             body = json.dumps({"ok": False, "error": "auth required"}, ensure_ascii=False).encode("utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -9092,6 +10848,22 @@ def http_server_thread() -> None:
                 "error": "api token required",
                 "hint": "use X-API-Token or Authorization: Bearer <token>",
             }, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
+        def _rate_limit_fail(self, retry_after: int = 60):
+            body = json.dumps({
+                "ok": False,
+                "error": "too many attempts",
+                "retry_after_sec": int(max(1, retry_after)),
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Retry-After", str(int(max(1, retry_after))))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
@@ -9133,9 +10905,6 @@ def http_server_thread() -> None:
                 return True
             if _auth_check_session_cookie(self.headers.get("Cookie"), refresh=True):
                 return True
-            if _auth_check_basic_header(self.headers.get("Authorization")):
-                self._auth_set_cookie_token = _auth_issue_session()
-                return True
             req_path = str(self.path or "").split("?", 1)[0]
             if req_path == "/ws":
                 # Avoid Safari repeatedly showing Basic-Auth dialog on websocket reconnect.
@@ -9143,7 +10912,17 @@ def http_server_thread() -> None:
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return False
-            self._auth_fail()
+            if req_path.startswith("/api/"):
+                self._auth_fail()
+                return False
+            try:
+                from urllib.parse import quote
+                target = str(self.path or "/")
+                if not target.startswith("/") or target.startswith("//"):
+                    target = "/"
+                self._redirect("/login?next=" + quote(target, safe="/?=&%"))
+            except Exception:
+                self._redirect("/login")
             return False
 
         def _require_page_api(self) -> bool:
@@ -9161,12 +10940,21 @@ def http_server_thread() -> None:
         def _require_api_token(self, query: dict | None = None) -> bool:
             if not _api_token_enabled():
                 return False
-            if bool(API_CFG.get("whitelist_enabled")) and (not _api_ip_allowed(self.client_address[0] if self.client_address else "", API_CFG.get("whitelist") or [])):
+            ip = self.client_address[0] if self.client_address else ""
+            if bool(API_CFG.get("whitelist_enabled")) and (not _api_ip_allowed(ip, API_CFG.get("whitelist") or [])):
+                _op_log("api-whitelist-deny", str(self.path or ""), ip=str(ip or "-"), ok=False)
                 self._api_whitelist_fail()
+                return False
+            limited, retry_after = _rate_limited("api-token", ip, str(self.path or ""), limit=24, window_sec=120, block_sec=600)
+            if limited:
+                self._rate_limit_fail(retry_after)
                 return False
             token = _api_token_from_request(self.headers, query)
             if _api_token_check_value(token):
+                _rate_note("api-token", ip, str(self.path or ""), success=True, limit=24, window_sec=120, block_sec=600)
                 return True
+            _rate_note("api-token", ip, str(self.path or ""), success=False, limit=24, window_sec=120, block_sec=600)
+            _op_log("api-token-deny", str(self.path or ""), ip=str(ip or "-"), ok=False)
             self._api_token_fail()
             return False
 
@@ -9180,6 +10968,91 @@ def http_server_thread() -> None:
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
+            if path == "/api/oobe/status":
+                if not self._require_page_api():
+                    return
+                self._send_json(_oobe_status_payload(), 200)
+                return
+            if path in ("/oobe", "/oobe.html"):
+                if not _oobe_state().get("required"):
+                    self._redirect("/")
+                    return
+                if _oobe_auth_required() and not _auth_check_session_cookie(self.headers.get("Cookie"), refresh=True):
+                    self._redirect("/login?next=/oobe")
+                    return
+                body = _build_oobe_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if _oobe_redirect_required(path) and not (path in ("/login", "/login.html") and _oobe_auth_required()):
+                if path == "/ws":
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif path.startswith("/api/"):
+                    self._send_json({
+                        "ok": False,
+                        "error": "oobe required",
+                        "oobe": _oobe_state(),
+                    }, 409)
+                else:
+                    self._redirect("/oobe")
+                return
+            if path in ("/login", "/login.html"):
+                next_path = str((query.get("next") or ["/"])[0] or "/")
+                if not next_path.startswith("/") or next_path.startswith("//"):
+                    next_path = "/"
+                if not _auth_enabled():
+                    self._redirect(next_path)
+                    return
+                user_hash = str((query.get("user") or [""])[0] or "")
+                pass_hash = str((query.get("password") or [""])[0] or "")
+                if user_hash and not pass_hash and ",password=" in user_hash:
+                    user_hash, pass_hash = user_hash.split(",password=", 1)
+                if user_hash and pass_hash:
+                    ip = _client_ip_from_handler(self)
+                    limited, retry_after = _rate_limited("login-sso", ip, user_hash, limit=8, window_sec=300, block_sec=900)
+                    if limited:
+                        self._rate_limit_fail(retry_after)
+                        return
+                    ok_login = _auth_check_userpass_hash(user_hash, pass_hash)
+                    _rate_note("login-sso", ip, user_hash, success=ok_login, limit=8, window_sec=300, block_sec=900)
+                    _op_log("login-sso", "next=" + next_path, actor=user_hash[:12], ip=ip, ok=ok_login)
+                    if ok_login:
+                        self._auth_set_cookie_token = _auth_issue_session()
+                        self._redirect(next_path)
+                    else:
+                        body = _build_login_html(next_path).replace(
+                            '<span class="status" id="status"></span>',
+                            '<span class="status err" id="status">SSO 登录失败</span>',
+                            1,
+                        ).encode("utf-8")
+                        self.send_response(401)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    return
+                if _auth_check_session_cookie(self.headers.get("Cookie"), refresh=True):
+                    self._redirect(next_path)
+                    return
+                body = _build_login_html(next_path).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/logout":
+                _op_log("logout", "", ip=_client_ip_from_handler(self), ok=True)
+                self._auth_clear_cookie = True
+                self._redirect("/login")
+                return
             if _path_uses_api_token(path):
                 if not self._require_public_api(query):
                     return
@@ -9330,6 +11203,13 @@ def http_server_thread() -> None:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif path in ("/logs", "/logs.html"):
+                body = _build_logs_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif path in ("/hardware-assistant", "/hardware-assistant.html"):
                 body = _HW_PAGE_HTML.encode("utf-8")
                 self.send_response(200)
@@ -9366,6 +11246,32 @@ def http_server_thread() -> None:
                     "copy_supported": bool(str(API_CFG.get("token") or "").strip()),
                     "masked": (_mask_secret(str(API_CFG.get("token") or ""), keep=4) if str(API_CFG.get("token") or "").strip() else ("********" if str(API_CFG.get("token_sha256") or "").strip() else "")),
                 }, 200)
+            elif path == "/api/settings/runtime":
+                try:
+                    limit = int((query.get("limit") or ["180"])[0] or "180")
+                except Exception:
+                    limit = 180
+                self._send_json(_settings_runtime_payload(limit=limit), 200)
+            elif path == "/api/logs/view":
+                try:
+                    limit = int((query.get("limit") or ["500"])[0] or "500")
+                except Exception:
+                    limit = 500
+                log_type = str((query.get("type") or ["runtime"])[0] or "runtime")
+                self._send_json(_logs_snapshot(log_type, limit=limit), 200)
+            elif path == "/api/logs/export":
+                try:
+                    limit = int((query.get("limit") or ["5000"])[0] or "5000")
+                except Exception:
+                    limit = 5000
+                log_type = str((query.get("type") or ["all"])[0] or "all")
+                try:
+                    body, filename, ctype = _logs_export_bytes(log_type, limit=limit)
+                    _op_log("logs-export", f"type={log_type} limit={limit}", ip=_client_ip_from_handler(self), ok=True)
+                    self._send_bytes(body, ctype, filename=filename, code=200)
+                except Exception as e:
+                    _op_log("logs-export", f"type={log_type} error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/interfaces":
                 try:
                     basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
@@ -9412,6 +11318,7 @@ def http_server_thread() -> None:
             elif path == "/api/tools/export/all":
                 with state_lock:
                     items = _history_disk_items_locked()
+                _op_log("tools-export-all", f"count={len(items)}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "version": 1,
@@ -9431,6 +11338,7 @@ def http_server_thread() -> None:
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
                     track = _sanitize_track(src.get("track") or [])
+                _op_log("tools-export-track", f"sn={sn} count={len(track)}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "version": 1,
@@ -9439,6 +11347,14 @@ def http_server_thread() -> None:
                     "count": len(track),
                     "track": track,
                 }, 200)
+            elif path == "/api/tools/diagnostic.zip":
+                try:
+                    body, filename = _diagnostic_zip_bytes()
+                    _op_log("diagnostic-export", f"filename={filename} bytes={len(body)}", ip=_client_ip_from_handler(self), ok=True)
+                    self._send_bytes(body, "application/zip", filename=filename, code=200)
+                except Exception as e:
+                    _op_log("diagnostic-export", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/ws":
                 # Headers are already parsed by BaseHTTPRequestHandler; read key directly.
                 origin = str(self.headers.get("Origin") or "").strip()
@@ -9504,6 +11420,41 @@ def http_server_thread() -> None:
         def do_POST(self):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
+            if path == "/api/oobe/save":
+                if not _oobe_state().get("required"):
+                    self._send_json({"ok": False, "error": "oobe not active"}, 409)
+                    return
+                if not self._require_page_api():
+                    return
+                body = self._read_json_body()
+                rsp = _oobe_save_config(body)
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                return
+            if _oobe_redirect_required(path) and not (path in ("/login", "/login.html") and _oobe_auth_required()):
+                self._send_json({
+                    "ok": False,
+                    "error": "oobe required",
+                    "oobe": _oobe_state(),
+                }, 409)
+                return
+            if path in ("/login", "/login.html"):
+                body = self._read_json_body()
+                user = str(body.get("username") or "")
+                pwd = str(body.get("password") or "")
+                ip = _client_ip_from_handler(self)
+                limited, retry_after = _rate_limited("login", ip, user, limit=8, window_sec=300, block_sec=900)
+                if limited:
+                    self._rate_limit_fail(retry_after)
+                    return
+                ok_login = _auth_check_userpass(user, pwd)
+                _rate_note("login", ip, user, success=ok_login, limit=8, window_sec=300, block_sec=900)
+                _op_log("login", "", actor=user or "-", ip=ip, ok=ok_login)
+                if ok_login:
+                    self._auth_set_cookie_token = _auth_issue_session()
+                    self._send_json({"ok": True, "next": "/"}, 200)
+                else:
+                    self._send_json({"ok": False, "error": "账号或密码错误"}, 401)
+                return
             if _path_uses_api_token(path):
                 if not self._require_public_api(None):
                     return
@@ -9525,6 +11476,7 @@ def http_server_thread() -> None:
             if path == "/api/v1/history/clear":
                 try:
                     cleared, removed = clear_history_store(delete_file=True)
+                    _op_log("api-v1-history-clear", f"cleared={cleared} file_removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                     self._send_json({
                         "ok": True,
                         "api": _api_meta(),
@@ -9542,6 +11494,7 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
                 removed = delete_history_item(sn)
+                _op_log("api-v1-history-delete", f"sn={sn} removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
@@ -9553,6 +11506,7 @@ def http_server_thread() -> None:
                 body = self._read_json_body()
                 sn = str(body.get("sn") or "").strip()
                 affected = clear_track_store(sn if sn else None)
+                _op_log("api-v1-track-clear", f"sn={sn or '*'} affected={affected}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
@@ -9567,6 +11521,7 @@ def http_server_thread() -> None:
                 try:
                     cfg_loaded = load_app_config(APP_CONFIG_PATH)
                     r_ok, r_msg = reload_runtime_config(cfg_loaded)
+                    _op_log("api-v1-config-reload", f"ok={r_ok} msg={r_msg}", ip=_client_ip_from_handler(self), ok=bool(r_ok))
                     self._send_json({
                         "ok": True,
                         "api": _api_meta(),
@@ -9581,6 +11536,7 @@ def http_server_thread() -> None:
                 self._read_json_body()
                 try:
                     cleared, removed = clear_history_store(delete_file=True)
+                    _op_log("history-clear", f"cleared={cleared} file_removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                     self._send_json({
                         "ok": True,
                         "cleared": cleared,
@@ -9596,11 +11552,13 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
                 removed = delete_history_item(sn)
+                _op_log("history-delete", f"sn={sn} removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({"ok": True, "sn": sn, "removed": bool(removed)}, 200)
             elif path == "/api/tracks/clear":
                 body = self._read_json_body()
                 sn = str(body.get("sn") or "").strip()
                 affected = clear_track_store(sn if sn else None)
+                _op_log("track-clear", f"sn={sn or '*'} affected={affected}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "sn": (sn or None),
@@ -9618,6 +11576,7 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "invalid payload: expect items[]/drones[] or list"}, 400)
                     return
                 added, updated, skipped = import_details_payload(payload)
+                _op_log("tools-import-all", f"added={added} updated={updated} skipped={skipped}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "added": int(added),
@@ -9650,6 +11609,7 @@ def http_server_thread() -> None:
                         e["track"] = list(track)
                         e["track_updated_wall_ts"] = h["track_updated_wall_ts"]
                     _history_mark_dirty()
+                _op_log("tools-import-track", f"sn={sn} count={len(track)}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "sn": sn,
@@ -9664,8 +11624,10 @@ def http_server_thread() -> None:
                 try:
                     rsp = _hw_submit_task(body, timeout_sec=15)
                     code = 200 if rsp.get("ok") else 500
+                    _op_log("hw-op", f"op={op} ok={rsp.get('ok')} iface={body.get('iface') or ''}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                     self._send_json(rsp, code)
                 except Exception as e:
+                    _op_log("hw-op", f"op={op} error={e}", ip=_client_ip_from_handler(self), ok=False)
                     self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/admin/restart":
                 body = self._read_json_body()
@@ -9699,8 +11661,10 @@ def http_server_thread() -> None:
                             return
                     ok, msg = _schedule_self_restart(tokens)
                     if not ok:
+                        _op_log("admin-restart", f"schedule_failed={msg}", ip=_client_ip_from_handler(self), ok=False)
                         self._send_json({"ok": False, "error": msg}, 409)
                         return
+                    _op_log("admin-restart", f"save={save_cfg} args={tokens}", ip=_client_ip_from_handler(self), ok=True)
                     self._send_json({
                         "ok": True,
                         "restarting": True,
@@ -9744,8 +11708,10 @@ def http_server_thread() -> None:
                 r_ok, r_msg = reload_runtime_config(cfg_loaded)
                 if not r_ok:
                     restore_config_backup(APP_CONFIG_PATH, backup_path)
+                    _op_log("config-save", f"reload_failed={r_msg}", ip=_client_ip_from_handler(self), ok=False)
                     self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
                     return
+                _op_log("config-save", f"backup={backup_path}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "saved_to": APP_CONFIG_PATH,
@@ -9756,10 +11722,12 @@ def http_server_thread() -> None:
             elif path == "/api/settings/visual/test":
                 body = self._read_json_body()
                 rsp = _save_visual_settings(body, test_only=True)
+                _op_log("settings-test", str(rsp.get("error") or rsp.get("reload_msg") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 self._send_json(rsp, 200 if rsp.get("ok") else 400)
             elif path == "/api/settings/visual/save":
                 body = self._read_json_body()
                 rsp = _save_visual_settings(body, test_only=False)
+                _op_log("settings-save", str(rsp.get("error") or rsp.get("backup_path") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 self._send_json(rsp, 200 if rsp.get("ok") else 400)
             elif path == "/api/settings/raw/save":
                 body = self._read_json_body()
@@ -9791,8 +11759,10 @@ def http_server_thread() -> None:
                 r_ok, r_msg = reload_runtime_config(cfg_loaded)
                 if not r_ok:
                     restore_config_backup(APP_CONFIG_PATH, backup_path)
+                    _op_log("settings-raw-save", f"reload_failed={r_msg}", ip=_client_ip_from_handler(self), ok=False)
                     self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
                     return
+                _op_log("settings-raw-save", f"backup={backup_path}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "saved_to": APP_CONFIG_PATH,
@@ -9802,14 +11772,31 @@ def http_server_thread() -> None:
                 }, 200)
             elif path == "/api/settings/notify/test":
                 ok, resp = send_test_notification_from_config()
+                _op_log("notify-test", str(resp or ""), ip=_client_ip_from_handler(self), ok=bool(ok))
                 self._send_json({"ok": bool(ok), "resp": resp}, 200 if ok else 500)
             elif path == "/api/settings/api-token/reveal":
                 if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
                     self._send_json({"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400)
                     return
-                if not _auth_check_basic_header(self.headers.get("Authorization")):
+                body = self._read_json_body()
+                reauth_ok = False
+                ip = _client_ip_from_handler(self)
+                subject = str(body.get("username") or "-") if body else "-"
+                limited, retry_after = _rate_limited("token-reveal", ip, subject, limit=5, window_sec=300, block_sec=900)
+                if limited:
+                    self._rate_limit_fail(retry_after)
+                    return
+                if body:
+                    reauth_ok = _auth_check_userpass(str(body.get("username") or ""), str(body.get("password") or ""))
+                if not reauth_ok and self.headers.get("Authorization"):
+                    reauth_ok = _auth_check_basic_header(self.headers.get("Authorization"))
+                if not reauth_ok:
+                    _rate_note("token-reveal", ip, subject, success=False, limit=5, window_sec=300, block_sec=900)
+                    _op_log("token-reveal", "", actor=subject, ip=ip, ok=False)
                     self._send_json({"ok": False, "error": "账号或密码错误"}, 401)
                     return
+                _rate_note("token-reveal", ip, subject, success=True, limit=5, window_sec=300, block_sec=900)
+                _op_log("token-reveal", "", actor=subject, ip=ip, ok=True)
                 token_plain = str(API_CFG.get("token") or "").strip()
                 if not token_plain:
                     self._send_json({"ok": False, "error": "当前 Token 只有哈希或尚未设置，请先重新设置一次 Token"}, 400)
@@ -9912,12 +11899,14 @@ def http_server_thread() -> None:
                     return
                 iface_raw = body.get("iface")
                 iface = None if iface_raw in (None, "") else str(iface_raw).strip()
-                if iface:
-                    safe_iface = _hw_safe_iface(iface)
-                    if not safe_iface:
-                        self._send_json({"ok": False, "error": "invalid iface"}, 400)
-                        return
-                    iface = safe_iface
+                if not iface:
+                    self._send_json({"ok": False, "error": "必须选择默认网卡"}, 400)
+                    return
+                safe_iface = _hw_safe_iface(iface)
+                if not safe_iface:
+                    self._send_json({"ok": False, "error": "invalid iface"}, 400)
+                    return
+                iface = safe_iface
                 scan_wifi_fast = _to_bool(body.get("scan_wifi_fast"), False)
                 try:
                     cfg = load_app_config(APP_CONFIG_PATH)
@@ -9941,8 +11930,6 @@ def http_server_thread() -> None:
                         restore_config_backup(APP_CONFIG_PATH, backup_path)
                         self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
                         return
-                    if iface:
-                        _sniff_recover_iface(iface, "web apply default iface", force=True)
                     basic_now = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
                     if not isinstance(basic_now, dict):
                         basic_now = {}
@@ -10637,6 +12624,7 @@ def main() -> None:
         fail_count = 0
         recover_fail_count = 0
         iface_cur = str(iface or "")
+        iface_watch_since = time.monotonic() if iface_cur else 0.0
         hop_started = bool(args.hop and bool(iface))
 
         def note_recover_failure(reason: str, allow_restart: bool = True) -> None:
@@ -10656,11 +12644,17 @@ def main() -> None:
         def note_recover_success() -> None:
             nonlocal recover_fail_count
             recover_fail_count = 0
+
+        def set_iface_watch(iface_name: str) -> None:
+            nonlocal iface_watch_since
+            iface_watch_since = time.monotonic() if iface_name else 0.0
+
         while True:
             prefer_iface = _cfg_preferred_iface()
             if not iface_cur:
                 iface_cur = _sniff_pick_iface(prefer=prefer_iface)
                 if iface_cur:
+                    set_iface_watch(iface_cur)
                     with sniff_health_lock:
                         sniff_iface_name = iface_cur
                     _log(f"[INFO] sniff iface recovered: {iface_cur}")
@@ -10682,7 +12676,9 @@ def main() -> None:
                             run_cmd(f"iw dev {iface_cur} set channel {current_channel}")
                 else:
                     _sniff_note_error(NO_IFACE_DEGRADE_HINT)
-                    note_recover_failure("no iface available", allow_restart=True)
+                    # Missing/unconfigured NIC should surface as a stable degraded state,
+                    # not a self-restart loop.
+                    note_recover_failure("no iface available", allow_restart=False)
                     _log(f"[WARN] sniff no available iface, retry in {retry_delay:.0f}s")
                     time.sleep(retry_delay)
                     continue
@@ -10690,20 +12686,58 @@ def main() -> None:
             try:
                 with sniff_health_lock:
                     sniff_iface_name = iface_cur
-                sniff(iface=iface_cur, prn=parse_frame, store=False, monitor=True, timeout=SNIFF_POLL_TIMEOUT)
+                state, detail = _sniff_run_once(iface_cur, timeout_sec=SNIFF_POLL_TIMEOUT)
+                if state == "hung":
+                    _sniff_note_error(f"sniff worker hung: {detail}")
+                    _log(f"[WARN] sniff worker hung on {iface_cur}: {detail}")
+                    recovered = _sniff_recover_iface(iface_cur, f"worker hung: {detail}", force=True)
+                    if not recovered:
+                        new_iface = _sniff_pick_iface(prefer=(prefer_iface or iface_cur))
+                        if new_iface and new_iface != iface_cur:
+                            _log(f"[WARN] sniff iface switch after hang: {iface_cur} -> {new_iface}")
+                            iface_cur = new_iface
+                            set_iface_watch(iface_cur)
+                            with sniff_health_lock:
+                                sniff_iface_name = iface_cur
+                            recovered = _sniff_recover_iface(iface_cur, "switch iface after hang", force=True)
+                    if recovered:
+                        set_iface_watch(iface_cur)
+                        note_recover_success()
+                    else:
+                        note_recover_failure(f"worker hung on {iface_cur}", allow_restart=True)
+                    time.sleep(retry_delay)
+                    continue
+                if state != "ok":
+                    raise RuntimeError(detail or "sniff worker failed")
                 fail_count = 0
-                note_recover_success()
-                idle = _sniff_idle_sec()
+                now_mono = time.monotonic()
+                idle = _sniff_idle_sec(now_mono)
+                no_pkt_elapsed = None
+                if idle is None and iface_watch_since > 0.0:
+                    no_pkt_elapsed = max(0.0, now_mono - iface_watch_since)
+                stall_reason = None
                 if idle is not None and idle >= SNIFF_STALL_RECOVER_SEC:
-                    ok = _sniff_recover_iface(iface_cur, f"idle {idle:.0f}s without management frame")
-                    if not ok:
+                    stall_reason = f"idle {idle:.0f}s without management frame"
+                elif no_pkt_elapsed is not None and no_pkt_elapsed >= SNIFF_STALL_RECOVER_SEC:
+                    stall_reason = f"no management frame for {no_pkt_elapsed:.0f}s after sniff start"
+                if stall_reason:
+                    recovered = _sniff_recover_iface(iface_cur, stall_reason, force=True)
+                    if not recovered:
                         new_iface = _sniff_pick_iface(prefer=(prefer_iface or iface_cur))
                         if new_iface and new_iface != iface_cur:
                             _log(f"[WARN] sniff iface switch: {iface_cur} -> {new_iface}")
                             iface_cur = new_iface
+                            set_iface_watch(iface_cur)
                             with sniff_health_lock:
                                 sniff_iface_name = iface_cur
-                            _sniff_recover_iface(iface_cur, "switch iface recovery", force=True)
+                            recovered = _sniff_recover_iface(iface_cur, "switch iface recovery", force=True)
+                    if recovered:
+                        set_iface_watch(iface_cur)
+                        note_recover_success()
+                    else:
+                        note_recover_failure(stall_reason, allow_restart=True)
+                else:
+                    note_recover_success()
                 time.sleep(0.05)
             except Exception as ex:
                 fail_count += 1
@@ -10724,12 +12758,14 @@ def main() -> None:
                     if new_iface and new_iface != iface_cur:
                         _log(f"[WARN] sniff iface unavailable, switch {iface_cur} -> {new_iface}")
                         iface_cur = new_iface
+                        set_iface_watch(iface_cur)
                         with sniff_health_lock:
                             sniff_iface_name = iface_cur
                         _sniff_recover_iface(iface_cur, f"after iface switch: {ex_msg}", force=True)
                     elif new_iface:
                         _log(f"[WARN] sniff iface exception#{fail_count}: {ex_msg}, try reset {iface_cur}")
-                        _sniff_recover_iface(iface_cur, f"exception#{fail_count}: {ex_msg}", force=True)
+                        if _sniff_recover_iface(iface_cur, f"exception#{fail_count}: {ex_msg}", force=True):
+                            set_iface_watch(iface_cur)
                     else:
                         _log(f"[WARN] sniff iface lost: {ex_msg}, waiting for NIC recovery")
                         iface_cur = ""

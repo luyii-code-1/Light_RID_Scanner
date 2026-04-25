@@ -44,6 +44,19 @@ sudo ~/rid/.venv/bin/python3 run.py
 
 - `http://<设备IP>:4600/`
 
+## 固定网卡绑定与 OOBE
+
+- 扫描器不再自动递增轮换网卡。
+- `basic.iface` 现在被视为固定绑定项；如果这张网卡不存在，服务会保持降级运行并提示配置，而不是悄悄切到别的网卡。
+- 如果 `rid_config.json` 缺失、损坏，或者还没有绑定默认网卡，网页会进入 `/oobe` 初始化流程。
+- OOBE 用来完成最小可运行配置：
+  - 选择默认无线网卡
+  - 设置 RID 信道
+  - 可选填写基站坐标
+  - 可选设置网页登录账号和密码
+
+这样做的目的很直接：多网卡环境下不再抓错卡，启动异常也会直接暴露为配置问题，方便固定基站长期稳定运行。
+
 ## 主要页面
 
 - `/`
@@ -188,7 +201,7 @@ PY
 
 - 外部脚本必须等你显式开启外部 API 后才能访问
 - Light RID Scanner 自带页面仍可正常工作
-- HTTP Basic 不再直接放行 API 路径
+- 网页登录会话不会直接放行 Token API 路径
 
 ## 网页登录鉴权 与 Token API 鉴权的区别
 
@@ -196,7 +209,7 @@ PY
 
 ### 网页登录鉴权
 
-它用于浏览器页面和基于当前会话的辅助接口。
+它用于浏览器页面和基于当前会话的辅助接口。浏览器现在使用 `/login` 登录页和会话 Cookie，不再弹出 HTTP Basic 登录框。
 
 配置示例：
 
@@ -221,12 +234,27 @@ print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
 PY
 ```
 
+受信任的本地启动器可以使用 SSO 形式登录：
+
+```text
+/login?user=<sha256(username)>&password=<sha256(password)>
+```
+
+旧快捷方式如果写成逗号形式也能兼容：
+
+```text
+/login?user=<sha256(username)>,password=<sha256(password)>
+```
+
 ### 只给网页会话用的辅助接口
 
 这些接口主要给内置页面使用，依赖当前浏览器会话：
 
 - `GET /api/settings/view`
+- `GET /api/settings/runtime`
 - `GET /api/settings/api-docs`
+- `GET /api/logs/view?type=runtime|operation|scan|scan_diff|ap`
+- `GET /api/logs/export?type=all|runtime|operation|scan|scan_diff|ap`
 - `POST /api/settings/visual/save`
 - `POST /api/settings/raw/save`
 - `POST /api/settings/notify/test`
@@ -235,6 +263,7 @@ PY
 - `GET /api/config`
 - `GET /api/tools/export/all`
 - `GET /api/tools/export/track?sn=<SN>`
+- `GET /api/tools/diagnostic.zip`
 - `POST /api/tools/import/all`
 - `POST /api/tools/import/track`
 - `GET /api/tracks/get?sn=<SN>`
@@ -248,7 +277,8 @@ PY
 
 - 当前 API Token 会以密码框遮罩显示
 - 显示或复制前，必须再次输入网页登录账号和密码
-- 这次再次验证沿用网页登录凭据，但不会因此让 HTTP Basic 直接放行 API 路径
+- 这次再次验证沿用网页登录凭据；外部 API 开启后仍必须使用 API Token
+- 登录、Token 显示/复制、外部 API Token 失败都会触发内存限流，并写入操作日志。
 
 ## API 总览
 
@@ -301,6 +331,20 @@ PY
 - 编辑基站位置
 - 通过浏览器定位填充基站坐标
 - 原始 `rid_config.json` 编辑
+
+## 日志页
+
+打开方式：
+
+- `/logs`
+
+支持内容：
+
+- 运行日志
+- 操作 / 审计日志
+- 完整扫描日志
+- 运行日志与扫描日志的 unified diff
+- 单项文本导出或全部 ZIP 导出
 - API 文档查看
 - 跳转到硬件助手
 

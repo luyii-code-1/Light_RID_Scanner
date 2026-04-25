@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.codex
 build
 # Runtime config (contains secrets)
 rid_config.json

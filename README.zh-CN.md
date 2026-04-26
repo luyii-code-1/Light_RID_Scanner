@@ -14,13 +14,18 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
   - `其他`（实时 AP 列表 + AP 扫描日志）
 - 独立 `/settings` 设置页，支持可视化编辑
 - 独立 `/hardware-assistant` 硬件助手页面
+- 服务端通知中心，多浏览器会话同步
 - 飞机历史与轨迹持久化
 - 从 RID `System` 消息中提取飞手位置
 - 支持导出全部详情和单机轨迹
 - 支持 Token 保护的外部 API
 - 支持网页登录 / 会话鉴权
+- 支持再次验证账密后生成一次性登录链接
+- 支持配置单次网页登录有效期，默认 30 分钟
 - 企业微信支持多机器人通道
 - 支持多个自定义报警区域并绘制到地图上
+- 支持从可配置地址在线更新 RID 识别库
+- 支持 CPU、内存、温度、系统负载和 AP 数趋势
 
 ## 运行环境
 
@@ -54,6 +59,9 @@ sudo ~/rid/.venv/bin/python3 run.py
   - 设置 RID 信道
   - 可选填写基站坐标
   - 可选设置网页登录账号和密码
+- 设置页可以手动进入两种 OOBE：
+  - 简化 OOBE，用于完成最小配置
+  - 完整 OOBE，留在设置页编辑完整配置
 
 这样做的目的很直接：多网卡环境下不再抓错卡，启动异常也会直接暴露为配置问题，方便固定基站长期稳定运行。
 
@@ -80,6 +88,10 @@ sudo ~/rid/.venv/bin/python3 run.py
   运行时生成的历史 / 轨迹缓存。
 - `rid_config.json.rollback`
   配置文件回滚副本。
+- `rid_build_info.json`
+  本地构建版本标记，用于页面版本号，例如 `commit:ba15d57#3`。
+- 临时目录 `light_rid_scanner/host_metrics.jsonl`
+  运行期主机负载趋势数据。不存在会自动创建，不应提交。
 
 ## 配置结构
 
@@ -97,6 +109,10 @@ sudo ~/rid/.venv/bin/python3 run.py
   浏览器网页登录 / 会话鉴权。
 - `api`
   外部 API 的 Token 鉴权。
+- `model_update`
+  在线识别库更新设置。
+- `metrics`
+  主机负载趋势保留时间设置。
 
 示例配置文件：
 
@@ -219,6 +235,7 @@ PY
     "enabled": true,
     "username_sha256": "<sha256(username)>",
     "password_sha256": "<sha256(password)>",
+    "session_ttl_min": 30,
     "realm": "Light RID Scanner"
   }
 }
@@ -246,18 +263,29 @@ PY
 /login?user=<sha256(username)>,password=<sha256(password)>
 ```
 
+设置页也可以在再次验证账号和密码后生成一次性登录链接。生成的 URL 使用 `/login?code=<one-time-code>&next=/`，只在短时间内有效，成功登录后立即失效。
+
+网页登录会话过期后，内置页面再次请求接口会收到鉴权失败，并自动回到 `/login`。
+
 ### 只给网页会话用的辅助接口
 
 这些接口主要给内置页面使用，依赖当前浏览器会话：
 
+- `GET /api/notifications?limit=200`
+- `POST /api/notifications`
+- `POST /api/notifications/delete`
+- `POST /api/notifications/clear`
 - `GET /api/settings/view`
 - `GET /api/settings/runtime`
+- `GET /api/settings/metrics?window=12h|24h|7d`
 - `GET /api/settings/api-docs`
 - `GET /api/logs/view?type=runtime|operation|scan|scan_diff|ap`
 - `GET /api/logs/export?type=all|runtime|operation|scan|scan_diff|ap`
 - `POST /api/settings/visual/save`
 - `POST /api/settings/raw/save`
 - `POST /api/settings/notify/test`
+- `POST /api/settings/models/update`
+- `POST /api/settings/login-link/create`
 - `GET /api/hw/status`
 - `POST /api/hw/op`
 - `GET /api/config`
@@ -278,7 +306,8 @@ PY
 - 当前 API Token 会以密码框遮罩显示
 - 显示或复制前，必须再次输入网页登录账号和密码
 - 这次再次验证沿用网页登录凭据；外部 API 开启后仍必须使用 API Token
-- 登录、Token 显示/复制、外部 API Token 失败都会触发内存限流，并写入操作日志。
+- 生成一次性登录链接也需要同样的再次验证
+- 登录、一次性登录链接、Token 显示/复制、外部 API Token 失败都会触发内存限流，并写入操作日志。
 
 ## API 总览
 
@@ -330,7 +359,63 @@ PY
 - 可视化编辑多个报警区域
 - 编辑基站位置
 - 通过浏览器定位填充基站坐标
+- 在线更新 RID 识别库，支持修改更新地址并手动触发
+- 按 CPU、内存、温度、系统负载、AP 数拆分展示主机负载趋势
+- 主机负载趋势支持 12 小时、24 小时、7 天视图
+- 主机负载数据保留时间可配置，默认 7 天
+- 手动进入简化 OOBE 和完整 OOBE
+- 再次验证账密后生成一次性登录链接
 - 原始 `rid_config.json` 编辑
+
+### 在线识别库更新
+
+设置页可以从远端 JSON 文件更新 `rid_models.json`。默认地址：
+
+```text
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json
+```
+
+行为说明：
+
+- 启用后每天自动检查一次
+- 手动更新按钮使用同一个地址
+- 地址必须以 `http://` 或 `https://` 开头
+- 更新成功或失败都会写入操作日志和通知中心
+
+### 主机负载趋势
+
+设置页将主机负载拆成多个独立小图：
+
+- CPU
+- 内存
+- 温度
+- 系统负载
+- AP 数
+
+数据约每分钟采样一次，默认写入系统临时目录下的 `light_rid_scanner/host_metrics.jsonl`。文件不存在会自动创建，服务重启后继续沿用，并按 `metrics.retention_days` 自动裁剪。
+
+### 构建版本
+
+页面版本号格式为：
+
+```text
+commit:<Git短提交号>#<本地构建号>
+```
+
+`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。`tools/bump_build.py` 用来在同一个 Git commit 上连续本地测试时递增 `#` 后缀；`tools/pi_tools.py sync` 同步到树莓派前会自动执行递增。
+
+## 通知中心
+
+通知中心现在由服务端提供数据，不再依赖浏览器本地缓存。最近通知保存在服务进程内存中，并通过 `/api/notifications` 提供给所有打开的浏览器会话。
+
+当前通知来源包括：
+
+- 飞机上线 / 离线事件
+- 报警区域事件
+- 识别库更新结果
+- 内置页面提交的手动通知
+
+通知可以单条删除，也可以在页面上一键清空。
 
 ## 日志页
 

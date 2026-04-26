@@ -14,13 +14,18 @@ It keeps the runtime model deliberately simple: one main process in `run.py`, lo
   - `Other` (Realtime AP list + AP scan log)
 - Dedicated `/settings` page for visual config editing
 - Dedicated `/hardware-assistant` page for NIC / `iw` operations
+- Server-side notification center, synchronized across browser sessions
 - RID history and track persistence
 - Pilot position extraction from RID `System` messages
 - Export helpers for aircraft detail and per-aircraft tracks
 - Optional token-protected external API
 - Optional browser login / session auth for the web UI
+- Optional one-time login links generated after username/password re-check
+- Configurable browser session lifetime, defaulting to 30 minutes
 - Enterprise WeCom notifications with multiple webhook channels
 - Multiple custom alarm zones drawn on the map
+- Online RID model map updates from a configurable URL
+- Host load trends for CPU, memory, temperature, system load, and AP count
 
 ## Runtime
 
@@ -54,6 +59,9 @@ Default web URL:
   - set the RID channel
   - optionally set base-station coordinates
   - optionally set the web login account/password
+- The Settings page can manually enter either:
+  - Simplified OOBE, for the minimum setup flow
+  - Full OOBE, by staying in Settings and editing the full configuration surface
 
 Operationally, this makes multi-NIC deployments much safer: the scanner keeps using the intended adapter, and startup problems are surfaced as configuration work rather than hidden auto-fallback.
 
@@ -80,6 +88,10 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
   Runtime-generated history / track cache.
 - `rid_config.json.rollback`
   Rollback copy for config recovery.
+- `rid_build_info.json`
+  Local build marker used for the UI version string, for example `commit:ba15d57#3`.
+- Temp directory `light_rid_scanner/host_metrics.jsonl`
+  Runtime host-metrics store. It is recreated automatically and should not be committed.
 
 ## Configuration Model
 
@@ -97,6 +109,10 @@ The runtime config is split into these top-level sections:
   Browser UI login/session auth.
 - `api`
   External token API auth.
+- `model_update`
+  Online model-map update settings.
+- `metrics`
+  Host-metrics retention settings.
 
 Example file:
 
@@ -217,6 +233,7 @@ Config example:
     "enabled": true,
     "username_sha256": "<sha256(username)>",
     "password_sha256": "<sha256(password)>",
+    "session_ttl_min": 30,
     "realm": "Light RID Scanner"
   }
 }
@@ -244,18 +261,29 @@ For compatibility with old local shortcuts, a comma form is also accepted:
 /login?user=<sha256(username)>,password=<sha256(password)>
 ```
 
+Settings can also generate a one-time login link after a fresh username/password check. The generated URL uses `/login?code=<one-time-code>&next=/`, is valid for a short window, and is removed immediately after a successful login.
+
+When a browser session expires, page API requests return an auth failure and the built-in pages redirect back to `/login`.
+
 ### Session-only helper endpoints
 
 These are meant for the built-in web UI and current browser session:
 
+- `GET /api/notifications?limit=200`
+- `POST /api/notifications`
+- `POST /api/notifications/delete`
+- `POST /api/notifications/clear`
 - `GET /api/settings/view`
 - `GET /api/settings/runtime`
+- `GET /api/settings/metrics?window=12h|24h|7d`
 - `GET /api/settings/api-docs`
 - `GET /api/logs/view?type=runtime|operation|scan|scan_diff|ap`
 - `GET /api/logs/export?type=all|runtime|operation|scan|scan_diff|ap`
 - `POST /api/settings/visual/save`
 - `POST /api/settings/raw/save`
 - `POST /api/settings/notify/test`
+- `POST /api/settings/models/update`
+- `POST /api/settings/login-link/create`
 - `GET /api/hw/status`
 - `POST /api/hw/op`
 - `GET /api/config`
@@ -276,7 +304,8 @@ These are not the same thing as `/api/v1/*`.
 - The current API token is shown as a masked password field
 - Revealing or copying it requires a fresh username/password check
 - That re-check uses the same web auth credentials, but API routes still require the API token when external API mode is enabled
-- Login, token reveal, and external API token failures are rate-limited in memory and written to the operation log.
+- Generating a one-time login link also requires the same fresh username/password check
+- Login, one-time login link, token reveal, and external API token failures are rate-limited in memory and written to the operation log.
 
 ## API Overview
 
@@ -328,7 +357,63 @@ It supports:
 - visual editing of multiple alarm zones
 - base station position editing
 - browser geolocation fill-in for base station position
+- online RID model-map updates, with a configurable URL and manual update button
+- host load trend cards for CPU, memory, temperature, load, and AP count
+- selectable host-metrics windows: 12 hours, 24 hours, and 7 days
+- configurable host-metrics retention, defaulting to 7 days
+- manual entry into Simplified OOBE and Full OOBE
+- one-time login link generation after username/password re-check
 - raw `rid_config.json` editing
+
+### Online model-map updates
+
+The Settings page can update `rid_models.json` from a remote JSON file. The default URL is:
+
+```text
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json
+```
+
+Behavior:
+
+- automatic checks run once per day when enabled
+- manual update uses the same URL field
+- the URL must start with `http://` or `https://`
+- successful and failed update attempts are written to the operation log and notification center
+
+### Host load trends
+
+The Settings page shows host trends as separate mini charts:
+
+- CPU
+- memory
+- temperature
+- system load
+- AP count
+
+Metrics are sampled about once per minute and stored in the system temp directory under `light_rid_scanner/host_metrics.jsonl`. The file is created automatically, kept across service restarts, and pruned according to `metrics.retention_days`.
+
+### Build version
+
+The UI version string is shown as:
+
+```text
+commit:<git-short-commit>#<local-build-number>
+```
+
+`rid_build_info.json` stores the current short commit and local build number. The helper script `tools/bump_build.py` increments the `#` suffix for repeated local test builds on the same Git commit. `tools/pi_tools.py sync` runs that bump before uploading files to the Raspberry Pi.
+
+## Notification Center
+
+The notification center is backed by the server, not browser local storage. It keeps recent runtime messages in memory and exposes them to all active browser sessions through `/api/notifications`.
+
+Current notification sources include:
+
+- aircraft online/offline events
+- alarm-zone events
+- model-map update results
+- manual browser notices posted by the built-in UI
+
+Entries can be deleted individually or cleared from the UI.
 
 ## Logs Page
 

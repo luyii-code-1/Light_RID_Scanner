@@ -17,6 +17,10 @@ tools
 # Runtime data
 rid_history_cache.json
 *_history_cache.json
+rid_build_info.json
+host_metrics.jsonl
+host_metrics.jsonl.tmp
+light_rid_scanner/
 oui.txt
 rid-n/ridn_config.json
 rid-n/**/*.runtime.json

@@ -13,6 +13,7 @@ rid_config.json.rollback
 *.rollback.*
 rid_config.local.json
 *.secrets.json
+EULA.set
 tools
 # Runtime data
 rid_history_cache.json

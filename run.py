@@ -84,6 +84,10 @@ HTTP_JSON_MAX_BYTES = 1024 * 1024
 API_NAME = "Light RID Scanner API"
 API_VERSION = "v1"
 BUILD_INFO_FILE = "rid_build_info.json"
+EULA_SET_FILE = "EULA.set"
+EULA_MARKDOWN_FILE = "EULA.md"
+EULA_LICENSE_FILE = "LICENSE"
+EULA_URL = "https://www.gnu.org/licenses/gpl-3.0.txt"
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
@@ -185,12 +189,10 @@ AUTH_CFG: dict = {
 }
 AUTH_SESSION_COOKIE = "rid_auth"
 AUTH_SESSION_TTL_SEC = 30 * 60
-AUTH_ONESHOT_TTL_SEC = 10 * 60
 auth_session_lock = Lock()
 auth_sso_lock = Lock()
 api_token_lock = Lock()
 auth_sessions: dict[str, float] = {}
-auth_oneshot_links: dict[str, dict] = {}
 auth_session_secret = secrets.token_hex(16)
 API_CFG: dict = {
     "enabled": False,
@@ -367,6 +369,161 @@ def _set_oobe_required(reason: str, required: bool = True) -> None:
 def _oobe_state() -> dict:
     with OOBE_LOCK:
         return {"required": bool(OOBE_REQUIRED), "reason": str(OOBE_REASON or "")}
+
+def _app_file_path(name: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), str(name or ""))
+
+def _eula_set_path() -> str:
+    return _app_file_path(EULA_SET_FILE)
+
+def _eula_accepted() -> bool:
+    try:
+        with open(_eula_set_path(), "r", encoding="utf-8") as f:
+            return f.read().strip() == "1"
+    except Exception:
+        return False
+
+def _write_eula_acceptance() -> tuple[bool, str]:
+    try:
+        path = _eula_set_path()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("1\n")
+        _op_log("eula-accept", f"path={path}", ok=True)
+        return True, path
+    except Exception as e:
+        _op_log("eula-accept", str(e), ok=False)
+        return False, str(e)
+
+def _eula_status_payload() -> dict:
+    return {
+        "ok": True,
+        "accepted": _eula_accepted(),
+        "set_path": _eula_set_path(),
+        "source_url": EULA_URL,
+    }
+
+def _eula_redirect_required(req_path: str | None) -> bool:
+    path = str(req_path or "/")
+    if _eula_accepted():
+        return False
+    allowed = {
+        "/eula",
+        "/eula.html",
+        "/api/eula/status",
+        "/api/eula/accept",
+        "/favicon.ico",
+    }
+    return path not in allowed
+
+def _html_escape(text: str, *, quote: bool = True) -> str:
+    out = str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if quote:
+        out = out.replace('"', "&quot;").replace("'", "&#39;")
+    return out
+
+def _markdown_inline_html(text: str) -> str:
+    escaped = _html_escape(text)
+
+    def _link_repl(match) -> str:
+        label = _html_escape(match.group(1))
+        url = str(match.group(2) or "").strip()
+        if not (url.startswith("https://") or url.startswith("http://")):
+            return label
+        return '<a href="' + _html_escape(url) + '" target="_blank" rel="noopener noreferrer">' + label + "</a>"
+
+    escaped = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", _link_repl, escaped)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    return escaped
+
+def _markdown_to_html(md: str) -> str:
+    lines = str(md or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: list[str] = []
+    paragraph: list[str] = []
+    in_list = False
+    in_code = False
+    code_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            out.append("<p>" + _markdown_inline_html(" ".join(paragraph).strip()) + "</p>")
+            paragraph = []
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for line in lines:
+        raw = line.rstrip("\n")
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            if in_code:
+                out.append('<pre class="eula-code"><code>' + _html_escape("\n".join(code_lines), quote=False) + "</code></pre>")
+                code_lines = []
+                in_code = False
+            else:
+                flush_paragraph()
+                close_list()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(raw)
+            continue
+        if not stripped:
+            flush_paragraph()
+            close_list()
+            continue
+        m = re.match(r"^(#{1,4})\s+(.+)$", stripped)
+        if m:
+            flush_paragraph()
+            close_list()
+            level = min(4, len(m.group(1)))
+            out.append(f"<h{level}>{_markdown_inline_html(m.group(2))}</h{level}>")
+            continue
+        m = re.match(r"^[-*]\s+(.+)$", stripped)
+        if m:
+            flush_paragraph()
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append("<li>" + _markdown_inline_html(m.group(1)) + "</li>")
+            continue
+        paragraph.append(stripped)
+    if in_code:
+        out.append('<pre class="eula-code"><code>' + _html_escape("\n".join(code_lines), quote=False) + "</code></pre>")
+    flush_paragraph()
+    close_list()
+    return "\n".join(out)
+
+def _load_eula_markdown() -> str:
+    parts: list[str] = []
+    md_path = _app_file_path(EULA_MARKDOWN_FILE)
+    if os.path.exists(md_path):
+        try:
+            with open(md_path, "r", encoding="utf-8") as f:
+                parts.append(f.read().strip())
+        except Exception as e:
+            parts.append(f"# GNU GPL v3.0\n\nEULA.md 读取失败：{e}")
+    if not parts:
+        parts.append(
+            "# GNU General Public License v3.0\n\n"
+            f"正式许可文本以 GNU 官方版本为准：[{EULA_URL}]({EULA_URL})。"
+        )
+    license_path = _app_file_path(EULA_LICENSE_FILE)
+    if os.path.exists(license_path):
+        try:
+            with open(license_path, "r", encoding="utf-8", errors="replace") as f:
+                license_text = f.read().strip()
+            if license_text:
+                parts.append("## GNU GPL v3.0 正式文本\n\n```text\n" + license_text + "\n```")
+        except Exception as e:
+            parts.append(f"## GNU GPL v3.0 正式文本\n\nLICENSE 读取失败：{e}")
+    return "\n\n".join(x for x in parts if x)
 
 def _history_mark_dirty() -> None:
     global history_persist_dirty
@@ -1027,24 +1184,6 @@ def restore_config_backup(path: str | None, backup_path: str | None) -> tuple[bo
     except Exception as e:
         return False, str(e)
 
-def _settings_secret_update(new_value, current_hash: str | None) -> tuple[str, bool]:
-    raw = str(new_value or "").strip()
-    cur = str(current_hash or "").strip().lower()
-    if raw in ("", "********", "__KEEP__"):
-        return cur, False
-    if raw.lower() == "__CLEAR__":
-        return "", True
-    return _sha256_hex(raw), True
-
-def _settings_secret_text_update(new_value, current_value: str | None) -> tuple[str, bool]:
-    raw = str(new_value or "").strip()
-    cur = str(current_value or "").strip()
-    if raw in ("", "********", "__KEEP__"):
-        return cur, False
-    if raw.lower() == "__clear__":
-        return "", True
-    return raw, True
-
 def _settings_view_payload() -> dict:
     cfg = load_app_config(APP_CONFIG_PATH) if APP_CONFIG_PATH else default_app_config()
     basic = cfg.get("basic") if isinstance(cfg, dict) else {}
@@ -1083,7 +1222,6 @@ def _settings_view_payload() -> dict:
     host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
     host["ifaces"] = interfaces
     api_tokens_public = _api_tokens_public(api_prepared)
-    api_mask = str((api_tokens_public[0] if api_tokens_public else {}).get("token_masked") or "")
     return {
         "ok": True,
         "path": APP_CONFIG_PATH or "",
@@ -1143,8 +1281,6 @@ def _settings_view_payload() -> dict:
             "api": {
                 "enabled": bool(api_prepared.get("enabled")),
                 "configured": _api_tokens_have_secret(api_prepared),
-                "token_masked": api_mask,
-                "token_copy_supported": any(bool(item.get("copy_supported")) for item in api_tokens_public),
                 "tokens": api_tokens_public,
                 "whitelist_effective": _api_tokens_have_secret(api_prepared),
                 "whitelist_enabled": bool(api_prepared.get("whitelist_enabled")),
@@ -1378,21 +1514,6 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
         api["whitelist_mode"] = "deny" if mode in ("deny", "block", "black", "blacklist") else "allow"
     if "whitelist" in p_api:
         api["whitelist"] = _parse_whitelist_entries(p_api.get("whitelist"))
-    if "tokens" in p_api:
-        current_tokens = _normalize_api_tokens(api.get("tokens"), api.get("token") or "", api.get("token_sha256") or "")
-        token_rows, token_err = _merge_api_token_rows(p_api.get("tokens"), current_tokens)
-        if token_err:
-            return None, token_err
-        api["tokens"] = _normalize_api_tokens(token_rows)
-        first_token = api["tokens"][0] if api["tokens"] else {}
-        api["token"] = str(first_token.get("token") or "")
-        api["token_sha256"] = str(first_token.get("token_sha256") or "")
-    if "token" in p_api:
-        token_value, changed = _settings_secret_text_update(p_api.get("token"), api.get("token"))
-        if changed:
-            api["token"] = token_value
-            api["token_sha256"] = (_sha256_hex(token_value) if token_value else "")
-            api["tokens"] = _normalize_api_tokens([], api.get("token") or "", api.get("token_sha256") or "")
 
     if "enabled" in p_auth:
         auth["enabled"] = bool(p_auth.get("enabled"))
@@ -2056,8 +2177,6 @@ def _api_tokens_public(api_cfg: dict | None = None) -> list[dict]:
     out: list[dict] = []
     for item in _normalize_api_tokens(source.get("tokens"), source.get("token") or "", source.get("token_sha256") or ""):
         state = _sso_link_state(item)
-        plain = str(item.get("token") or "").strip()
-        digest = str(item.get("token_sha256") or "").strip()
         out.append({
             "id": str(item.get("id") or ""),
             "name": str(item.get("name") or ""),
@@ -2071,60 +2190,8 @@ def _api_tokens_public(api_cfg: dict | None = None) -> list[dict]:
             "active": bool(state.get("active")),
             "status": str(state.get("status") or ""),
             "status_label": str(state.get("status_label") or ""),
-            "token_masked": (_mask_secret(plain, keep=4) if plain else ("********" if digest else "")),
-            "copy_supported": bool(plain),
         })
     return out
-
-def _merge_api_token_rows(rows, existing) -> tuple[list[dict], str | None]:
-    existing_items = _normalize_api_tokens(existing)
-    existing_by_id = {str(item.get("id") or ""): item for item in existing_items}
-    now_wall = time.time()
-    out: list[dict] = []
-    if not isinstance(rows, list):
-        return out, None
-    for idx, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
-            continue
-        row_id = str(row.get("id") or "").strip()
-        old = existing_by_id.get(row_id) if row_id else None
-        raw_token = str(row.get("token") or row.get("token_plain") or "").strip()
-        if raw_token.lower() == "__clear__":
-            continue
-        token_plain = ""
-        token_hash = ""
-        if raw_token and raw_token not in ("__KEEP__", "********"):
-            token_plain = raw_token
-            token_hash = _sha256_hex(raw_token)
-            used_ts = 0.0
-            used_count = 0
-        elif old:
-            token_plain = str(old.get("token") or "")
-            token_hash = str(old.get("token_sha256") or "").strip().lower()
-            used_ts = float(old.get("used_ts") or 0.0)
-            used_count = int(old.get("used_count") or 0)
-        else:
-            continue
-        fallback_exp = float((old or {}).get("expires_at") or 0.0)
-        expires_at, expiry_err = _api_token_expiry_from_row(row, now_wall=now_wall, fallback=fallback_exp)
-        if expiry_err:
-            return out, expiry_err
-        created_ts = float((old or {}).get("created_ts") or 0.0) or now_wall
-        name = str(row.get("name") or (old or {}).get("name") or f"API Token {idx}").strip() or f"API Token {idx}"
-        item = {
-            "id": row_id,
-            "name": name[:80],
-            "token": token_plain,
-            "token_sha256": token_hash,
-            "enabled": _to_bool(row.get("enabled"), True),
-            "created_ts": created_ts,
-            "expires_at": expires_at,
-            "single_use": _to_bool(row.get("single_use"), False),
-            "used_ts": used_ts,
-            "used_count": used_count,
-        }
-        out.append(item)
-    return out, None
 
 def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
     raw = dict(auth_cfg) if isinstance(auth_cfg, dict) else {}
@@ -2174,13 +2241,38 @@ def _prepare_api_cfg_for_save(api_cfg: dict | None) -> dict:
     out.pop("token_plain", None)
     return out
 
-def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None) -> str | None:
+def _access_rule_empty_error(label: str, enabled: bool, mode: str, entries: list[str]) -> str | None:
+    if not enabled:
+        return None
+    policy = str(mode or "allow").strip().lower()
+    if policy in ("deny", "block", "black", "blacklist"):
+        return None
+    if not entries:
+        return f"{label}白名单模式已开启，但地址列表为空或格式无效"
+    return None
+
+def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None, web_cfg: dict | None = None) -> str | None:
     auth = _prepare_auth_cfg_for_save(auth_cfg)
     api = _prepare_api_cfg_for_save(api_cfg)
+    web = web_cfg if isinstance(web_cfg, dict) else {}
     if bool(auth.get("enabled")) and (not _auth_hashes_present(auth)):
         return "启用网页登录鉴权前，必须先设置网页登录账号和密码"
-    if api.get("whitelist_enabled") and _api_tokens_have_secret(api) and not api.get("whitelist"):
-        return "API 白名单模式已开启，但白名单为空或格式无效"
+    api_rule_err = _access_rule_empty_error(
+        "API ",
+        bool(api.get("whitelist_enabled")) and _api_tokens_have_secret(api),
+        str(api.get("whitelist_mode") or "allow"),
+        list(api.get("whitelist") or []),
+    )
+    if api_rule_err:
+        return api_rule_err
+    web_rule_err = _access_rule_empty_error(
+        "网页访问",
+        bool(web.get("access_list_enabled")),
+        str(web.get("access_list_mode") or "allow"),
+        _parse_whitelist_entries(web.get("access_list")),
+    )
+    if web_rule_err:
+        return web_rule_err
     if bool(api.get("enabled")):
         if not bool(auth.get("enabled")):
             return "启用外部 API 前，必须先启用网页登录鉴权"
@@ -2194,9 +2286,10 @@ def _prepare_security_cfg_for_save(cfg: dict | None) -> tuple[dict, str | None]:
     out = dict(cfg) if isinstance(cfg, dict) else {}
     auth_raw = out.get("auth") if isinstance(out.get("auth"), dict) else {}
     api_raw = out.get("api") if isinstance(out.get("api"), dict) else {}
+    web_raw = out.get("web") if isinstance(out.get("web"), dict) else {}
     auth_next = _prepare_auth_cfg_for_save(auth_raw)
     api_next = _prepare_api_cfg_for_save(api_raw)
-    err = _validate_security_sections(auth_next, api_next)
+    err = _validate_security_sections(auth_next, api_next, web_raw)
     out["auth"] = auth_next
     out["api"] = api_next
     return out, err
@@ -2377,8 +2470,14 @@ def _normalize_api_cfg(cfg: dict | None) -> dict:
     if base["enabled"] and not _auth_hashes_present(auth_cfg):
         _log("[WARN] api enabled but auth credentials missing, fallback disabled")
         base["enabled"] = False
-    if base.get("whitelist_enabled") and _api_tokens_have_secret(base) and not base.get("whitelist"):
-        _log("[WARN] api whitelist enabled but empty/invalid, fallback disabled")
+    api_rule_err = _access_rule_empty_error(
+        "API ",
+        bool(base.get("whitelist_enabled")) and _api_tokens_have_secret(base),
+        str(base.get("whitelist_mode") or "allow"),
+        list(base.get("whitelist") or []),
+    )
+    if api_rule_err:
+        _log("[WARN] " + api_rule_err)
         base["enabled"] = False
     return base
 
@@ -4652,6 +4751,33 @@ def _load_build_info() -> dict:
     except Exception:
         return {}
 
+def _local_git_commit() -> str:
+    repo = os.path.dirname(os.path.abspath(__file__))
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if proc.returncode == 0:
+            commit = (proc.stdout or "").strip()
+            if re.fullmatch(r"[0-9a-fA-F]{40}", commit or ""):
+                return commit.lower()
+    except Exception:
+        pass
+    return ""
+
+def _local_app_commit() -> str:
+    commit = _local_git_commit()
+    if commit:
+        return commit
+    commit = str(_load_build_info().get("commit") or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", commit or ""):
+        return commit.lower()
+    return ""
+
 def _fallback_private_commit() -> str:
     try:
         path = os.path.abspath(__file__)
@@ -4663,7 +4789,7 @@ def _fallback_private_commit() -> str:
 
 def _app_version_label() -> str:
     info = _load_build_info()
-    commit = str(info.get("commit") or "").strip()
+    commit = _local_app_commit()
     try:
         build = int(info.get("build") or 0)
     except Exception:
@@ -4681,7 +4807,7 @@ def _check_app_update_once() -> None:
     if not bool(APP_UPDATE_CFG.get("enabled", True)):
         return
     try:
-        local_commit = str(_load_build_info().get("commit") or "").strip()
+        local_commit = _local_app_commit()
         if not local_commit:
             local_commit = _fallback_private_commit()
         req = urllib.request.Request(
@@ -5526,9 +5652,6 @@ def _auth_cleanup_sessions(now_wall: float | None = None) -> None:
         stale = [tok for tok, exp in auth_sessions.items() if float(exp or 0.0) <= now_wall]
         for tok in stale:
             auth_sessions.pop(tok, None)
-        stale_links = [code for code, item in auth_oneshot_links.items() if float((item or {}).get("exp") or 0.0) <= now_wall]
-        for code in stale_links:
-            auth_oneshot_links.pop(code, None)
 
 def _auth_issue_session() -> str:
     now_wall = time.time()
@@ -5547,43 +5670,6 @@ def _auth_issue_session() -> str:
                 auth_sessions.clear()
                 auth_sessions.update({k: v for k, v in keep})
     return token
-
-def _auth_issue_oneshot_link(next_path: str = "/", ttl_sec: int = AUTH_ONESHOT_TTL_SEC) -> dict:
-    if not _auth_enabled():
-        raise ValueError("网页登录鉴权未启用")
-    now_wall = time.time()
-    target = str(next_path or "/").strip() or "/"
-    if not target.startswith("/") or target.startswith("//"):
-        target = "/"
-    code = secrets.token_urlsafe(18)
-    exp = now_wall + max(60, min(3600, int(ttl_sec or AUTH_ONESHOT_TTL_SEC)))
-    with auth_session_lock:
-        auth_oneshot_links[code] = {"exp": exp, "next": target}
-        if len(auth_oneshot_links) > 512:
-            stale = [k for k, v in auth_oneshot_links.items() if float((v or {}).get("exp") or 0.0) <= now_wall]
-            for k in stale:
-                auth_oneshot_links.pop(k, None)
-            if len(auth_oneshot_links) > 512:
-                keep = sorted(auth_oneshot_links.items(), key=lambda kv: float((kv[1] or {}).get("exp") or 0.0), reverse=True)[:256]
-                auth_oneshot_links.clear()
-                auth_oneshot_links.update(dict(keep))
-    return {"code": code, "expires_at": exp, "next": target}
-
-def _auth_consume_oneshot_link(code: str | None) -> dict | None:
-    raw = str(code or "").strip()
-    if not raw:
-        return None
-    now_wall = time.time()
-    with auth_session_lock:
-        item = auth_oneshot_links.pop(raw, None)
-    if not isinstance(item, dict):
-        return None
-    if float(item.get("exp") or 0.0) <= now_wall:
-        return None
-    target = str(item.get("next") or "/")
-    if not target.startswith("/") or target.startswith("//"):
-        target = "/"
-    return {"next": target, "expires_at": float(item.get("exp") or 0.0)}
 
 def _auth_check_session_cookie(cookie_header: str | None, *, refresh: bool = True) -> bool:
     if not _auth_enabled():
@@ -11414,6 +11500,95 @@ form.addEventListener('submit', async function(ev){{
 </script>
 </body></html>"""
 
+def _build_eula_html(next_path: str = "/") -> str:
+    safe_next = str(next_path or "/")
+    if not safe_next.startswith("/") or safe_next.startswith("//"):
+        safe_next = "/"
+    eula_html = _markdown_to_html(_load_eula_markdown())
+    return f"""<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>许可协议 - Light RID Scanner</title>
+<style>
+*{{box-sizing:border-box}}
+:root{{
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --bg:#201f1e;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;--muted:#c8c6c4;--blue:#2899f5;--warn:#f7630c
+}}
+@media (prefers-color-scheme:light){{
+  :root{{--bg:#f3f2f1;--card:#fff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;--muted:#605e5c;--blue:#0078d4;--warn:#d83b01}}
+}}
+html,body{{margin:0;min-height:100dvh;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}}
+body{{display:grid;place-items:center;padding:18px}}
+.shell{{width:min(960px,100%);display:grid;gap:12px}}
+.head{{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}}
+h1{{margin:0;font:700 26px/1.1 var(--font-ui);letter-spacing:0}}
+.source{{font:600 12px/1.5 var(--font-ui);color:var(--muted)}}
+.source a,.license a{{color:var(--blue);text-decoration:none}}
+.source a:hover,.license a:hover{{text-decoration:underline}}
+.license{{border:1px solid var(--border);background:var(--card);border-radius:4px;padding:18px;max-height:min(68dvh,720px);overflow:auto;box-shadow:0 16px 34px rgba(0,0,0,.18)}}
+.license h1,.license h2,.license h3,.license h4{{margin:18px 0 8px;letter-spacing:0}}
+.license h1:first-child,.license h2:first-child{{margin-top:0}}
+.license p{{margin:8px 0;line-height:1.65;color:var(--txt)}}
+.license ul{{margin:8px 0 12px 20px;padding:0;line-height:1.6}}
+.eula-code{{white-space:pre-wrap;word-break:break-word;border:1px solid var(--border);background:var(--card2);border-radius:4px;padding:12px;font:600 12px/1.45 var(--font-mono);color:var(--txt)}}
+.accept{{border:1px solid var(--border);background:var(--card);border-radius:4px;padding:14px;display:grid;gap:12px}}
+.check{{display:flex;gap:10px;align-items:flex-start;line-height:1.5;color:var(--txt)}}
+input[type=checkbox]{{width:16px;height:16px;flex:0 0 auto;margin-top:2px;accent-color:var(--blue)}}
+.actions{{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}}
+button{{height:42px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:0 16px;font:700 14px/1 var(--font-ui);cursor:pointer}}
+button.primary{{border-color:var(--blue);background:var(--blue);color:white}}
+button.warn{{border-color:color-mix(in srgb,var(--warn) 50%,var(--border));color:var(--warn)}}
+button:disabled{{opacity:.58;cursor:not-allowed}}
+.status{{min-height:20px;color:var(--muted);font-size:13px;white-space:pre-wrap}}
+.status.err{{color:var(--warn)}}
+</style></head><body>
+<main class="shell">
+  <div class="head">
+    <div>
+      <h1>Light RID Scanner 许可协议</h1>
+      <div class="source">官方 GPL v3 文本：<a href="{_html_escape(EULA_URL)}" target="_blank" rel="noopener noreferrer">{_html_escape(EULA_URL)}</a></div>
+    </div>
+  </div>
+  <article class="license">{eula_html}</article>
+  <section class="accept">
+    <label class="check"><input id="agree" type="checkbox"> <span>我已阅读并同意以上许可协议，确认继续使用本软件。</span></label>
+    <div class="actions">
+      <button class="warn" id="decline" type="button">不同意</button>
+      <button class="primary" id="accept" type="button" disabled>同意并继续</button>
+    </div>
+    <div id="status" class="status">首次运行必须同意许可协议后才能进入系统。</div>
+  </section>
+</main>
+<script>
+const nextPath = {json.dumps(safe_next, ensure_ascii=False)};
+function qs(id){{ return document.getElementById(id); }}
+function pageHeaders(extra){{ var h={{'X-LightRID-Page':'1'}}; if(extra) Object.keys(extra).forEach(function(k){{ h[k]=extra[k]; }}); return h; }}
+function setStatus(text, err){{ qs('status').textContent = text || '-'; qs('status').classList.toggle('err', !!err); }}
+qs('agree').addEventListener('change', function(){{ qs('accept').disabled = !qs('agree').checked; }});
+qs('decline').addEventListener('click', function(){{ setStatus('未同意许可协议，当前不会进入系统。', true); }});
+qs('accept').addEventListener('click', async function(){{
+  if(!qs('agree').checked){{ setStatus('请先勾选同意许可协议。', true); return; }}
+  var btn = qs('accept');
+  btn.disabled = true;
+  setStatus('正在保存许可状态...', false);
+  try{{
+    const r = await fetch('/api/eula/accept', {{
+      method:'POST',
+      headers:pageHeaders({{'Content-Type':'application/json'}}),
+      body:JSON.stringify({{accepted:true,next:nextPath}})
+    }});
+    const d = await r.json().catch(function(){{ return {{}}; }});
+    if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
+    location.href = d.next || nextPath || '/';
+  }}catch(e){{
+    setStatus(e.message || String(e), true);
+    btn.disabled = false;
+  }}
+}});
+</script></body></html>"""
+
 def _build_logs_html() -> str:
     return """<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
@@ -11445,7 +11620,6 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
 .status{padding:8px 12px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
 @media(max-width:720px){.wrap{width:calc(100vw - 10px);padding:10px 5px}.title{font-size:22px}pre{height:calc(100dvh - 230px);font-size:12px}}
 </style></head><body><div class="wrap">
-  <div class="settings-sticky-head">
   <div class="topbar">
     <div><div class="title">日志</div><div class="meta">运行、操作、扫描与扫描差异。</div></div>
     <div class="actions">
@@ -11620,6 +11794,7 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .field.full{grid-column:1/-1}
 .field label{font:600 12px/1.15 var(--font-ui);letter-spacing:.01em;color:var(--muted)}
 .field input,.field select,.field textarea{width:100%;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:10px 12px;font:600 14px/1.35 var(--font-ui);transition:border-color .14s ease,box-shadow .14s ease,background-color .14s ease}
+.field input[type="checkbox"],input[type="checkbox"]{width:16px;height:16px;min-width:16px;flex:0 0 auto;padding:0;margin:0;accent-color:var(--blue)}
 .field input:not([type="checkbox"]),.field select,.token-actions input{height:42px}
 .field-inline .btn,.token-actions .btn{height:42px}
 .field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 38%, transparent)}
@@ -11632,7 +11807,6 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .row-actions{display:flex;gap:10px;flex-wrap:wrap}
 .token-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;min-width:0}
 .token-actions input{flex:1 1 260px;min-width:0}
-#login-link-url{font-family:var(--font-mono);font-size:12px}
 .sso-link-list{margin-top:10px}
 .sso-link-options{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(110px,.7fr) auto;gap:10px;align-items:end;margin-top:10px}
 .sso-link-options .field{min-width:0}
@@ -11643,7 +11817,6 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .sso-link-title{font:700 13px/1.25 var(--font-ui);color:var(--txt);display:flex;gap:8px;align-items:center;min-width:0;flex-wrap:wrap}
 .sso-link-badge{font:700 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 5px;background:var(--card)}
 .sso-link-badge.bad{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--border))}
-.sso-link-url{margin-top:5px;font:600 12px/1.45 var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:clip;cursor:pointer;user-select:text}
 .field.hidden{display:none}
 .policy-grid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:end}
 .disabled-block{opacity:.52;filter:saturate(.65);pointer-events:none}
@@ -11673,7 +11846,6 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .api-token-grid{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}
 .api-token-grid .field{min-width:0}
 .api-token-grid input:not([type="checkbox"]),.api-token-grid select,.api-token-create-grid input:not([type="checkbox"]),.api-token-create-grid select{height:38px}
-.api-token-current{font:600 12px/1.45 var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:clip}
 .model-update-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center}
 .model-editor{display:grid;gap:10px;margin-top:10px}
 .model-editor-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
@@ -11750,6 +11922,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   .toast-stack{right:10px;left:10px;bottom:10px;width:auto}
 }
 </style></head><body><div class="wrap">
+  <div class="settings-sticky-head">
   <div class="topbar">
     <div>
       <div class="title">设置</div>
@@ -11797,7 +11970,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <button class="btn ghost" id="btn-channel-edit" type="button">编辑</button>
                 <button class="btn ghost" id="btn-channel-reset" type="button">默认</button>
               </div>
-              <div class="micro" id="channel-hint">当前信道来源：默认 CH6。</div>
+              <div class="micro" id="channel-hint" style="display:none"></div>
             </div>
             <div class="field"><label>日志刷新间隔(s)</label><input id="cfg-time" type="number" step="0.1"></div>
             <div class="field"><label>最短重复间隔(s)</label><input id="cfg-min-gap" type="number" step="0.1"></div>
@@ -12156,15 +12329,13 @@ function isLocalHostName(host){
   var h = String(host || '').toLowerCase();
   return h === 'localhost' || h === '127.0.0.1';
 }
-var apiTokenLastReveal = '';
-var apiTokenRevealTarget = '';
 var apiTokenRows = [];
 var oneTimeSecretValue = '';
 var reauthAction = null;
 var loginLinks = [];
 var modelMapRows = [];
 var modelMapPath = '';
-var settingsState = {visualLoaded:false, rawLoaded:false, apiLoaded:false, channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}};
+var settingsState = {visualLoaded:false, rawLoaded:false, channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}};
 var metricsState = {window:'12h', zoom:1, panSec:0, hover:null, drag:null, chartMeta:{}, items:[]};
 var SETTINGS_DRAFT_SECTIONS = [
   {key:'capture', label:'采集'},
@@ -13144,8 +13315,6 @@ function bindVisualDraftTracking(){
   if(!root || root.getAttribute('data-dirty-bind') === '1') return;
   root.setAttribute('data-dirty-bind', '1');
   root.addEventListener('input', function(ev){
-    var t = ev.target;
-    if(t && t.classList && t.classList.contains('api-token-current')) return;
     updateVisualDraftState();
   });
   root.addEventListener('change', function(){
@@ -13200,49 +13369,6 @@ function closeOneTimeSecret(){
   oneTimeSecretValue = '';
   qs('one-time-secret').textContent = '';
   qs('one-time-modal').classList.remove('show');
-}
-async function performTokenReauth(action){
-  var user = String(qs('reauth-user').value || '').trim();
-  var pass = String(qs('reauth-pass').value || '');
-  if(!user || !pass){
-    setStatus('reauth-status', '账号和密码不完整。', true);
-    return;
-  }
-  var tokenId = String(apiTokenRevealTarget || '');
-  const r = await fetch(apiUrl('/api/settings/api-token/reveal'), {
-    method:'POST',
-    headers:pageHeaders({'Content-Type':'application/json'}),
-    body:JSON.stringify({username:user, password:pass, id:tokenId})
-  });
-  const d = await r.json().catch(()=>({}));
-  if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
-  if(!r.ok || d.ok===false){
-    throw new Error(d.error || ('HTTP ' + r.status));
-  }
-  apiTokenLastReveal = String(d.token || '');
-  var row = null;
-  if(tokenId){
-    qsa('.api-token-row').some(function(it){ if(String(it.getAttribute('data-id') || '') === tokenId){ row = it; return true; } return false; });
-  }
-  var current = row ? row.querySelector('.api-token-current') : null;
-  if(current){
-    current.textContent = (action === 'reveal') ? apiTokenLastReveal : '已通过二次验证';
-    current.title = apiTokenLastReveal;
-  }
-  if(action === 'copy'){
-    if(!apiTokenLastReveal) throw new Error('当前 Token 不可复制');
-    await copyTextPlain(apiTokenLastReveal);
-  }
-}
-function absoluteLoginLink(item){
-  item = item || {};
-  var raw = String(item.url || item.path || '');
-  if(!raw) return '';
-  if(/^https?:\\/\\//i.test(raw)) return raw;
-  return location.origin + raw;
-}
-function compactLoginLink(url){
-  return String(url || '');
 }
 function fmtSsoExpiry(item){
   item = item || {};
@@ -13514,6 +13640,7 @@ async function handleApiTokenListClick(ev){
       if(!id) return;
       const d = await postJson('/api/settings/api-token/delete', {id:id});
       renderApiTokenRows(d.tokens || []);
+      updateApiWhitelistUi(Array.isArray(d.tokens) && d.tokens.length > 0);
       showNotice('API Token 已删除。', 'ok', 2200);
       return;
     }
@@ -13601,8 +13728,6 @@ async function loadVisual(){
   qs('cfg-send-timeout').value = String(nt.send_timeout_sec ?? '');
   renderHookRows(Array.isArray(nt.wecom_webhooks) ? nt.wecom_webhooks : []);
   qs('cfg-api-enabled').checked = !!api.enabled;
-  apiTokenLastReveal = '';
-  apiTokenRevealTarget = '';
   renderApiTokenRows(Array.isArray(api.tokens) ? api.tokens : []);
   qs('cfg-api-whitelist-enabled').checked = !!api.whitelist_enabled;
   qs('cfg-api-whitelist-mode').value = String(api.whitelist_mode || 'allow');
@@ -13666,12 +13791,6 @@ async function testVisual(){
 async function saveRaw(){
   const data = await postJson('/api/settings/raw/save', {text: String(qs('raw-editor').value || '')});
   setStatus('status-raw', '保存成功: ' + String(data.saved_to || '-') + '\\n' + String(data.reload_msg || ''), false);
-}
-async function loadApiDocs(){
-  const data = await getJson('/api/settings/api-docs').catch(function(){ return {api:{}, endpoints:[]}; });
-  settingsState.apiLoaded = true;
-  qs('api-docs').value = JSON.stringify(data, null, 2);
-  setStatus('status-api', 'API 文档已生成。启用 Token 后可在 Header 中使用 X-API-Token 或 Authorization: Bearer。', false);
 }
 function bindShellActions(){
   on('btn-back', 'click', function(){ location.href='/'; });
@@ -13763,16 +13882,6 @@ function bindCaptureActions(){
     setChannelUi(settingsState.channelEditing);
   });
 }
-async function copyCurrentLoginLink(){
-  try{
-    var url = String(qs('login-link-url').value || '').trim();
-    if(!url) throw new Error('没有 SSO 登录链接');
-    await copyTextPlain(url);
-    showNotice('SSO 登录链接已复制。', 'ok', 2200);
-  }catch(e){
-    showNotice(e.message || e, 'warn', 3200);
-  }
-}
 async function handleLoginLinkListClick(ev){
   var row = ev.target && ev.target.closest ? ev.target.closest('.sso-link-row') : null;
   if(!row) return;
@@ -13799,14 +13908,7 @@ async function confirmReauthAction(){
       setStatus('status-visual', 'API Token 已生成，只在弹窗中显示一次。', false);
       showNotice('API Token 已生成。', 'ok', 2600);
     }else{
-      await performTokenReauth(action);
-    }
-    if(action === 'copy'){
-      setStatus('status-visual', '当前 API Token 已复制到剪贴板。', false);
-      showNotice('当前 API Token 已复制。', 'ok', 2400);
-    }else if(action === 'reveal'){
-      setStatus('status-visual', '当前 API Token 已通过再次验证并显示。', false);
-      showNotice('当前 API Token 已显示。', 'ok', 2400);
+      throw new Error('不支持的二次验证操作');
     }
     closeReauth();
   }catch(e){
@@ -14118,7 +14220,7 @@ def http_server_thread() -> None:
                 pass
 
         def _access_denied_page(self):
-            body = b'<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>403</title><style>body{margin:0;min-height:100dvh;display:grid;place-items:center;background:#201f1e;color:#f3f2f1;font-family:"Segoe UI","Microsoft YaHei",sans-serif}.box{border:1px solid #3b3a39;background:#2b2a29;padding:24px;border-radius:4px}h1{margin:0;font-size:26px}</style></head><body><div class="box"><h1>当前无权访问该界面</h1></div></body></html>'
+            body = '<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>403</title><style>body{margin:0;min-height:100dvh;display:grid;place-items:center;background:#201f1e;color:#f3f2f1;font-family:"Segoe UI","Microsoft YaHei",sans-serif}.box{border:1px solid #3b3a39;background:#2b2a29;padding:24px;border-radius:4px}h1{margin:0;font-size:26px}</style></head><body><div class="box"><h1>当前无权访问该界面</h1></div></body></html>'.encode("utf-8")
             self.send_response(403)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -14204,7 +14306,7 @@ def http_server_thread() -> None:
             return self._require_page_api()
 
         def do_GET(self):
-            from urllib.parse import urlparse, parse_qs, unquote
+            from urllib.parse import urlparse, parse_qs, quote, unquote
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
@@ -14213,6 +14315,34 @@ def http_server_thread() -> None:
                 self.send_header("Cache-Control", "max-age=86400")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
+                return
+            if path == "/api/eula/status":
+                self._send_json(_eula_status_payload(), 200)
+                return
+            if path in ("/eula", "/eula.html"):
+                next_path = str((query.get("next") or ["/"])[0] or "/")
+                if not next_path.startswith("/") or next_path.startswith("//"):
+                    next_path = "/"
+                body = _build_eula_html(next_path).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if _eula_redirect_required(path):
+                if path.startswith("/api/"):
+                    self._send_json({
+                        "ok": False,
+                        "error": "eula required",
+                        "eula_url": EULA_URL,
+                    }, 428)
+                else:
+                    target = str(self.path or "/")
+                    if not target.startswith("/") or target.startswith("//"):
+                        target = "/"
+                    self._redirect("/eula?next=" + quote(target, safe="/?=&%"))
                 return
             if (not path.startswith("/api/")) and path != "/ws" and (not _web_access_allowed(_client_ip_from_handler(self))):
                 _op_log("web-access-deny", str(self.path or ""), ip=_client_ip_from_handler(self), ok=False)
@@ -14259,32 +14389,6 @@ def http_server_thread() -> None:
                     next_path = "/"
                 if not _auth_enabled():
                     self._redirect(next_path)
-                    return
-                oneshot_code = str((query.get("code") or [""])[0] or "").strip()
-                if oneshot_code:
-                    ip = _client_ip_from_handler(self)
-                    limited, retry_after = _rate_limited("login-link", ip, oneshot_code[:12], limit=8, window_sec=300, block_sec=900)
-                    if limited:
-                        self._rate_limit_fail(retry_after)
-                        return
-                    item = _auth_consume_oneshot_link(oneshot_code)
-                    ok_login = bool(item)
-                    _rate_note("login-link", ip, oneshot_code[:12], success=ok_login, limit=8, window_sec=300, block_sec=900)
-                    _op_log("login-link", "next=" + next_path, actor=oneshot_code[:8], ip=ip, ok=ok_login)
-                    if ok_login:
-                        self._auth_set_cookie_token = _auth_issue_session()
-                        self._redirect(str(item.get("next") or next_path or "/"))
-                    else:
-                        body = _build_login_html(next_path).replace(
-                            '<span class="status" id="status"></span>',
-                            '<span class="status err" id="status">一键登录链接已失效</span>',
-                            1,
-                        ).encode("utf-8")
-                        self.send_response(401)
-                        self.send_header("Content-Type", "text/html; charset=utf-8")
-                        self.send_header("Content-Length", str(len(body)))
-                        self.end_headers()
-                        self.wfile.write(body)
                     return
                 user_hash = str((query.get("user") or [""])[0] or "")
                 pass_hash = str((query.get("password") or [""])[0] or "")
@@ -14542,24 +14646,12 @@ def http_server_thread() -> None:
                     self._send_json(_settings_view_payload(), 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
-            elif path == "/api/settings/api-docs":
-                self._send_json(_api_token_docs_payload(), 200)
             elif path == "/api/notifications":
                 try:
                     limit = int((query.get("limit") or [str(NOTIFICATION_CENTER_MAX)])[0] or NOTIFICATION_CENTER_MAX)
                 except Exception:
                     limit = NOTIFICATION_CENTER_MAX
                 self._send_json(_notification_payload(limit), 200)
-            elif path == "/api/settings/api-token/status":
-                token_items = _api_tokens_public(API_CFG)
-                first_token = token_items[0] if token_items else {}
-                self._send_json({
-                    "ok": True,
-                    "configured": _api_tokens_have_secret(API_CFG),
-                    "copy_supported": any(bool(item.get("copy_supported")) for item in token_items),
-                    "masked": str(first_token.get("token_masked") or ""),
-                    "tokens": token_items,
-                }, 200)
             elif path == "/api/settings/runtime":
                 try:
                     limit = int((query.get("limit") or ["180"])[0] or "180")
@@ -14745,6 +14837,30 @@ def http_server_thread() -> None:
         def do_POST(self):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
+            if path == "/api/eula/accept":
+                if not _request_same_origin(self.headers) or not _page_api_header_ok(self.headers):
+                    self._page_api_fail(403, "page api header required")
+                    return
+                body = self._read_json_body()
+                if not _to_bool(body.get("accepted"), False):
+                    self._send_json({"ok": False, "error": "必须同意许可协议后才能继续"}, 400)
+                    return
+                ok, msg = _write_eula_acceptance()
+                if not ok:
+                    self._send_json({"ok": False, "error": msg}, 500)
+                    return
+                next_path = str(body.get("next") or "/")
+                if not next_path.startswith("/") or next_path.startswith("//"):
+                    next_path = "/"
+                self._send_json({"ok": True, "accepted": True, "next": next_path, "set_path": msg}, 200)
+                return
+            if _eula_redirect_required(path):
+                self._send_json({
+                    "ok": False,
+                    "error": "eula required",
+                    "eula_url": EULA_URL,
+                }, 428)
+                return
             if path == "/api/oobe/save":
                 if not self._require_page_api():
                     return
@@ -15146,9 +15262,6 @@ def http_server_thread() -> None:
                 except Exception as e:
                     _op_log("model-map-upsert", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
                     self._send_json({"ok": False, "error": str(e), "state": _model_update_status_payload()}, 400)
-            elif path == "/api/settings/api-token/reveal":
-                self._send_json({"ok": False, "error": "API Token 只在创建成功时显示一次，之后不能查看或复制"}, 400)
-                return
             elif path == "/api/settings/api-token/create":
                 body = self._read_json_body()
                 ip = _client_ip_from_handler(self)
@@ -15910,6 +16023,8 @@ def main() -> None:
     APP_CONFIG_PATH = cfg_path
     APP_CONFIG_PATH_IS_DEFAULT = (cfg_path == os.path.abspath(os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT))) if cfg_path else True
     APP_CONFIG = load_app_config(cfg_path)
+    if not _eula_accepted():
+        _log(f"[INFO] EULA pending: open /eula to accept ({_eula_set_path()})")
     apply_config_to_args(parser, args, APP_CONFIG)
 
     PRINT_INTERVAL  = max(0.2, float(args.time))

@@ -20,7 +20,7 @@ It keeps the runtime model deliberately simple: one main process in `run.py`, lo
 - Export helpers for aircraft detail and per-aircraft tracks
 - Optional token-protected external API
 - Optional browser login / session auth for the web UI
-- Optional one-time login links generated after username/password re-check
+- Managed SSO login links generated after username/password re-check
 - Configurable browser session lifetime, defaulting to 30 minutes
 - Enterprise WeCom notifications with multiple webhook channels
 - Multiple custom alarm zones drawn on the map
@@ -249,19 +249,22 @@ print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
 PY
 ```
 
-SSO-style login is available for trusted local launchers:
+SSO-style login is available for trusted launchers. The URL uses the configured username/password SHA-256 hashes plus a server-side `check` code:
 
 ```text
-/login?user=<sha256(username)>&password=<sha256(password)>
+/login?user=<sha256(username)>&password=<sha256(password)>&check=<server-check-code>
 ```
 
-For compatibility with old local shortcuts, a comma form is also accepted:
+The Settings page generates and stores the `check` code. Deleting that item from the Settings list invalidates the link immediately.
+
+For compatibility with old local shortcuts, the password separator can also be parsed from these forms, but a valid `check` code is still required:
 
 ```text
-/login?user=<sha256(username)>,password=<sha256(password)>
+/login?user=<sha256(username)>,password=<sha256(password)>&check=<server-check-code>
+/login?user=<sha256(username)>?password=<sha256(password)>?check=<server-check-code>
 ```
 
-Settings can also generate a one-time login link after a fresh username/password check. The generated URL uses `/login?code=<one-time-code>&next=/`, is valid for a short window, and is removed immediately after a successful login.
+Settings generates SSO links after a fresh username/password check. The generated URL can be used by an external SSO launcher and remains valid until its `check` code is deleted from the list.
 
 When a browser session expires, page API requests return an auth failure and the built-in pages redirect back to `/login`.
 
@@ -282,8 +285,12 @@ These are meant for the built-in web UI and current browser session:
 - `POST /api/settings/visual/save`
 - `POST /api/settings/raw/save`
 - `POST /api/settings/notify/test`
+- `GET /api/settings/models/list`
+- `POST /api/settings/models/save`
+- `POST /api/settings/models/upsert`
 - `POST /api/settings/models/update`
 - `POST /api/settings/login-link/create`
+- `POST /api/settings/login-link/delete`
 - `GET /api/hw/status`
 - `POST /api/hw/op`
 - `GET /api/config`
@@ -304,8 +311,8 @@ These are not the same thing as `/api/v1/*`.
 - The current API token is shown as a masked password field
 - Revealing or copying it requires a fresh username/password check
 - That re-check uses the same web auth credentials, but API routes still require the API token when external API mode is enabled
-- Generating a one-time login link also requires the same fresh username/password check
-- Login, one-time login link, token reveal, and external API token failures are rate-limited in memory and written to the operation log.
+- Generating a managed SSO login link also requires the same fresh username/password check
+- Login, SSO login link, token reveal, and external API token failures are rate-limited in memory and written to the operation log.
 
 ## API Overview
 
@@ -362,7 +369,7 @@ It supports:
 - selectable host-metrics windows: 12 hours, 24 hours, and 7 days
 - configurable host-metrics retention, defaulting to 7 days
 - manual entry into Simplified OOBE and Full OOBE
-- one-time login link generation after username/password re-check
+- managed SSO login link generation and deletion after username/password re-check
 - raw `rid_config.json` editing
 
 ### Online model-map updates
@@ -379,6 +386,8 @@ Behavior:
 - manual update uses the same URL field
 - the URL must start with `http://` or `https://`
 - successful and failed update attempts are written to the operation log and notification center
+- the same Settings card can edit `rid_models.json` as a prefix/model list
+- N/A aircraft detail cards can add a local mapping or open a prefilled GitHub Issue / PR edit page
 
 ### Host load trends
 

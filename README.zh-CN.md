@@ -20,7 +20,7 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - 支持导出全部详情和单机轨迹
 - 支持 Token 保护的外部 API
 - 支持网页登录 / 会话鉴权
-- 支持再次验证账密后生成一次性登录链接
+- 支持再次验证账密后生成可管理的 SSO 登录链接
 - 支持配置单次网页登录有效期，默认 30 分钟
 - 企业微信支持多机器人通道
 - 支持多个自定义报警区域并绘制到地图上
@@ -251,19 +251,22 @@ print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
 PY
 ```
 
-受信任的本地启动器可以使用 SSO 形式登录：
+受信任的外部启动器可以使用 SSO 形式登录。URL 使用当前配置里的用户名 / 密码 SHA-256，再加一个服务端保存的 `check` 校验码：
 
 ```text
-/login?user=<sha256(username)>&password=<sha256(password)>
+/login?user=<sha256(username)>&password=<sha256(password)>&check=<server-check-code>
 ```
 
-旧快捷方式如果写成逗号形式也能兼容：
+设置页负责生成和保存 `check` 校验码。从设置页列表中删除该项后，对应链接立即失效。
+
+旧快捷方式如果写成下面两种形式也能解析，但仍必须带有效的 `check`：
 
 ```text
-/login?user=<sha256(username)>,password=<sha256(password)>
+/login?user=<sha256(username)>,password=<sha256(password)>&check=<server-check-code>
+/login?user=<sha256(username)>?password=<sha256(password)>?check=<server-check-code>
 ```
 
-设置页也可以在再次验证账号和密码后生成一次性登录链接。生成的 URL 使用 `/login?code=<one-time-code>&next=/`，只在短时间内有效，成功登录后立即失效。
+设置页会在再次验证账号和密码后生成 SSO 登录链接。该链接可直接加入外部 SSO 启动器，并一直有效，直到对应 `check` 被删除。
 
 网页登录会话过期后，内置页面再次请求接口会收到鉴权失败，并自动回到 `/login`。
 
@@ -284,8 +287,12 @@ PY
 - `POST /api/settings/visual/save`
 - `POST /api/settings/raw/save`
 - `POST /api/settings/notify/test`
+- `GET /api/settings/models/list`
+- `POST /api/settings/models/save`
+- `POST /api/settings/models/upsert`
 - `POST /api/settings/models/update`
 - `POST /api/settings/login-link/create`
+- `POST /api/settings/login-link/delete`
 - `GET /api/hw/status`
 - `POST /api/hw/op`
 - `GET /api/config`
@@ -303,11 +310,11 @@ PY
 
 ### 设置页里的 Token 显示/复制
 
-- 当前 API Token 会以密码框遮罩显示
-- 显示或复制前，必须再次输入网页登录账号和密码
-- 这次再次验证沿用网页登录凭据；外部 API 开启后仍必须使用 API Token
-- 生成一次性登录链接也需要同样的再次验证
-- 登录、一次性登录链接、Token 显示/复制、外部 API Token 失败都会触发内存限流，并写入操作日志。
+- API Token 支持多个条目，每个条目可设置有效期、单次使用或无限时间
+- 已保存的 API Token 默认遮罩显示，显示或复制前必须再次输入网页登录账号和密码
+- 这次再次验证沿用网页登录凭据；外部 API 开启后仍必须使用有效 API Token
+- 生成 SSO 登录链接也需要同样的再次验证
+- 登录、SSO 登录链接、Token 显示/复制、外部 API Token 失败都会触发内存限流，并写入操作日志。
 
 ## API 总览
 
@@ -364,7 +371,7 @@ PY
 - 主机负载趋势支持 12 小时、24 小时、7 天视图
 - 主机负载数据保留时间可配置，默认 7 天
 - 手动进入简化 OOBE 和完整 OOBE
-- 再次验证账密后生成一次性登录链接
+- 再次验证账密后生成和删除可管理的 SSO 登录链接
 - 原始 `rid_config.json` 编辑
 
 ### 在线识别库更新
@@ -381,6 +388,8 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 手动更新按钮使用同一个地址
 - 地址必须以 `http://` 或 `https://` 开头
 - 更新成功或失败都会写入操作日志和通知中心
+- 同一个设置卡片可以把 `rid_models.json` 作为前缀/机型列表编辑
+- 机型为 N/A 的详情卡片可以直接写入本地识别库，或打开预填的 GitHub Issue / PR 编辑页
 
 ### 主机负载趋势
 

@@ -79,13 +79,23 @@
     "enabled": false,
     "username_sha256": "",
     "password_sha256": "",
-    "realm": "Light RID Scanner"
+    "realm": "Light RID Scanner",
+    "session_ttl_min": 30,
+    "sso_links": []
   },
   "api": {
     "enabled": false,
     "token": "",
     "token_sha256": "",
+    "tokens": [],
     "whitelist_enabled": false,
     "whitelist": []
+  },
+  "model_update": {
+    "enabled": true,
+    "url": "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
+  },
+  "metrics": {
+    "retention_days": 7
   }
 }

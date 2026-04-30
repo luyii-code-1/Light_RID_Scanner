@@ -87,6 +87,7 @@ BUILD_INFO_FILE = "rid_build_info.json"
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
+APP_UPDATE_COMMIT_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
 MODEL_UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
 HOST_METRICS_DIR_DEFAULT = os.path.join(tempfile.gettempdir(), "light_rid_scanner")
 HOST_METRICS_FILE_DEFAULT = "host_metrics.jsonl"
@@ -157,6 +158,9 @@ WEB_CFG: dict = {
     "heading_ref_deg": 0.0,
     "map_auto_center_idle_sec": 20,
     "alarm_zones": [],
+    "access_list_enabled": False,
+    "access_list_mode": "allow",
+    "access_list": [],
     "alarm_zone": {
         "enabled": False,
         "lat1": None,
@@ -177,11 +181,14 @@ AUTH_CFG: dict = {
     "password_sha256": "",
     "realm": "Light RID Scanner",
     "session_ttl_min": 30,
+    "sso_links": [],
 }
 AUTH_SESSION_COOKIE = "rid_auth"
 AUTH_SESSION_TTL_SEC = 30 * 60
 AUTH_ONESHOT_TTL_SEC = 10 * 60
 auth_session_lock = Lock()
+auth_sso_lock = Lock()
+api_token_lock = Lock()
 auth_sessions: dict[str, float] = {}
 auth_oneshot_links: dict[str, dict] = {}
 auth_session_secret = secrets.token_hex(16)
@@ -189,7 +196,9 @@ API_CFG: dict = {
     "enabled": False,
     "token": "",
     "token_sha256": "",
+    "tokens": [],
     "whitelist_enabled": False,
+    "whitelist_mode": "allow",
     "whitelist": [],
 }
 PAGE_API_HEADER = "X-LightRID-Page"
@@ -208,6 +217,10 @@ MODEL_UPDATE_CFG: dict = {
     "enabled": True,
     "url": RID_MODELS_UPDATE_URL_DEFAULT,
 }
+APP_UPDATE_CFG: dict = {
+    "enabled": True,
+    "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
+}
 MODEL_UPDATE_STATE: dict = {
     "running": False,
     "last_check_ts": 0.0,
@@ -217,6 +230,7 @@ MODEL_UPDATE_STATE: dict = {
     "last_count": 0,
 }
 model_update_lock = Lock()
+model_map_file_lock = Lock()
 model_update_worker_started = False
 
 METRICS_CFG: dict = {
@@ -794,6 +808,9 @@ def default_app_config() -> dict:
             "heading_ref_deg": 0.0,
             "map_auto_center_idle_sec": 20,
             "alarm_zones": [],
+            "access_list_enabled": False,
+            "access_list_mode": "allow",
+            "access_list": [],
             "alarm_zone": {
                 "enabled": False,
                 "lat1": None,
@@ -812,6 +829,10 @@ def default_app_config() -> dict:
             "enabled": True,
             "url": RID_MODELS_UPDATE_URL_DEFAULT,
         },
+        "app_update": {
+            "enabled": True,
+            "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
+        },
         "metrics": {
             "retention_days": HOST_METRICS_RETENTION_DAYS_DEFAULT,
         },
@@ -826,7 +847,9 @@ def default_app_config() -> dict:
             "enabled": False,
             "token": "",
             "token_sha256": "",
+            "tokens": [],
             "whitelist_enabled": False,
+            "whitelist_mode": "allow",
             "whitelist": [],
         },
     }
@@ -1040,6 +1063,7 @@ def _settings_view_payload() -> dict:
     if not isinstance(auth, dict):
         auth = {}
     model_update = _normalize_model_update_cfg(cfg)
+    app_update = _normalize_app_update_cfg(cfg)
     metrics_cfg = _normalize_metrics_cfg(cfg)
     api_prepared = _prepare_api_cfg_for_save(api)
     auth_prepared = _prepare_auth_cfg_for_save(auth)
@@ -1058,11 +1082,8 @@ def _settings_view_payload() -> dict:
     host["current_channel"] = int(current_channel or channel_effective or 6)
     host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
     host["ifaces"] = interfaces
-    api_mask = ""
-    if str(api_prepared.get("token") or "").strip():
-        api_mask = _mask_secret(str(api_prepared.get("token") or ""), keep=4)
-    elif str(api_prepared.get("token_sha256") or "").strip():
-        api_mask = "********"
+    api_tokens_public = _api_tokens_public(api_prepared)
+    api_mask = str((api_tokens_public[0] if api_tokens_public else {}).get("token_masked") or "")
     return {
         "ok": True,
         "path": APP_CONFIG_PATH or "",
@@ -1114,14 +1135,20 @@ def _settings_view_payload() -> dict:
                 "base_zoom": web_norm.get("base_zoom", 13),
                 "heading_ref_deg": web_norm.get("heading_ref_deg", 0.0),
                 "map_auto_center_idle_sec": web_norm.get("map_auto_center_idle_sec", 20),
+                "access_list_enabled": bool(web_norm.get("access_list_enabled")),
+                "access_list_mode": str(web_norm.get("access_list_mode") or "allow"),
+                "access_list": list(web_norm.get("access_list") or []),
                 "alarm_zones": zones,
             },
             "api": {
                 "enabled": bool(api_prepared.get("enabled")),
-                "configured": bool(api_prepared.get("token_sha256")),
+                "configured": _api_tokens_have_secret(api_prepared),
                 "token_masked": api_mask,
-                "token_copy_supported": bool(api_prepared.get("token")),
+                "token_copy_supported": any(bool(item.get("copy_supported")) for item in api_tokens_public),
+                "tokens": api_tokens_public,
+                "whitelist_effective": _api_tokens_have_secret(api_prepared),
                 "whitelist_enabled": bool(api_prepared.get("whitelist_enabled")),
+                "whitelist_mode": str(api_prepared.get("whitelist_mode") or "allow"),
                 "whitelist": list(api_prepared.get("whitelist") or []),
             },
             "auth": {
@@ -1131,11 +1158,15 @@ def _settings_view_payload() -> dict:
                 "password_masked": ("********" if str(auth_prepared.get("password_sha256") or "").strip() else ""),
                 "realm": str(auth_prepared.get("realm") or "Light RID Scanner"),
                 "session_ttl_min": int(auth_prepared.get("session_ttl_min") or 30),
+                "sso_links": _auth_sso_public_links(auth_prepared),
             },
             "model_update": {
                 "enabled": bool(model_update.get("enabled")),
-                "url": str(model_update.get("url") or RID_MODELS_UPDATE_URL_DEFAULT),
+                "url": "" if str(model_update.get("url") or "").strip() in ("", RID_MODELS_UPDATE_URL_DEFAULT) else str(model_update.get("url") or ""),
                 "state": _model_update_status_payload(),
+            },
+            "app_update": {
+                "enabled": bool(app_update.get("enabled")),
             },
             "metrics": {
                 "retention_days": int(metrics_cfg.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT),
@@ -1160,6 +1191,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     api = cfg.setdefault("api", {})
     auth = cfg.setdefault("auth", {})
     model_update = cfg.setdefault("model_update", {})
+    app_update = cfg.setdefault("app_update", {})
     metrics = cfg.setdefault("metrics", {})
     if not isinstance(basic, dict): basic = {}; cfg["basic"] = basic
     if not isinstance(notify, dict): notify = {}; cfg["notify"] = notify
@@ -1167,6 +1199,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     if not isinstance(api, dict): api = {}; cfg["api"] = api
     if not isinstance(auth, dict): auth = {}; cfg["auth"] = auth
     if not isinstance(model_update, dict): model_update = {}; cfg["model_update"] = model_update
+    if not isinstance(app_update, dict): app_update = {}; cfg["app_update"] = app_update
     if not isinstance(metrics, dict): metrics = {}; cfg["metrics"] = metrics
 
     p_basic = payload.get("basic") if isinstance(payload.get("basic"), dict) else {}
@@ -1175,6 +1208,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     p_api = payload.get("api") if isinstance(payload.get("api"), dict) else {}
     p_auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
     p_model_update = payload.get("model_update") if isinstance(payload.get("model_update"), dict) else {}
+    p_app_update = payload.get("app_update") if isinstance(payload.get("app_update"), dict) else {}
     p_metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
 
     iface_raw = p_basic.get("iface")
@@ -1339,13 +1373,26 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
         api["enabled"] = bool(p_api.get("enabled"))
     if "whitelist_enabled" in p_api:
         api["whitelist_enabled"] = bool(p_api.get("whitelist_enabled"))
+    if "whitelist_mode" in p_api:
+        mode = str(p_api.get("whitelist_mode") or "allow").strip().lower()
+        api["whitelist_mode"] = "deny" if mode in ("deny", "block", "black", "blacklist") else "allow"
     if "whitelist" in p_api:
         api["whitelist"] = _parse_whitelist_entries(p_api.get("whitelist"))
+    if "tokens" in p_api:
+        current_tokens = _normalize_api_tokens(api.get("tokens"), api.get("token") or "", api.get("token_sha256") or "")
+        token_rows, token_err = _merge_api_token_rows(p_api.get("tokens"), current_tokens)
+        if token_err:
+            return None, token_err
+        api["tokens"] = _normalize_api_tokens(token_rows)
+        first_token = api["tokens"][0] if api["tokens"] else {}
+        api["token"] = str(first_token.get("token") or "")
+        api["token_sha256"] = str(first_token.get("token_sha256") or "")
     if "token" in p_api:
         token_value, changed = _settings_secret_text_update(p_api.get("token"), api.get("token"))
         if changed:
             api["token"] = token_value
             api["token_sha256"] = (_sha256_hex(token_value) if token_value else "")
+            api["tokens"] = _normalize_api_tokens([], api.get("token") or "", api.get("token_sha256") or "")
 
     if "enabled" in p_auth:
         auth["enabled"] = bool(p_auth.get("enabled"))
@@ -1370,15 +1417,27 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
         elif raw_pass_trim.lower() == "__clear__":
             auth["password_sha256"] = ""
 
+    if "access_list_enabled" in p_web:
+        web["access_list_enabled"] = bool(p_web.get("access_list_enabled"))
+    if "access_list_mode" in p_web:
+        mode = str(p_web.get("access_list_mode") or "allow").strip().lower()
+        web["access_list_mode"] = "deny" if mode in ("deny", "block", "black", "blacklist") else "allow"
+    if "access_list" in p_web:
+        web["access_list"] = _parse_whitelist_entries(p_web.get("access_list"))
+
     if p_model_update:
         if "enabled" in p_model_update:
             model_update["enabled"] = bool(p_model_update.get("enabled"))
         if "url" in p_model_update:
             url = str(p_model_update.get("url") or "").strip()
-            if not (url.startswith("https://") or url.startswith("http://")):
+            if url and not (url.startswith("https://") or url.startswith("http://")):
                 return None, "invalid model_update.url"
             model_update["url"] = url
         cfg["model_update"] = _normalize_model_update_cfg({"model_update": model_update})
+    if p_app_update:
+        if "enabled" in p_app_update:
+            app_update["enabled"] = bool(p_app_update.get("enabled"))
+        cfg["app_update"] = _normalize_app_update_cfg({"app_update": app_update})
 
     if p_metrics:
         if "retention_days" in p_metrics:
@@ -1634,6 +1693,10 @@ def _normalize_web_cfg(cfg: dict | None) -> dict:
     except Exception:
         idle_sec = 20
     base["map_auto_center_idle_sec"] = max(5, min(600, idle_sec))
+    base["access_list_enabled"] = bool(base.get("access_list_enabled"))
+    mode = str(base.get("access_list_mode") or "allow").strip().lower()
+    base["access_list_mode"] = "deny" if mode in ("deny", "block", "black", "blacklist") else "allow"
+    base["access_list"] = _parse_whitelist_entries(base.get("access_list"))
     zones = _normalize_alarm_zones(base.get("alarm_zones"), base.get("alarm_zone"))
     base["alarm_zones"] = zones
     base["alarm_zone"] = zones[0] if zones else _normalize_alarm_zone_item({}, idx=1)
@@ -1665,10 +1728,27 @@ def _normalize_model_update_cfg(cfg: dict | None) -> dict:
                 if k in raw:
                     base[k] = raw.get(k)
     base["enabled"] = bool(base.get("enabled", True))
-    url = str(base.get("url") or RID_MODELS_UPDATE_URL_DEFAULT).strip()
-    if not (url.startswith("https://") or url.startswith("http://")):
+    url = str(base.get("url") or "").strip()
+    if not url:
+        url = RID_MODELS_UPDATE_URL_DEFAULT
+    elif not (url.startswith("https://") or url.startswith("http://")):
         url = RID_MODELS_UPDATE_URL_DEFAULT
     base["url"] = url
+    return base
+
+def _normalize_app_update_cfg(cfg: dict | None) -> dict:
+    base = dict(APP_UPDATE_CFG)
+    if isinstance(cfg, dict):
+        raw = cfg.get("app_update")
+        if isinstance(raw, dict):
+            for k in base.keys():
+                if k in raw:
+                    base[k] = raw.get(k)
+    base["enabled"] = bool(base.get("enabled", True))
+    url = str(base.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT).strip()
+    if not (url.startswith("https://") or url.startswith("http://")):
+        url = APP_UPDATE_COMMIT_URL_DEFAULT
+    base["commit_url"] = url
     return base
 
 def _normalize_metrics_cfg(cfg: dict | None) -> dict:
@@ -1716,22 +1796,335 @@ def _parse_whitelist_entries(values) -> list[str]:
     return items
 
 def _api_ip_allowed(ip_text: str | None, entries: list[str] | None = None) -> bool:
-    if not bool(API_CFG.get("whitelist_enabled")) and entries is None:
-        return True
+    return _ip_in_list(ip_text, entries if entries is not None else (API_CFG.get("whitelist") or []))
+
+def _ip_in_list(ip_text: str | None, entries: list[str] | None = None) -> bool:
     try:
         ip_obj = ipaddress.ip_address(str(ip_text or "").strip())
     except Exception:
         return False
-    allow_list = list(entries if entries is not None else (API_CFG.get("whitelist") or []))
-    if not allow_list:
+    rules = list(entries or [])
+    if not rules:
         return False
-    for item in allow_list:
+    for item in rules:
         try:
             if ip_obj in ipaddress.ip_network(str(item), strict=False):
                 return True
         except Exception:
             continue
     return False
+
+def _ip_policy_allowed(ip_text: str | None, *, enabled: bool, mode: str, entries: list[str]) -> bool:
+    if not enabled:
+        return True
+    hit = _ip_in_list(ip_text, entries)
+    policy = str(mode or "allow").strip().lower()
+    if policy in ("deny", "block", "black", "blacklist"):
+        return not hit
+    return hit
+
+def _api_access_allowed(ip_text: str | None) -> bool:
+    if not _api_tokens_have_secret(API_CFG):
+        return True
+    return _ip_policy_allowed(
+        ip_text,
+        enabled=bool(API_CFG.get("whitelist_enabled")),
+        mode=str(API_CFG.get("whitelist_mode") or "allow"),
+        entries=list(API_CFG.get("whitelist") or []),
+    )
+
+def _web_access_allowed(ip_text: str | None) -> bool:
+    return _ip_policy_allowed(
+        ip_text,
+        enabled=bool(WEB_CFG.get("access_list_enabled")),
+        mode=str(WEB_CFG.get("access_list_mode") or "allow"),
+        entries=list(WEB_CFG.get("access_list") or []),
+    )
+
+def _normalize_sso_links(raw) -> list[dict]:
+    src = raw if isinstance(raw, list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(src):
+        if not isinstance(item, dict):
+            continue
+        check = str(item.get("check") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", check or ""):
+            continue
+        if check in seen:
+            continue
+        seen.add(check)
+        name = str(item.get("name") or f"SSO {idx + 1}").strip() or f"SSO {idx + 1}"
+        try:
+            created_ts = float(item.get("created_ts") or 0.0)
+        except Exception:
+            created_ts = 0.0
+        try:
+            expires_at = float(item.get("expires_at") or 0.0)
+        except Exception:
+            expires_at = 0.0
+        try:
+            used_ts = float(item.get("used_ts") or item.get("last_used_ts") or 0.0)
+        except Exception:
+            used_ts = 0.0
+        try:
+            used_count = max(0, int(item.get("used_count") or (1 if used_ts > 0 else 0)))
+        except Exception:
+            used_count = 0
+        next_path = str(item.get("next") or "/").strip() or "/"
+        if not next_path.startswith("/") or next_path.startswith("//"):
+            next_path = "/"
+        out.append({
+            "name": name[:80],
+            "check": check,
+            "enabled": bool(item.get("enabled", True)),
+            "created_ts": created_ts,
+            "expires_at": max(0.0, expires_at),
+            "single_use": _to_bool(item.get("single_use"), False),
+            "used_ts": max(0.0, used_ts),
+            "used_count": used_count,
+            "next": next_path,
+        })
+    return out[:64]
+
+def _sso_link_state(item: dict | None, now_wall: float | None = None) -> dict:
+    now_wall = float(now_wall or time.time())
+    raw = item if isinstance(item, dict) else {}
+    expires_at = float(raw.get("expires_at") or 0.0)
+    used_count = int(raw.get("used_count") or 0)
+    single_use = bool(raw.get("single_use"))
+    enabled = bool(raw.get("enabled", True))
+    expired = bool(expires_at > 0 and expires_at <= now_wall)
+    used = bool(single_use and used_count > 0)
+    if not enabled:
+        status = "disabled"
+        label = "已停用"
+    elif used:
+        status = "used"
+        label = "已使用"
+    elif expired:
+        status = "expired"
+        label = "已过期"
+    else:
+        status = "active"
+        label = "可用"
+    expires_in = None if expires_at <= 0 else int(max(0.0, expires_at - now_wall))
+    return {
+        "active": status == "active",
+        "status": status,
+        "status_label": label,
+        "expired": expired,
+        "used": used,
+        "expires_in_sec": expires_in,
+    }
+
+def _sso_expiry_from_payload(body: dict | None, now_wall: float | None = None) -> tuple[float, str | None]:
+    now_wall = float(now_wall or time.time())
+    src = body if isinstance(body, dict) else {}
+    mode = str(src.get("expires") or src.get("expiry") or src.get("ttl_mode") or "").strip().lower()
+    if mode in ("never", "forever", "infinite", "unlimited", "none", "0"):
+        return 0.0, None
+    if src.get("expires_at") not in (None, ""):
+        try:
+            expires_at = float(src.get("expires_at") or 0.0)
+        except Exception:
+            return 0.0, "invalid expires_at"
+        if expires_at <= now_wall:
+            return 0.0, "expires_at must be in the future"
+        return expires_at, None
+    raw_ttl = src.get("ttl_sec")
+    if raw_ttl in (None, ""):
+        raw_ttl = src.get("ttl_seconds")
+    if raw_ttl in (None, ""):
+        raw_ttl = src.get("ttl_min")
+        if raw_ttl not in (None, ""):
+            try:
+                raw_ttl = float(raw_ttl) * 60.0
+            except Exception:
+                return 0.0, "invalid ttl_min"
+    if raw_ttl in (None, ""):
+        raw_ttl = 24 * 3600
+    try:
+        ttl_sec = int(float(raw_ttl))
+    except Exception:
+        return 0.0, "invalid ttl_sec"
+    if ttl_sec <= 0:
+        return 0.0, None
+    ttl_sec = max(60, min(3650 * 86400, ttl_sec))
+    return now_wall + ttl_sec, None
+
+def _api_token_id_from_hash(token_hash: str | None, idx: int = 1) -> str:
+    raw = str(token_hash or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", raw or ""):
+        return "tok_" + raw[:12]
+    return "tok_" + secrets.token_urlsafe(8).replace("-", "_")[:12]
+
+def _api_token_expiry_from_row(row: dict | None, now_wall: float | None = None, fallback: float = 0.0) -> tuple[float, str | None]:
+    src = row if isinstance(row, dict) else {}
+    now_wall = float(now_wall or time.time())
+    mode = str(src.get("expires") or src.get("expiry") or src.get("ttl_mode") or "").strip().lower()
+    if mode in ("never", "forever", "infinite", "unlimited", "none", "0"):
+        return 0.0, None
+    if mode == "keep":
+        return max(0.0, float(fallback or 0.0)), None
+    if mode or src.get("ttl_sec") not in (None, "") or src.get("ttl_seconds") not in (None, "") or src.get("ttl_min") not in (None, ""):
+        return _sso_expiry_from_payload(src, now_wall=now_wall)
+    if src.get("expires_at") not in (None, ""):
+        try:
+            return max(0.0, float(src.get("expires_at") or 0.0)), None
+        except Exception:
+            return 0.0, "invalid expires_at"
+    return max(0.0, float(fallback or 0.0)), None
+
+def _normalize_api_tokens(raw, legacy_token: str = "", legacy_hash: str = "") -> list[dict]:
+    src = raw if isinstance(raw, list) else []
+    if not src:
+        legacy_plain = str(legacy_token or "").strip()
+        legacy_digest = str(legacy_hash or "").strip().lower()
+        if legacy_plain or re.fullmatch(r"[0-9a-f]{64}", legacy_digest or ""):
+            src = [{
+                "id": "legacy",
+                "name": "默认 Token",
+                "token": legacy_plain,
+                "token_sha256": legacy_digest,
+                "enabled": True,
+                "created_ts": 0.0,
+                "expires_at": 0.0,
+                "single_use": False,
+            }]
+    out: list[dict] = []
+    seen: set[str] = set()
+    now_wall = time.time()
+    for idx, item in enumerate(src, 1):
+        if not isinstance(item, dict):
+            continue
+        token_plain = str(item.get("token") or item.get("token_plain") or "").strip()
+        if token_plain in ("********", "__KEEP__"):
+            token_plain = ""
+        token_hash = str(item.get("token_sha256") or "").strip().lower()
+        if token_plain:
+            token_hash = _sha256_hex(token_plain)
+        if not re.fullmatch(r"[0-9a-f]{64}", token_hash or ""):
+            continue
+        raw_id = str(item.get("id") or "").strip()
+        token_id = raw_id if re.fullmatch(r"[A-Za-z0-9_-]{3,64}", raw_id or "") else _api_token_id_from_hash(token_hash, idx)
+        base_id = token_id
+        suffix = 2
+        while token_id in seen:
+            token_id = f"{base_id}_{suffix}"
+            suffix += 1
+        seen.add(token_id)
+        name = str(item.get("name") or f"API Token {idx}").strip() or f"API Token {idx}"
+        try:
+            created_ts = float(item.get("created_ts") or 0.0)
+        except Exception:
+            created_ts = 0.0
+        if created_ts <= 0.0:
+            created_ts = now_wall
+        try:
+            expires_at = max(0.0, float(item.get("expires_at") or 0.0))
+        except Exception:
+            expires_at = 0.0
+        try:
+            used_ts = max(0.0, float(item.get("used_ts") or item.get("last_used_ts") or 0.0))
+        except Exception:
+            used_ts = 0.0
+        try:
+            used_count = max(0, int(item.get("used_count") or (1 if used_ts > 0 else 0)))
+        except Exception:
+            used_count = 0
+        out.append({
+            "id": token_id,
+            "name": name[:80],
+            "token": "",
+            "token_sha256": token_hash,
+            "enabled": _to_bool(item.get("enabled"), True),
+            "created_ts": created_ts,
+            "expires_at": expires_at,
+            "single_use": _to_bool(item.get("single_use"), False),
+            "used_ts": used_ts,
+            "used_count": used_count,
+        })
+    return out[:64]
+
+def _api_tokens_have_secret(api_cfg: dict | None = None) -> bool:
+    source = api_cfg if isinstance(api_cfg, dict) else API_CFG
+    return any(str(item.get("token_sha256") or "").strip() for item in _normalize_api_tokens(source.get("tokens"), source.get("token") or "", source.get("token_sha256") or ""))
+
+def _api_tokens_public(api_cfg: dict | None = None) -> list[dict]:
+    source = api_cfg if isinstance(api_cfg, dict) else API_CFG
+    out: list[dict] = []
+    for item in _normalize_api_tokens(source.get("tokens"), source.get("token") or "", source.get("token_sha256") or ""):
+        state = _sso_link_state(item)
+        plain = str(item.get("token") or "").strip()
+        digest = str(item.get("token_sha256") or "").strip()
+        out.append({
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or ""),
+            "enabled": bool(item.get("enabled", True)),
+            "created_ts": float(item.get("created_ts") or 0.0),
+            "expires_at": float(item.get("expires_at") or 0.0),
+            "expires_in_sec": state.get("expires_in_sec"),
+            "single_use": bool(item.get("single_use")),
+            "used_ts": float(item.get("used_ts") or 0.0),
+            "used_count": int(item.get("used_count") or 0),
+            "active": bool(state.get("active")),
+            "status": str(state.get("status") or ""),
+            "status_label": str(state.get("status_label") or ""),
+            "token_masked": (_mask_secret(plain, keep=4) if plain else ("********" if digest else "")),
+            "copy_supported": bool(plain),
+        })
+    return out
+
+def _merge_api_token_rows(rows, existing) -> tuple[list[dict], str | None]:
+    existing_items = _normalize_api_tokens(existing)
+    existing_by_id = {str(item.get("id") or ""): item for item in existing_items}
+    now_wall = time.time()
+    out: list[dict] = []
+    if not isinstance(rows, list):
+        return out, None
+    for idx, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("id") or "").strip()
+        old = existing_by_id.get(row_id) if row_id else None
+        raw_token = str(row.get("token") or row.get("token_plain") or "").strip()
+        if raw_token.lower() == "__clear__":
+            continue
+        token_plain = ""
+        token_hash = ""
+        if raw_token and raw_token not in ("__KEEP__", "********"):
+            token_plain = raw_token
+            token_hash = _sha256_hex(raw_token)
+            used_ts = 0.0
+            used_count = 0
+        elif old:
+            token_plain = str(old.get("token") or "")
+            token_hash = str(old.get("token_sha256") or "").strip().lower()
+            used_ts = float(old.get("used_ts") or 0.0)
+            used_count = int(old.get("used_count") or 0)
+        else:
+            continue
+        fallback_exp = float((old or {}).get("expires_at") or 0.0)
+        expires_at, expiry_err = _api_token_expiry_from_row(row, now_wall=now_wall, fallback=fallback_exp)
+        if expiry_err:
+            return out, expiry_err
+        created_ts = float((old or {}).get("created_ts") or 0.0) or now_wall
+        name = str(row.get("name") or (old or {}).get("name") or f"API Token {idx}").strip() or f"API Token {idx}"
+        item = {
+            "id": row_id,
+            "name": name[:80],
+            "token": token_plain,
+            "token_sha256": token_hash,
+            "enabled": _to_bool(row.get("enabled"), True),
+            "created_ts": created_ts,
+            "expires_at": expires_at,
+            "single_use": _to_bool(row.get("single_use"), False),
+            "used_ts": used_ts,
+            "used_count": used_count,
+        }
+        out.append(item)
+    return out, None
 
 def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
     raw = dict(auth_cfg) if isinstance(auth_cfg, dict) else {}
@@ -1756,6 +2149,7 @@ def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
         out["session_ttl_min"] = 30
     out["username_sha256"] = user_hash
     out["password_sha256"] = pass_hash
+    out["sso_links"] = _normalize_sso_links(out.get("sso_links"))
     return out
 
 def _prepare_api_cfg_for_save(api_cfg: dict | None) -> dict:
@@ -1767,10 +2161,15 @@ def _prepare_api_cfg_for_save(api_cfg: dict | None) -> dict:
         token_hash = _sha256_hex(plain_token)
     if not re.fullmatch(r"[0-9a-f]{64}", token_hash or ""):
         token_hash = ""
+    tokens = _normalize_api_tokens(out.get("tokens"), plain_token, token_hash)
+    first = tokens[0] if tokens else {}
     out["enabled"] = bool(out.get("enabled"))
-    out["token"] = plain_token
-    out["token_sha256"] = token_hash
+    out["tokens"] = tokens
+    out["token"] = str(first.get("token") or "")
+    out["token_sha256"] = str(first.get("token_sha256") or "")
     out["whitelist_enabled"] = bool(out.get("whitelist_enabled"))
+    mode = str(out.get("whitelist_mode") or "allow").strip().lower()
+    out["whitelist_mode"] = "deny" if mode in ("deny", "block", "black", "blacklist") else "allow"
     out["whitelist"] = _parse_whitelist_entries(out.get("whitelist"))
     out.pop("token_plain", None)
     return out
@@ -1780,14 +2179,14 @@ def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None) -> 
     api = _prepare_api_cfg_for_save(api_cfg)
     if bool(auth.get("enabled")) and (not _auth_hashes_present(auth)):
         return "启用网页登录鉴权前，必须先设置网页登录账号和密码"
-    if api.get("whitelist_enabled") and not api.get("whitelist"):
+    if api.get("whitelist_enabled") and _api_tokens_have_secret(api) and not api.get("whitelist"):
         return "API 白名单模式已开启，但白名单为空或格式无效"
     if bool(api.get("enabled")):
         if not bool(auth.get("enabled")):
             return "启用外部 API 前，必须先启用网页登录鉴权"
         if not _auth_hashes_present(auth):
             return "启用外部 API 前，必须先设置网页登录账号和密码"
-        if not str(api.get("token_sha256") or "").strip():
+        if not _api_tokens_have_secret(api):
             return "启用外部 API 前，必须先设置 API Token"
     return None
 
@@ -1834,6 +2233,7 @@ def _normalize_auth_cfg(cfg: dict | None) -> dict:
         p = ""
     base["username_sha256"] = u
     base["password_sha256"] = p
+    base["sso_links"] = _normalize_sso_links(base.get("sso_links"))
     if base["enabled"] and (not u or not p):
         _log("[WARN] auth enabled but username/password hash missing, fallback disabled")
         base["enabled"] = False
@@ -1968,7 +2368,7 @@ def _normalize_api_cfg(cfg: dict | None) -> dict:
         base["token_sha256"] = _sha256_hex(str(base.get("token") or "").strip())
         _log("[WARN] api.token detected in plain text; converted to SHA-256 in memory")
     auth_cfg = _normalize_auth_cfg(cfg)
-    if base["enabled"] and not str(base.get("token_sha256") or "").strip():
+    if base["enabled"] and not _api_tokens_have_secret(base):
         _log("[WARN] api token enabled but token hash missing, fallback disabled")
         base["enabled"] = False
     if base["enabled"] and not bool(auth_cfg.get("enabled")):
@@ -1977,7 +2377,7 @@ def _normalize_api_cfg(cfg: dict | None) -> dict:
     if base["enabled"] and not _auth_hashes_present(auth_cfg):
         _log("[WARN] api enabled but auth credentials missing, fallback disabled")
         base["enabled"] = False
-    if base.get("whitelist_enabled") and not base.get("whitelist"):
+    if base.get("whitelist_enabled") and _api_tokens_have_secret(base) and not base.get("whitelist"):
         _log("[WARN] api whitelist enabled but empty/invalid, fallback disabled")
         base["enabled"] = False
     return base
@@ -2022,6 +2422,10 @@ def init_model_update_from_config(cfg: dict | None) -> None:
     global MODEL_UPDATE_CFG
     MODEL_UPDATE_CFG = _normalize_model_update_cfg(cfg)
 
+def init_app_update_from_config(cfg: dict | None) -> None:
+    global APP_UPDATE_CFG
+    APP_UPDATE_CFG = _normalize_app_update_cfg(cfg)
+
 def init_metrics_from_config(cfg: dict | None) -> None:
     global METRICS_CFG
     METRICS_CFG = _normalize_metrics_cfg(cfg)
@@ -2058,6 +2462,7 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_model_update_from_config(APP_CONFIG)
+    init_app_update_from_config(APP_CONFIG)
     init_metrics_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
     init_api_from_config(APP_CONFIG)
@@ -2627,9 +3032,13 @@ def _ap_snapshot() -> tuple[list[dict], int, int]:
 def _model_from_sn(sn: str) -> str:
     if not sn or sn.startswith("MAC:"):
         return "N/A"
-    p8 = sn[:8].upper()
-    for pref, model in MODEL_MAP.items():
-        if p8 == str(pref)[:8].upper():
+    sn_key = re.sub(r"[^0-9A-Za-z]+", "", str(sn or "")).upper()
+    if not sn_key:
+        return "N/A"
+    items = sorted(MODEL_MAP.items(), key=lambda kv: len(str(kv[0] or "")), reverse=True)
+    for pref, model in items:
+        pref_key = re.sub(r"[^0-9A-Za-z]+", "", str(pref or "")).upper()
+        if pref_key and sn_key.startswith(pref_key):
             return model
     return "N/A"
 
@@ -2707,6 +3116,39 @@ def _model_map_target_path() -> str:
         pass
     return os.path.abspath(os.path.join(os.getcwd(), "rid_models.json"))
 
+def _model_map_items_from_dict(obj: dict | None) -> list[dict]:
+    src = obj if isinstance(obj, dict) else {}
+    return [
+        {"prefix": str(k), "model": str(v)}
+        for k, v in sorted(src.items(), key=lambda kv: str(kv[0]).upper())
+    ]
+
+def _read_model_map_file(path: str) -> dict[str, str]:
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    return _validate_model_map_payload(obj)
+
+def _model_map_editor_payload(warning: str = "") -> dict:
+    target = _model_map_target_path()
+    data: dict[str, str] = {}
+    warn = warning
+    try:
+        data = _read_model_map_file(target)
+    except FileNotFoundError:
+        data = dict(MODEL_MAP)
+        warn = warn or "识别库文件不存在，保存后会创建。"
+    except Exception as e:
+        data = dict(MODEL_MAP)
+        warn = warn or f"识别库文件读取失败，当前显示内存中的识别库：{e}"
+    return {
+        "ok": True,
+        "path": target,
+        "count": len(data),
+        "items": _model_map_items_from_dict(data),
+        "state": _model_update_status_payload(),
+        "warning": warn,
+    }
+
 def _model_update_status_payload() -> dict:
     with model_update_lock:
         state = dict(MODEL_UPDATE_STATE)
@@ -2722,16 +3164,82 @@ def _validate_model_map_payload(obj) -> dict[str, str]:
         raise ValueError("识别库格式错误：根节点必须是对象")
     out: dict[str, str] = {}
     for k, v in obj.items():
-        key = str(k or "").strip().upper()
+        key = re.sub(r"[^0-9A-Za-z]+", "", str(k or "")).upper()
         val = str(v or "").strip()
         if not key or not val:
             continue
-        if not re.fullmatch(r"[0-9A-F]{4,16}", key):
+        if not re.fullmatch(r"[0-9A-Z]{4,32}", key):
             continue
         out[key] = val
     if not out:
         raise ValueError("识别库为空或没有有效前缀")
     return out
+
+def _model_map_from_editor_items(items) -> dict[str, str]:
+    if isinstance(items, dict):
+        return _validate_model_map_payload(items)
+    if not isinstance(items, list):
+        raise ValueError("items must be a list")
+    raw: dict[str, str] = {}
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        pref = re.sub(r"[^0-9A-Za-z]+", "", str(row.get("prefix") or "")).upper()
+        model = str(row.get("model") or "").strip()
+        if not pref and not model:
+            continue
+        raw[pref] = model
+    return _validate_model_map_payload(raw)
+
+def _write_model_map_file(next_map: dict[str, str], tag: str = "models") -> dict:
+    target = _model_map_target_path()
+    with model_map_file_lock:
+        running = False
+        with model_update_lock:
+            running = bool(MODEL_UPDATE_STATE.get("running"))
+        if running:
+            return {"ok": False, "error": "识别库在线更新正在运行，请稍后再保存。", "state": _model_update_status_payload()}
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        b_ok, backup_path = create_config_backup(target, tag=tag)
+        if not b_ok:
+            return {"ok": False, "error": "backup failed: " + backup_path, "state": _model_update_status_payload()}
+        tmp_path = target + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(next_map, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, target)
+        load_model_map(target)
+    try:
+        save_history_store(force=True)
+    except Exception:
+        pass
+    msg = f"识别库已保存：{len(next_map)} 条"
+    _op_log("model-map-save", f"count={len(next_map)} target={target}", ok=True)
+    _notification_add(msg, "ok", "server")
+    payload = _model_map_editor_payload()
+    payload.update({"ok": True, "message": msg, "backup_path": backup_path})
+    return payload
+
+def save_model_map_entries(items) -> dict:
+    next_map = _model_map_from_editor_items(items)
+    return _write_model_map_file(next_map, tag="models")
+
+def upsert_model_map_entry(prefix: str = "", model: str = "", sn: str = "") -> dict:
+    clean_prefix = re.sub(r"[^0-9A-Za-z]+", "", str(prefix or "")).upper()
+    clean_sn = re.sub(r"[^0-9A-Za-z]+", "", str(sn or "")).upper()
+    if not clean_prefix and clean_sn and not str(sn or "").upper().startswith("MAC:"):
+        clean_prefix = clean_sn[:8]
+    clean_model = str(model or "").strip()
+    single = _validate_model_map_payload({clean_prefix: clean_model})
+    target = _model_map_target_path()
+    try:
+        current = _read_model_map_file(target)
+    except FileNotFoundError:
+        current = dict(MODEL_MAP)
+    current.update(single)
+    return _write_model_map_file(_validate_model_map_payload(current), tag="models_upsert")
 
 def update_model_map_from_url(manual: bool = False, url_override: str | None = None) -> dict:
     url = str(url_override or MODEL_UPDATE_CFG.get("url") or RID_MODELS_UPDATE_URL_DEFAULT).strip()
@@ -2761,20 +3269,21 @@ def update_model_map_from_url(manual: bool = False, url_override: str | None = N
             raise ValueError("远端返回为空")
         obj = json.loads(data.decode("utf-8", errors="replace"))
         next_map = _validate_model_map_payload(obj)
-        parent = os.path.dirname(target)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        if os.path.exists(target):
-            try:
-                shutil.copy2(target, target + ".bak")
-            except Exception:
-                pass
-        tmp_path = target + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(next_map, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        os.replace(tmp_path, target)
-        load_model_map(target)
+        with model_map_file_lock:
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if os.path.exists(target):
+                try:
+                    shutil.copy2(target, target + ".bak")
+                except Exception:
+                    pass
+            tmp_path = target + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(next_map, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp_path, target)
+            load_model_map(target)
         try:
             save_history_store(force=True)
         except Exception:
@@ -4168,9 +4677,33 @@ def _app_version_label() -> str:
             build = int(time.time())
     return f"commit:{commit}#{build}"
 
+def _check_app_update_once() -> None:
+    if not bool(APP_UPDATE_CFG.get("enabled", True)):
+        return
+    try:
+        local_commit = str(_load_build_info().get("commit") or "").strip()
+        if not local_commit:
+            local_commit = _fallback_private_commit()
+        req = urllib.request.Request(
+            str(APP_UPDATE_CFG.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT),
+            headers={"User-Agent": "LightRIDScanner/1.0 (+startup update check)"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read(256 * 1024).decode("utf-8", errors="replace"))
+        remote_commit = str((data if isinstance(data, dict) else {}).get("sha") or "").strip()
+        if remote_commit and local_commit and not remote_commit.startswith(local_commit) and not local_commit.startswith(remote_commit[:7]):
+            _log(f"[INFO] 检测到程序更新: local={local_commit[:12]} remote={remote_commit[:12]}")
+        elif remote_commit:
+            _log(f"[INFO] 程序更新检查完成: local={local_commit[:12]} remote={remote_commit[:12]}")
+    except Exception as e:
+        _log(f"[WARN] 程序更新检查失败: {e}")
+
+def start_app_update_check() -> None:
+    Thread(target=_check_app_update_once, daemon=True).start()
+
 def _api_meta() -> dict:
     auth_configured = _auth_hashes_present(AUTH_CFG)
-    api_configured = bool(API_CFG.get("token_sha256"))
+    api_configured = _api_tokens_have_secret(API_CFG)
     public_enabled = bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and auth_configured and api_configured
     return {
         "name": API_NAME,
@@ -4189,6 +4722,10 @@ def _api_meta() -> dict:
             "configured": bool(api_configured),
             "header": "X-API-Token",
             "authorization": "Bearer <token>",
+            "token_count": len(_api_tokens_public(API_CFG)),
+            "supports_multiple_tokens": True,
+            "supports_single_use": True,
+            "supports_never_expires": True,
             "whitelist_enabled": bool(API_CFG.get("whitelist_enabled")),
             "whitelist_count": len(API_CFG.get("whitelist") or []),
             "mode_when_disabled": "page-session-only",
@@ -4199,8 +4736,10 @@ def _api_endpoint_index() -> list[dict]:
     return [
         {"method": "GET", "path": "/api/docs", "desc": "API docs and auth guide"},
         {"method": "GET", "path": "/api/health", "desc": "Service health"},
+        {"method": "GET", "path": "/api/v1/", "desc": "API v1 home and auth summary"},
         {"method": "GET", "path": "/api/v1/snapshot", "desc": "Full runtime snapshot"},
         {"method": "GET", "path": "/api/v1/auth/status", "desc": "Auth status"},
+        {"method": "POST", "path": "/api/v1/auth/sso-links/create", "desc": "Create SSO login link"},
         {"method": "GET", "path": "/api/v1/drones", "desc": "Drone list"},
         {"method": "GET", "path": "/api/v1/drones/{sn}", "desc": "Drone detail"},
         {"method": "GET", "path": "/api/v1/tracks/{sn}", "desc": "Track by SN"},
@@ -4215,16 +4754,20 @@ def _api_endpoint_index() -> list[dict]:
     ]
 
 def _api_token_enabled() -> bool:
-    return bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and _auth_hashes_present(AUTH_CFG)
+    return bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and _auth_hashes_present(AUTH_CFG) and _api_tokens_have_secret(API_CFG)
 
-def _api_token_check_value(token: str | None) -> bool:
+def _api_token_check_value(token: str | None) -> dict | None:
     if not _api_token_enabled():
-        return False
+        return None
     raw = str(token or "").strip()
-    token_hash = str(API_CFG.get("token_sha256") or "").strip().lower()
-    if not raw or not token_hash:
-        return False
-    return hmac.compare_digest(_sha256_hex(raw), token_hash)
+    if not raw:
+        return None
+    incoming_hash = _sha256_hex(raw)
+    for item in _normalize_api_tokens(API_CFG.get("tokens"), API_CFG.get("token") or "", API_CFG.get("token_sha256") or ""):
+        token_hash = str(item.get("token_sha256") or "").strip().lower()
+        if token_hash and hmac.compare_digest(incoming_hash, token_hash) and bool(_sso_link_state(item).get("active")):
+            return dict(item)
+    return None
 
 def _api_token_from_request(headers, query: dict | None = None) -> str:
     authz = str(headers.get("Authorization") or "").strip()
@@ -4241,6 +4784,110 @@ def _api_token_from_request(headers, query: dict | None = None) -> str:
             return ""
     return ""
 
+def _api_mark_token_used(token_id: str | None) -> bool:
+    raw_id = str(token_id or "").strip()
+    if not raw_id:
+        return False
+    changed = False
+    now_wall = time.time()
+    def _mark(tokens):
+        nonlocal changed
+        out = []
+        for item in tokens:
+            row = dict(item or {})
+            if str(row.get("id") or "") == raw_id:
+                row["used_count"] = int(row.get("used_count") or 0) + 1
+                row["used_ts"] = now_wall
+                changed = True
+            out.append(row)
+        return out
+    ok, _msg, _tokens = _api_mutate_tokens(_mark, tag="api_token_use")
+    return bool(ok and changed)
+
+def _api_mutate_tokens(mutator, *, tag: str = "api_token") -> tuple[bool, str, list[dict]]:
+    if not APP_CONFIG_PATH:
+        return False, "config path missing", _api_tokens_public()
+    try:
+        with api_token_lock:
+            cfg = load_app_config(APP_CONFIG_PATH)
+            api = cfg.setdefault("api", {})
+            if not isinstance(api, dict):
+                api = {}
+                cfg["api"] = api
+            tokens = _normalize_api_tokens(api.get("tokens"), api.get("token") or "", api.get("token_sha256") or "")
+            api["tokens"] = _normalize_api_tokens(mutator(list(tokens)))
+            first = api["tokens"][0] if api["tokens"] else {}
+            api["token"] = str(first.get("token") or "")
+            api["token_sha256"] = str(first.get("token_sha256") or "")
+            cfg, guard_err = _prepare_security_cfg_for_save(cfg)
+            if guard_err:
+                return False, guard_err, _api_tokens_public()
+            b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag=tag)
+            if not b_ok:
+                return False, f"backup failed: {backup_path}", _api_tokens_public()
+            ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
+            if not ok:
+                return False, msg, _api_tokens_public()
+            cfg_loaded = load_app_config(APP_CONFIG_PATH)
+            r_ok, r_msg = reload_runtime_config(cfg_loaded)
+            if not r_ok:
+                return False, f"reload failed: {r_msg}", _api_tokens_public()
+            api_loaded = cfg_loaded.get("api") if isinstance(cfg_loaded, dict) else None
+            return True, "ok", _api_tokens_public(api_loaded if isinstance(api_loaded, dict) else None)
+    except Exception as e:
+        return False, str(e), _api_tokens_public()
+
+def _build_api_token_create_payload(body: dict | None, *, headers=None, client_ip: str | None = None) -> tuple[dict, int]:
+    if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
+        return {"ok": False, "error": "网页登录鉴权未启用或未完成配置，不能生成 API Token"}, 400
+    src = body if isinstance(body, dict) else {}
+    subject = str(src.get("username") or "-")
+    reauth_ok = _auth_check_userpass(str(src.get("username") or ""), str(src.get("password") or ""))
+    if not reauth_ok and headers is not None and headers.get("Authorization"):
+        reauth_ok = _auth_check_basic_header(headers.get("Authorization"))
+    if not reauth_ok:
+        _op_log("api-token-create", "", actor=subject, ip=str(client_ip or "-"), ok=False)
+        return {"ok": False, "error": "账号或密码错误"}, 401
+    now_wall = time.time()
+    expires_at, expiry_err = _api_token_expiry_from_row(src, now_wall=now_wall, fallback=0.0)
+    if expiry_err:
+        return {"ok": False, "error": expiry_err}, 400
+    name = str(src.get("name") or "").strip()
+    if not name:
+        name = "API Token " + time.strftime("%Y-%m-%d %H:%M:%S")
+    token_plain = secrets.token_urlsafe(32)
+    token_hash = _sha256_hex(token_plain)
+    token_id = _api_token_id_from_hash(token_hash)
+    item = {
+        "id": token_id,
+        "name": name[:80],
+        "token": "",
+        "token_sha256": token_hash,
+        "enabled": True,
+        "created_ts": now_wall,
+        "expires_at": expires_at,
+        "single_use": _to_bool(src.get("single_use"), False),
+        "used_ts": 0.0,
+        "used_count": 0,
+    }
+    def _add_token(tokens):
+        tokens.append(item)
+        return tokens[-64:]
+    ok, msg, tokens = _api_mutate_tokens(_add_token, tag="api_token_create")
+    if not ok:
+        return {"ok": False, "error": msg, "tokens": tokens}, 500
+    _op_log("api-token-create", "name=" + name[:40], actor=subject, ip=str(client_ip or "-"), ok=True)
+    return {
+        "ok": True,
+        "id": token_id,
+        "name": name,
+        "token": token_plain,
+        "expires_at": expires_at,
+        "expires_in_sec": None if expires_at <= 0 else int(max(0.0, expires_at - now_wall)),
+        "single_use": bool(item.get("single_use")),
+        "tokens": tokens,
+    }, 200
+
 def _api_token_docs_payload() -> dict:
     return {
         "ok": True,
@@ -4253,6 +4900,48 @@ def _api_token_docs_payload() -> dict:
                 "Query fallback: ?token=<token> (not recommended for browser history/privacy)",
             ],
             "disabled_behavior": "When public API is disabled, /api/docs, /api/health and /api/v1/* only work from the built-in web pages via page session requests.",
+            "token_policy": "API tokens support multiple entries, per-token expiry, single-use mode, and retained expired records.",
+            "create_sso_link": {
+                "method": "POST",
+                "path": "/api/v1/auth/sso-links/create",
+                "body": {
+                    "name": "optional display name",
+                    "next": "/",
+                    "ttl_sec": 86400,
+                    "expires": "never",
+                    "single_use": False,
+                },
+                "expiry_fields": "Use one of ttl_sec, ttl_min, expires_at, or expires=never.",
+            },
+        },
+        "endpoints": _api_endpoint_index(),
+    }
+
+def _api_v1_home_payload() -> dict:
+    meta = _api_meta()
+    return {
+        "ok": True,
+        "api": meta,
+        "auth": {
+            "token_api": {
+                "enabled": bool(_api_token_enabled()),
+                "headers": ["X-API-Token", "Authorization: Bearer <token>"],
+                "query_fallback": "token",
+                "supports_multiple_tokens": True,
+                "supports_single_use": True,
+                "supports_never_expires": True,
+                "expired_tokens_auto_delete": False,
+                "token_count": len(_api_tokens_public(API_CFG)),
+                "whitelist_enabled": bool(API_CFG.get("whitelist_enabled")),
+                "whitelist_count": len(API_CFG.get("whitelist") or []),
+            },
+            "web_login": meta.get("web_auth") or {},
+            "sso_links": {
+                "create_endpoint": "/api/v1/auth/sso-links/create",
+                "supports_single_use": True,
+                "supports_never_expires": True,
+                "expired_links_auto_delete": False,
+            },
         },
         "endpoints": _api_endpoint_index(),
     }
@@ -4540,6 +5229,8 @@ def _path_uses_api_token(req_path: str | None) -> bool:
         return True
     if path == "/api/health":
         return True
+    if path in ("/api/v1", "/api/v1/"):
+        return True
     return path.startswith("/api/v1/")
 
 def _path_is_page_api(req_path: str | None) -> bool:
@@ -4589,6 +5280,170 @@ def _auth_check_userpass_hash(username_sha256: str, password_sha256: str) -> boo
     if not u_hash or not p_hash:
         return False
     return bool(hmac.compare_digest(u_in, u_hash) and hmac.compare_digest(p_in, p_hash))
+
+def _auth_sso_path(check: str, next_path: str = "/") -> str:
+    from urllib.parse import quote
+    target = str(next_path or "/").strip() or "/"
+    if not target.startswith("/") or target.startswith("//"):
+        target = "/"
+    user_hash = str(AUTH_CFG.get("username_sha256") or "").strip().lower()
+    pass_hash = str(AUTH_CFG.get("password_sha256") or "").strip().lower()
+    return (
+        "/login?user=" + quote(user_hash, safe="")
+        + "&password=" + quote(pass_hash, safe="")
+        + "&check=" + quote(str(check or "").strip(), safe="")
+        + "&next=" + quote(target, safe="/")
+    )
+
+def _auth_sso_public_links(auth_cfg: dict | None = None, *, include_paths: bool = False) -> list[dict]:
+    from urllib.parse import quote
+    source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
+    user_hash = str(source.get("username_sha256") or "").strip().lower()
+    pass_hash = str(source.get("password_sha256") or "").strip().lower()
+    out: list[dict] = []
+    for item in _normalize_sso_links(source.get("sso_links")):
+        check = str(item.get("check") or "").strip()
+        next_path = str(item.get("next") or "/")
+        path = (
+            "/login?user=" + quote(user_hash, safe="")
+            + "&password=" + quote(pass_hash, safe="")
+            + "&check=" + quote(check, safe="")
+            + "&next=" + quote(next_path, safe="/")
+        )
+        state = _sso_link_state(item)
+        row = {
+            "name": str(item.get("name") or ""),
+            "check": check,
+            "enabled": bool(item.get("enabled", True)),
+            "created_ts": float(item.get("created_ts") or 0.0),
+            "expires_at": float(item.get("expires_at") or 0.0),
+            "expires_in_sec": state.get("expires_in_sec"),
+            "single_use": bool(item.get("single_use")),
+            "used_ts": float(item.get("used_ts") or 0.0),
+            "used_count": int(item.get("used_count") or 0),
+            "next": next_path,
+            "active": bool(state.get("active")),
+            "status": str(state.get("status") or ""),
+            "status_label": str(state.get("status_label") or ""),
+        }
+        if include_paths:
+            row["path"] = path
+        out.append(row)
+    return out
+
+def _auth_check_sso_link(username_sha256: str, password_sha256: str, check: str | None) -> dict | None:
+    raw_check = str(check or "").strip()
+    if not raw_check:
+        return None
+    if not _auth_check_userpass_hash(username_sha256, password_sha256):
+        return None
+    for item in _normalize_sso_links(AUTH_CFG.get("sso_links")):
+        if hmac.compare_digest(str(item.get("check") or ""), raw_check) and bool(_sso_link_state(item).get("active")):
+            return dict(item)
+    return None
+
+def _auth_mark_sso_used(check: str | None) -> bool:
+    raw_check = str(check or "").strip()
+    if not raw_check:
+        return False
+    changed = False
+    now_wall = time.time()
+    def _mark(links):
+        nonlocal changed
+        out = []
+        for item in links:
+            row = dict(item or {})
+            if hmac.compare_digest(str(row.get("check") or ""), raw_check):
+                row["used_count"] = int(row.get("used_count") or 0) + 1
+                row["used_ts"] = now_wall
+                changed = True
+            out.append(row)
+        return out
+    ok, _msg, _links = _auth_mutate_sso_links(_mark, tag="sso_use")
+    return bool(ok and changed)
+
+def _build_sso_link_payload(body: dict | None, *, require_reauth: bool = True, headers=None, client_ip: str | None = None) -> tuple[dict, int]:
+    if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
+        return {"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400
+    src = body if isinstance(body, dict) else {}
+    subject = str(src.get("username") or "-")
+    if require_reauth:
+        reauth_ok = _auth_check_userpass(str(src.get("username") or ""), str(src.get("password") or ""))
+        if not reauth_ok and headers is not None and headers.get("Authorization"):
+            reauth_ok = _auth_check_basic_header(headers.get("Authorization"))
+        if not reauth_ok:
+            _op_log("login-link-create", "", actor=subject, ip=str(client_ip or "-"), ok=False)
+            return {"ok": False, "error": "账号或密码错误"}, 401
+    next_path = str(src.get("next") or "/").strip() or "/"
+    if not next_path.startswith("/") or next_path.startswith("//"):
+        next_path = "/"
+    name = str(src.get("name") or "").strip()
+    if not name:
+        name = "SSO " + time.strftime("%Y-%m-%d %H:%M:%S")
+    now_wall = time.time()
+    expires_at, expiry_err = _sso_expiry_from_payload(src, now_wall=now_wall)
+    if expiry_err:
+        return {"ok": False, "error": expiry_err}, 400
+    single_use = _to_bool(src.get("single_use"), False)
+    check = secrets.token_urlsafe(16)
+    def _add_link(links):
+        links.append({
+            "name": name,
+            "check": check,
+            "enabled": True,
+            "created_ts": now_wall,
+            "expires_at": expires_at,
+            "single_use": single_use,
+            "used_ts": 0.0,
+            "used_count": 0,
+            "next": next_path,
+        })
+        return links[-64:]
+    ok, msg, links = _auth_mutate_sso_links(_add_link, tag="sso_create")
+    if not ok:
+        return {"ok": False, "error": msg, "links": links}, 500
+    path_url = _auth_sso_path(check, next_path=next_path)
+    return {
+        "ok": True,
+        "check": check,
+        "name": name,
+        "path": path_url,
+        "expires_at": expires_at,
+        "expires_in_sec": None if expires_at <= 0 else int(max(0.0, expires_at - now_wall)),
+        "single_use": single_use,
+        "next": next_path,
+        "links": links,
+    }, 200
+
+def _auth_mutate_sso_links(mutator, *, tag: str = "sso") -> tuple[bool, str, list[dict]]:
+    if not APP_CONFIG_PATH:
+        return False, "config path missing", _auth_sso_public_links()
+    try:
+        with auth_sso_lock:
+            cfg = load_app_config(APP_CONFIG_PATH)
+            auth = cfg.setdefault("auth", {})
+            if not isinstance(auth, dict):
+                auth = {}
+                cfg["auth"] = auth
+            links = _normalize_sso_links(auth.get("sso_links"))
+            auth["sso_links"] = _normalize_sso_links(mutator(list(links)))
+            cfg, guard_err = _prepare_security_cfg_for_save(cfg)
+            if guard_err:
+                return False, guard_err, _auth_sso_public_links()
+            b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag=tag)
+            if not b_ok:
+                return False, f"backup failed: {backup_path}", _auth_sso_public_links()
+            ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
+            if not ok:
+                return False, msg, _auth_sso_public_links()
+            cfg_loaded = load_app_config(APP_CONFIG_PATH)
+            r_ok, r_msg = reload_runtime_config(cfg_loaded)
+            if not r_ok:
+                return False, f"reload failed: {r_msg}", _auth_sso_public_links()
+            auth_loaded = cfg_loaded.get("auth") if isinstance(cfg_loaded, dict) else None
+            return True, "ok", _auth_sso_public_links(auth_loaded if isinstance(auth_loaded, dict) else None)
+    except Exception as e:
+        return False, str(e), _auth_sso_public_links()
 
 def _auth_check_basic_header(header_value: str | None) -> bool:
     if not _auth_enabled():
@@ -9813,6 +10668,10 @@ body.zone-alert-active header.app-shell-header,body.zone-alert-active header{box
 .info-block h3{font:600 15px/1 var(--font-ui);letter-spacing:.01em;margin-bottom:12px;color:var(--txt)}
 .info-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
 .info-actions .btn-mini{padding:7px 12px}
+.info-model-cell{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.info-model-na{font:700 13px/1 var(--font-mono);color:var(--dim)}
+.model-row-actions{display:inline-flex;gap:6px;flex-wrap:wrap;vertical-align:middle}
+.model-row-actions .btn-mini{padding:5px 8px;font-size:12px;line-height:1.1}
 @keyframes officeFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @media (max-width: 960px){
   header.app-shell-header{gap:8px}
@@ -10121,7 +10980,11 @@ _MAIN_PAGE_PATCH_JS = r"""
   function buildInfoSection(title, rows){
     var html = '<section class="info-block"><h3>'+esc(title)+'</h3><div class="info-grid">';
     for(var i=0;i<rows.length;i++){
-      html += infoRowHtml(rows[i][0], rows[i][1]);
+      if(rows[i][2] === 'html'){
+        html += '<div class="info-row"><span class="k">'+esc(rows[i][0])+'</span><span class="v">'+String(rows[i][1] == null ? '' : rows[i][1])+'</span></div>';
+      }else{
+        html += infoRowHtml(rows[i][0], rows[i][1]);
+      }
     }
     html += '</div></section>';
     return html;
@@ -10132,12 +10995,129 @@ _MAIN_PAGE_PATCH_JS = r"""
     var data = await getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
     _downloadJsonFile('rid_track_' + sn + '_' + _toolStamp() + '.json', data);
   };
+  function cleanModelPrefixFromSn(sn){
+    var raw = String(sn || '');
+    if(raw.toUpperCase().indexOf('MAC:') === 0) return '';
+    return raw.replace(/[^0-9A-Za-z]+/g, '').toUpperCase().slice(0, 8);
+  }
+  function isUnknownModel(model){
+    var v = String(model || '').trim().toUpperCase();
+    return !v || v === 'N/A' || v === 'NA' || v === '-';
+  }
+  function modelActionCell(e){
+    e = e || {};
+    var model = String(e.model || 'N/A');
+    if(!isUnknownModel(model)) return esc(model);
+    var sn = String(e.sn || '');
+    var prefix = cleanModelPrefixFromSn(sn);
+    var disabled = prefix ? '' : ' disabled';
+    return '<span class="info-model-cell"><span class="info-model-na">N/A</span>'
+      + '<span class="model-row-actions">'
+      + '<button class="btn-mini model-map-add" type="button" data-sn="'+escAttr(sn)+'" data-prefix="'+escAttr(prefix)+'"'+disabled+'>添加到识别库</button>'
+      + '<button class="btn-mini model-map-issue" type="button" data-sn="'+escAttr(sn)+'" data-prefix="'+escAttr(prefix)+'"'+disabled+'>Issue</button>'
+      + '<button class="btn-mini model-map-pr" type="button" data-sn="'+escAttr(sn)+'" data-prefix="'+escAttr(prefix)+'"'+disabled+'>PR</button>'
+      + '</span></span>';
+  }
+  function modelIssueUrl(sn, prefix){
+    var title = 'RID model mapping: ' + (prefix || sn || 'unknown');
+    var body = [
+      'SN: ' + String(sn || ''),
+      'Prefix: ' + String(prefix || ''),
+      'Current model: N/A',
+      '',
+      'Please add this RID model mapping to rid_models.json.'
+    ].join('\\n');
+    return 'https://github.com/luyii-code-1/Light_RID_Scanner/issues/new?title='
+      + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
+  }
+  function modelPrEditUrl(){
+    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid_models.json';
+  }
+  function patchLocalModel(sn, model){
+    sn = String(sn || '');
+    model = String(model || '').trim();
+    if(!sn || !model) return;
+    if(latestDroneMap && latestDroneMap[sn]) latestDroneMap[sn].model = model;
+    [latestDroneRows, latestMapRows].forEach(function(list){
+      if(!Array.isArray(list)) return;
+      list.forEach(function(row){ if(row && String(row.sn || '') === sn) row.model = model; });
+    });
+    var tr = null;
+    if(window.CSS && CSS.escape){
+      tr = document.querySelector('tr[data-sn="'+CSS.escape(sn)+'"]');
+    }else{
+      var rows = document.querySelectorAll('tr[data-sn]');
+      for(var i=0;i<rows.length;i++){
+        if(String(rows[i].getAttribute('data-sn') || '') === sn){ tr = rows[i]; break; }
+      }
+    }
+    if(tr && tr.children && tr.children[3]) tr.children[3].textContent = model;
+    renderLiveCards(latestDroneRows);
+  }
+  async function addModelFromDetail(sn, prefix){
+    sn = String(sn || '');
+    prefix = String(prefix || cleanModelPrefixFromSn(sn));
+    if(!prefix){
+      showBanner('无法从 SN 提取识别库前缀。', 'warn', 3200);
+      return;
+    }
+    var model = window.prompt('请输入 ' + prefix + ' 对应的机型名称', '');
+    model = String(model || '').trim();
+    if(!model) return;
+    try{
+      await postJson('/api/settings/models/upsert', {sn:sn, prefix:prefix, model:model});
+      patchLocalModel(sn, model);
+      showBanner('识别库已添加：' + prefix + ' → ' + model, 'ok', 3200);
+      if(latestDroneMap && latestDroneMap[sn]) showInfoCard(buildInfoHtml(latestDroneMap[sn]), true);
+    }catch(e){
+      showBanner('识别库添加失败：' + (e.message || e), 'warn', 4800);
+    }
+  }
+  function openModelIssue(sn, prefix){
+    if(!prefix){
+      showBanner('无法从 SN 提取识别库前缀。', 'warn', 3200);
+      return;
+    }
+    window.open(modelIssueUrl(sn, prefix), '_blank', 'noopener');
+  }
+  async function openModelPr(sn, prefix){
+    if(!prefix){
+      showBanner('无法从 SN 提取识别库前缀。', 'warn', 3200);
+      return;
+    }
+    var model = window.prompt('请输入机型名称；会复制 JSON 条目并打开 GitHub 编辑页', '');
+    model = String(model || '').trim();
+    if(model && navigator.clipboard && navigator.clipboard.writeText){
+      try{ await navigator.clipboard.writeText('"' + prefix + '": "' + model.replace(/"/g, '\\\\"') + '"'); }catch(_e){}
+    }
+    window.open(modelPrEditUrl(), '_blank', 'noopener');
+    showBanner(model ? 'JSON 条目已复制，已打开 GitHub 编辑页。' : '已打开 GitHub 编辑页。', 'ok', 3600);
+  }
+  function bindModelActionButtons(){
+    var modal = qs('info-modal');
+    if(!modal || modal.getAttribute('data-model-actions') === '1') return;
+    modal.setAttribute('data-model-actions', '1');
+    modal.addEventListener('click', function(ev){
+      var addBtn = ev.target && ev.target.closest ? ev.target.closest('.model-map-add') : null;
+      var issueBtn = ev.target && ev.target.closest ? ev.target.closest('.model-map-issue') : null;
+      var prBtn = ev.target && ev.target.closest ? ev.target.closest('.model-map-pr') : null;
+      var btn = addBtn || issueBtn || prBtn;
+      if(!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var sn = btn.getAttribute('data-sn') || '';
+      var prefix = btn.getAttribute('data-prefix') || cleanModelPrefixFromSn(sn);
+      if(addBtn) addModelFromDetail(sn, prefix);
+      else if(issueBtn) openModelIssue(sn, prefix);
+      else openModelPr(sn, prefix);
+    });
+  }
   function patchInfoCard(){
     buildInfoHtml = function(e){
       e = e || {};
       var base = [
         ['SN', String(e.sn || '-')],
-        ['机型', String(e.model || 'N/A')],
+        ['机型', modelActionCell(e), 'html'],
         ['在线状态', e.lost ? '离线' : '在线'],
         ['来源', snSourceText(e)],
         ['扫描类型', scanTypeText(e)],
@@ -10334,6 +11314,7 @@ _MAIN_PAGE_PATCH_JS = r"""
   };
   document.addEventListener('DOMContentLoaded', function(){
     patchInfoCard();
+    bindModelActionButtons();
     ensureMainPages();
     neutralizeLegacyCollapsers();
     drawAlarmZones();
@@ -10464,6 +11445,7 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
 .status{padding:8px 12px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
 @media(max-width:720px){.wrap{width:calc(100vw - 10px);padding:10px 5px}.title{font-size:22px}pre{height:calc(100dvh - 230px);font-size:12px}}
 </style></head><body><div class="wrap">
+  <div class="settings-sticky-head">
   <div class="topbar">
     <div><div class="title">日志</div><div class="meta">运行、操作、扫描与扫描差异。</div></div>
     <div class="actions">
@@ -10600,6 +11582,7 @@ body.theme-light{
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
 body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
 .wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
+.settings-sticky-head{position:sticky;top:0;z-index:40;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 94%,transparent));padding-top:clamp(8px,1.2vw,14px);backdrop-filter:blur(10px)}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
 .title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
 .sub{color:var(--muted);margin-top:5px;max-width:780px;line-height:1.45}
@@ -10615,15 +11598,16 @@ body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--
 .draft-title{font:600 15px/1.2 var(--font-ui)}
 .draft-meta{font-size:12px;color:var(--muted);line-height:1.5}
 .draft-actions{display:flex;gap:10px;flex-wrap:wrap}
-.tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:3px;border:1px solid var(--border);background:var(--card2);border-radius:4px;margin:0 auto 12px;width:min(920px,100%);box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;padding:3px;border:1px solid var(--border);background:var(--card2);border-radius:4px;margin:0 auto 12px;width:min(680px,100%);box-shadow:0 1px 2px rgba(0,0,0,.05)}
 .tab{border:1px solid transparent;background:transparent;color:var(--txt);padding:11px 16px;border-radius:4px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;text-align:center;transition:border-color .14s ease,background-color .14s ease,transform .14s ease,box-shadow .14s ease}
 .tab:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 8%, var(--card2));box-shadow:0 2px 8px var(--glow)}
 .tab.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 12%, var(--card2));box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent)}
 body.theme-light .tabs{background:var(--card2)}
 body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(--card2));border-color:var(--blue)}
 .panel{display:none}.panel.active{display:block}
-.visual-grid{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(360px,.92fr);gap:12px}
+.visual-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(360px,.88fr);gap:12px}
 .stack{display:grid;gap:12px;min-width:0;align-content:start}
+.stack-label{font:700 12px/1 var(--font-ui);letter-spacing:0;color:var(--muted);padding:2px 2px 0}
 .card{border:1px solid var(--border);border-radius:4px;background:var(--card);padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.08);min-width:0;overflow:hidden;animation:officeFade .16s ease-out both}
 .card.dirty{border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 22%, transparent),0 8px 18px var(--glow)}
 .card.dirty h2{color:var(--blue)}
@@ -10646,8 +11630,23 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .checks label{display:flex;align-items:center;gap:8px;font-size:15px;color:var(--txt)}
 .checks.pref-checks{display:grid;grid-template-columns:1fr;gap:10px}
 .row-actions{display:flex;gap:10px;flex-wrap:wrap}
-.token-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.token-actions input{flex:1 1 260px}
+.token-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;min-width:0}
+.token-actions input{flex:1 1 260px;min-width:0}
+#login-link-url{font-family:var(--font-mono);font-size:12px}
+.sso-link-list{margin-top:10px}
+.sso-link-options{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(110px,.7fr) auto;gap:10px;align-items:end;margin-top:10px}
+.sso-link-options .field{min-width:0}
+.sso-single-use{height:42px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt)}
+.sso-link-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}
+.sso-link-row .btn{white-space:nowrap}
+.sso-link-meta{min-width:0;overflow:hidden}
+.sso-link-title{font:700 13px/1.25 var(--font-ui);color:var(--txt);display:flex;gap:8px;align-items:center;min-width:0;flex-wrap:wrap}
+.sso-link-badge{font:700 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 5px;background:var(--card)}
+.sso-link-badge.bad{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--border))}
+.sso-link-url{margin-top:5px;font:600 12px/1.45 var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:clip;cursor:pointer;user-select:text}
+.field.hidden{display:none}
+.policy-grid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:end}
+.disabled-block{opacity:.52;filter:saturate(.65);pointer-events:none}
 .status{margin-top:12px;color:#8fd0a8;white-space:pre-wrap;line-height:1.65}
 .status.err{color:#ff9b9b}
 .secret-note,.micro{font-size:12px;color:var(--muted);line-height:1.55}
@@ -10655,7 +11654,35 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .list-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 .list-wrap{display:grid;gap:8px}
 .list-row{border:1px solid var(--border);border-radius:4px;padding:10px;background:var(--card2)}
+.access-group{display:grid;gap:12px}
+.access-subgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.access-subcard{border:1px solid var(--border);border-radius:4px;background:var(--card2);padding:12px;display:grid;gap:12px;min-width:0}
+.access-subcard.full{grid-column:1/-1}
+.access-subhead{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.access-subtitle{font:700 15px/1.2 var(--font-ui);color:var(--txt)}
+.access-subcopy{margin-top:4px;color:var(--muted);font-size:12px;line-height:1.5}
+.access-subcard .list-row,.access-subcard .empty-state{background:var(--card)}
+.api-token-list{display:grid;gap:8px;max-height:420px;overflow:auto;padding-right:4px}
+.api-token-row{border:1px solid var(--border);border-radius:4px;background:var(--card);padding:10px;display:grid;gap:10px;min-width:0}
+.api-token-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}
+.api-token-name{font:700 13px/1.25 var(--font-ui);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.api-token-badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.api-token-badge{font:700 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:4px 6px;background:var(--card2);white-space:nowrap}
+.api-token-badge.bad{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--border))}
+.api-token-create-grid{display:grid;grid-template-columns:minmax(150px,1fr) minmax(130px,.65fr) minmax(120px,.6fr) auto auto;gap:8px;align-items:end}
+.api-token-grid{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}
+.api-token-grid .field{min-width:0}
+.api-token-grid input:not([type="checkbox"]),.api-token-grid select,.api-token-create-grid input:not([type="checkbox"]),.api-token-create-grid select{height:38px}
+.api-token-current{font:600 12px/1.45 var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:clip}
 .model-update-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center}
+.model-editor{display:grid;gap:10px;margin-top:10px}
+.model-editor-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
+.model-editor-toolbar input{height:42px}
+.model-map-list{display:grid;gap:8px;max-height:360px;overflow:auto;padding-right:4px}
+.model-map-row{display:grid;grid-template-columns:minmax(100px,.42fr) minmax(0,1fr) auto;gap:8px;align-items:center;border:1px solid var(--border);border-radius:4px;background:var(--card2);padding:8px}
+.model-map-row input{height:38px;border:1px solid var(--border);background:var(--card);color:var(--txt);border-radius:4px;padding:8px 10px;font:600 13px/1.25 var(--font-ui);min-width:0}
+.model-map-row input.model-prefix{font-family:var(--font-mono);text-transform:uppercase}
+.model-map-empty{padding:16px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);background:var(--card2)}
 .metric-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
 .metric-toolbar .btn.active{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,var(--card2))}
 .metric-retention{display:grid;grid-template-columns:auto 82px auto;gap:8px;align-items:center;margin-left:auto;color:var(--muted);font-size:12px}
@@ -10694,7 +11721,9 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 .modal-mask{position:fixed;inset:0;background:rgba(4,8,14,.66);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
 .modal-mask.show{display:flex}
 .modal-card{width:min(480px,100%);border:1px solid var(--border);border-radius:4px;background:var(--card);padding:18px;box-shadow:0 18px 32px rgba(0,0,0,.18)}
+.modal-card.wide{width:min(900px,100%)}
 .modal-card h3{margin:0 0 10px;font:600 20px/1 var(--font-ui)}
+.one-time-secret{font:600 12px/1.55 var(--font-mono);word-break:break-all;border:1px solid var(--border);background:var(--card2);border-radius:4px;padding:12px;margin-top:12px;max-height:160px;overflow:auto}
 .toast-stack{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:72;width:min(420px,calc(100vw - 28px));pointer-events:none}
 .toast{border:1px solid var(--border);border-radius:4px;background:color-mix(in srgb, var(--card) 96%, transparent);padding:12px 14px;box-shadow:0 14px 28px rgba(0,0,0,.18);opacity:0;transform:translateY(6px);transition:opacity .18s ease,transform .18s ease,border-color .18s ease;background-clip:padding-box;pointer-events:auto}
 .toast.show{opacity:1;transform:translateY(0)}
@@ -10705,10 +11734,11 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 @keyframes officeFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @media (max-width:1360px){
   .hook-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .api-token-create-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
   .zone-layout{grid-template-columns:repeat(3,minmax(0,1fr))}
-  .hook-layout .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
+  .hook-layout .field:last-child,.api-token-create-grid .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
 }
-@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.hook-layout,.zone-layout,.field-inline,.model-update-row{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
+@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.access-subgrid,.hook-layout,.api-token-head,.api-token-create-grid,.api-token-grid,.policy-grid,.zone-layout,.field-inline,.model-update-row,.model-editor-toolbar,.model-map-row,.sso-link-options{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
 @media (max-width:700px){
   .wrap{width:min(100vw - 12px,1420px);padding:10px 6px 18px}
   .topbar,.draft-bar{gap:10px}
@@ -10723,7 +11753,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   <div class="topbar">
     <div>
       <div class="title">设置</div>
-      <div class="sub">在此调整扫描站配置。保存前可先测试，确认通过后再写入配置文件。</div>
+      <div class="sub">扫描采集、地图、通知、访问控制和运行工具集中在本页。</div>
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
@@ -10735,7 +11765,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   <div class="draft-bar">
     <div class="draft-copy">
       <div class="draft-title" id="draft-title">当前没有未保存修改</div>
-      <div class="draft-meta" id="draft-meta">修改过的项目会标记出来；测试不会改写配置文件。</div>
+      <div class="draft-meta" id="draft-meta">未保存改动按配置分组标记；测试结果独立于配置文件。</div>
     </div>
     <div class="draft-actions">
       <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
@@ -10743,22 +11773,23 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     </div>
   </div>
   <div class="tabs">
-    <button class="tab active" data-tab="visual" type="button">可视化设置</button>
-    <button class="tab" data-tab="raw" type="button">原始文件</button>
-    <button class="tab" data-tab="api" type="button">API 文档</button>
+    <button class="tab active" data-tab="visual" type="button">配置面板</button>
+    <button class="tab" data-tab="raw" type="button">原始配置</button>
+  </div>
   </div>
   <div class="panel active" data-tab="visual">
     <div class="visual-grid">
       <div class="stack">
+        <div class="stack-label">核心配置</div>
         <div class="card" data-card-key="capture">
           <div class="section-head">
             <div>
               <h2>采集</h2>
-              <div class="section-copy">绑定采集网卡、信道和输出刷新规则。</div>
+              <div class="section-copy">采集网卡、RID 信道、刷新节奏、历史缓存和识别库来源。</div>
             </div>
           </div>
           <div class="grid" style="margin-top:14px">
-            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">请选择默认网卡</option></select></div>
+            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">未绑定</option></select></div>
             <div class="field">
               <label>固定信道</label>
               <div class="field-inline">
@@ -10766,7 +11797,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <button class="btn ghost" id="btn-channel-edit" type="button">编辑</button>
                 <button class="btn ghost" id="btn-channel-reset" type="button">默认</button>
               </div>
-              <div class="micro" id="channel-hint">默认 CH6。</div>
+              <div class="micro" id="channel-hint">当前信道来源：默认 CH6。</div>
             </div>
             <div class="field"><label>日志刷新间隔(s)</label><input id="cfg-time" type="number" step="0.1"></div>
             <div class="field"><label>最短重复间隔(s)</label><input id="cfg-min-gap" type="number" step="0.1"></div>
@@ -10775,11 +11806,13 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             <div class="field full" data-card-key="capture">
               <label>识别库在线更新</label>
               <div class="model-update-row">
-                <label><input id="cfg-model-update-enabled" type="checkbox"> 每天自动检查</label>
-                <input id="cfg-model-update-url" type="text">
+                <label><input id="cfg-model-update-enabled" type="checkbox"> 自动更新</label>
+                <label><input id="cfg-app-update-enabled" type="checkbox"> 启动检查程序更新</label>
+                <input id="cfg-model-update-url" type="text" placeholder="留空使用官方源">
                 <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
               </div>
-              <div class="micro" id="model-update-state">使用远端 rid_models.json 更新本地模型映射文件。</div>
+              <div class="micro" id="model-update-state">本地识别库可从官方源或自定义地址同步。</div>
+              <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
             <div class="field full"><label>历史缓存文件</label><input id="cfg-history-file" type="text"></div>
           </div>
@@ -10809,7 +11842,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="section-head">
             <div>
               <h2>地图与基站</h2>
-              <div class="section-copy">配置基站坐标、默认视角和地图回中行为。</div>
+              <div class="section-copy">基站坐标、地图默认视角、航向参考和自动回中参数。</div>
             </div>
           </div>
           <div class="grid">
@@ -10826,7 +11859,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <button class="btn" id="btn-browser-loc" type="button">读取浏览器位置</button>
                 <button class="btn ghost" id="btn-clear-base-loc" type="button">清空基站坐标</button>
               </div>
-              <div class="micro" id="base-geo-hint">部分浏览器只允许在 HTTPS 或 localhost 下读取定位。</div>
+              <div class="micro" id="base-geo-hint">浏览器定位能力由当前访问协议和浏览器权限决定。</div>
             </div>
           </div>
         </div>
@@ -10834,17 +11867,160 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="list-head">
             <div>
               <h2>报警区域</h2>
-              <div class="section-copy">用两个经纬度点定义矩形区域，目标进入后触发提醒。</div>
+              <div class="section-copy">矩形报警区域由 A/B 两组经纬度边界组成。</div>
             </div>
             <button class="btn" id="btn-zone-add" type="button">添加区域</button>
           </div>
           <div id="zone-list" class="list-wrap"></div>
         </div>
+        <div class="card access-group" data-card-key="access">
+          <div class="section-head">
+            <div>
+              <h2>通知与访问控制</h2>
+              <div class="section-copy">通知发送、网页会话、临时登录链接、外部 API Token 和访问白名单集中在这里。</div>
+            </div>
+          </div>
+          <div class="access-subgrid">
+            <div class="access-subcard">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">通知通道</div>
+                  <div class="access-subcopy">企业微信机器人通道、通知开关和发送节奏。</div>
+                </div>
+                <button class="btn" id="btn-hook-add" type="button">添加通道</button>
+              </div>
+              <div id="wecom-list" class="list-wrap"></div>
+              <div class="grid">
+                <div class="field"><label>重上线冷却(s)</label><input id="cfg-reonline" type="number"></div>
+                <div class="field"><label>通知超时(s)</label><input id="cfg-send-timeout" type="number"></div>
+              </div>
+              <div class="checks">
+                <label><input id="cfg-notify-enabled" type="checkbox"> 启用企业微信通知</label>
+                <label><input id="cfg-notify-reonline" type="checkbox"> 允许重上线通知</label>
+              </div>
+            </div>
+            <div class="access-subcard">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">网页登录</div>
+                  <div class="access-subcopy">控制设置页和内置页面的账号密码登录会话。</div>
+                </div>
+              </div>
+              <div class="grid">
+                <div class="field"><label>登录标题</label><input id="cfg-auth-realm" type="text"><div class="micro">显示在登录框和认证域。</div></div>
+                <div class="field"><label>会话有效期(min)</label><input id="cfg-auth-ttl" type="number" min="1" max="10080" step="1"><div class="micro">范围 1 分钟到 7 天。</div></div>
+                <div class="field"><label>网页登录账号</label><input id="cfg-auth-user" type="text" placeholder="留空即不修改"></div>
+                <div class="field"><label>网页登录密码</label><input id="cfg-auth-pass" type="password" placeholder="留空即不修改"></div>
+              </div>
+              <div class="checks">
+                <label><input id="cfg-auth-enabled" type="checkbox"> 启用网页登录鉴权</label>
+              </div>
+            </div>
+            <div class="access-subcard full">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">SSO 登录链接</div>
+                  <div class="access-subcopy">为内置页面生成带有效期和单次登录控制的登录链接；过期记录保留。</div>
+                </div>
+              </div>
+              <div class="token-actions">
+                <input id="login-link-name" type="text" placeholder="链接名称">
+                <button class="btn" id="btn-login-link-create" type="button">生成</button>
+              </div>
+              <div class="sso-link-options">
+                <div class="field"><label>有效期</label><select id="login-link-expire-mode">
+                  <option value="86400">24 小时</option>
+                  <option value="3600">1 小时</option>
+                  <option value="604800">7 天</option>
+                  <option value="never">无限时间</option>
+                  <option value="custom">自定义分钟</option>
+                </select></div>
+                <div class="field hidden" id="login-link-custom-field"><label>自定义有效期(min)</label><input id="login-link-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
+                <label class="sso-single-use"><input id="login-link-single-use" type="checkbox"> 单次登录</label>
+              </div>
+              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制；过期记录保留在列表。</div>
+              <div id="login-link-list" class="list-wrap sso-link-list"></div>
+            </div>
+            <div class="access-subcard full">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">API Token</div>
+                  <div class="access-subcopy">外部 API Token 随机生成，只在创建成功时显示一次。</div>
+                </div>
+              </div>
+              <div class="api-token-create-grid">
+                <div class="field"><label>名称</label><input id="api-token-new-name" type="text" placeholder="Token 名称"></div>
+                <div class="field"><label>有效期</label><select id="api-token-new-expire-mode">
+                  <option value="86400">24 小时</option>
+                  <option value="3600">1 小时</option>
+                  <option value="604800">7 天</option>
+                  <option value="never">无限时间</option>
+                  <option value="custom">自定义分钟</option>
+                </select></div>
+                <div class="field hidden" id="api-token-custom-field"><label>自定义(min)</label><input id="api-token-new-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
+                <label class="sso-single-use"><input id="api-token-new-single-use" type="checkbox"> 单次使用</label>
+                <div class="field"><label>&nbsp;</label><button class="btn" id="btn-api-token-add" type="button">验证并生成</button></div>
+              </div>
+              <div id="api-token-list" class="api-token-list"></div>
+              <div class="checks">
+                <label><input id="cfg-api-enabled" type="checkbox"> 启用外部 API</label>
+              </div>
+            </div>
+            <div class="access-subcard full">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">API 白名单</div>
+                  <div class="access-subcopy">限制外部 API 来源地址；没有 API Token 时此规则不生效。</div>
+                </div>
+              </div>
+              <div id="api-whitelist-block">
+                <div class="policy-grid">
+                  <div class="field"><label>模式</label><select id="cfg-api-whitelist-mode"><option value="allow">白名单</option><option value="deny">黑名单</option></select></div>
+                  <div class="checks"><label><input id="cfg-api-whitelist-enabled" type="checkbox"> 启用 API 访问规则</label></div>
+                </div>
+                <div class="field full"><label>地址列表</label><textarea id="cfg-api-whitelist" spellcheck="false" style="min-height:140px"></textarea><div class="micro">每行一个 IP 或 CIDR。</div></div>
+              </div>
+            </div>
+            <div class="access-subcard full">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">网页访问规则</div>
+                  <div class="access-subcopy">限制设置页、主页和内置页面的访问来源。</div>
+                </div>
+              </div>
+              <div class="policy-grid">
+                <div class="field"><label>模式</label><select id="cfg-web-access-mode"><option value="allow">白名单</option><option value="deny">黑名单</option></select></div>
+                <div class="checks"><label><input id="cfg-web-access-enabled" type="checkbox"> 启用网页访问规则</label></div>
+              </div>
+              <div class="field full"><label>地址列表</label><textarea id="cfg-web-access-list" spellcheck="false" style="min-height:120px"></textarea><div class="micro">每行一个 IP 或 CIDR；拒绝时页面返回 403。</div></div>
+            </div>
+          </div>
+          <div class="secret-note" id="secret-state">通知、登录、Token 和外部 API 状态摘要。</div>
+          <div id="status-visual" class="status">-</div>
+        </div>
+      </div>
+      <div class="stack">
+        <div class="stack-label">运行与页面</div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>主机状态</h2>
+              <div class="section-copy">当前资源占用、网络地址、默认网卡和采集状态。</div>
+            </div>
+            <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
+          </div>
+          <div id="host-stats" class="stats-grid" style="margin-top:14px"></div>
+          <div id="host-meta" class="micro">-</div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-open-hw" type="button">打开硬件助手</button>
+            <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
+          </div>
+        </div>
         <div class="card" data-card-key="metrics">
           <div class="section-head">
             <div>
-              <h2>负载趋势</h2>
-              <div class="section-copy">按指标分开展示，便于观察 CPU、内存、温度、系统负载和 AP 数变化。</div>
+              <h2>节点负载</h2>
+              <div class="section-copy">CPU、内存、温度、系统负载和 AP 数的历史曲线。</div>
             </div>
           </div>
           <div class="metric-toolbar">
@@ -10863,74 +12039,11 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <label class="metric-zoom"><span>缩放</span><input id="metrics-zoom" type="range" min="1" max="100" step="1" value="1"><span id="metrics-zoom-value">1x</span></label>
           <div id="status-metrics" class="micro">-</div>
         </div>
-      </div>
-      <div class="stack">
-        <div class="card" data-card-key="access">
-          <div class="list-head">
-            <div>
-              <h2>通知、API 与访问控制</h2>
-              <div class="section-copy">配置通知通道、网页登录和外部 API 访问。</div>
-            </div>
-            <button class="btn" id="btn-hook-add" type="button">添加通知通道</button>
-          </div>
-          <div id="wecom-list" class="list-wrap"></div>
-          <div class="grid" style="margin-top:14px">
-            <div class="field"><label>重上线冷却(s)</label><input id="cfg-reonline" type="number"></div>
-            <div class="field"><label>通知超时(s)</label><input id="cfg-send-timeout" type="number"></div>
-            <div class="field"><label>登录标题</label><input id="cfg-auth-realm" type="text"><div class="micro">用于登录页面和接口提示。</div></div>
-            <div class="field"><label>单次登录有效期(min)</label><input id="cfg-auth-ttl" type="number" min="1" max="10080" step="1"><div class="micro">默认 30 分钟，范围 1 分钟到 7 天。</div></div>
-            <div class="field"><label>网页登录账号</label><input id="cfg-auth-user" type="text" placeholder="留空则保持不变"></div>
-            <div class="field"><label>网页登录密码</label><input id="cfg-auth-pass" type="password" placeholder="留空则保持不变"></div>
-            <div class="field full"><label>一键登录链接</label>
-              <div class="token-actions">
-                <input id="login-link-url" type="text" readonly placeholder="生成后显示一次性登录链接">
-                <button class="btn" id="btn-login-link-create" type="button">生成</button>
-                <button class="btn ghost" id="btn-login-link-copy" type="button">复制</button>
-              </div>
-              <div class="micro" id="login-link-state">生成前需要再次验证账号和密码；链接只可使用一次。</div>
-            </div>
-            <div class="field full"><label>当前 API Token</label>
-              <div class="token-actions">
-                <input id="cfg-api-token-current" type="password" readonly placeholder="未设置">
-                <button class="btn ghost" id="btn-api-token-reveal" type="button">显示</button>
-                <button class="btn" id="btn-api-token-copy" type="button">复制</button>
-                <button class="btn ghost" id="btn-api-token-clear" type="button">清空</button>
-              </div>
-              <div class="micro">显示或复制前需要再次验证。</div>
-            </div>
-            <div class="field full"><label>替换 API Token</label><input id="cfg-api-token-new" type="password" placeholder="留空则保持不变"></div>
-            <div class="field full"><label>API 白名单</label><textarea id="cfg-api-whitelist" spellcheck="false" style="min-height:140px"></textarea><div class="micro">启用白名单模式后，每行填写一个允许访问外部 API 的 IP 或 CIDR，例如 `127.0.0.1`、`192.168.1.0/24`。</div></div>
-          </div>
-          <div class="checks" style="margin-top:14px">
-            <label><input id="cfg-notify-enabled" type="checkbox"> 启用企业微信通知</label>
-            <label><input id="cfg-notify-reonline" type="checkbox"> 允许重上线通知</label>
-            <label><input id="cfg-auth-enabled" type="checkbox"> 启用网页登录鉴权</label>
-            <label><input id="cfg-api-enabled" type="checkbox"> 启用外部 API</label>
-            <label><input id="cfg-api-whitelist-enabled" type="checkbox"> 启用 API 白名单模式</label>
-          </div>
-          <div class="secret-note" id="secret-state" style="margin-top:12px">启用外部 API 前，先完成网页登录和 Token 设置。</div>
-          <div id="status-visual" class="status">-</div>
-        </div>
         <div class="card">
           <div class="section-head">
             <div>
-              <h2>主机状态</h2>
-              <div class="section-copy">查看当前资源占用、网络地址和采集状态。</div>
-            </div>
-            <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
-          </div>
-          <div id="host-stats" class="stats-grid" style="margin-top:14px"></div>
-          <div id="host-meta" class="micro">-</div>
-          <div class="row-actions" style="margin-top:14px">
-            <button class="btn" id="btn-open-hw" type="button">打开硬件助手</button>
-            <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
-          </div>
-        </div>
-        <div class="card">
-          <div class="section-head">
-            <div>
-              <h2>首页操作</h2>
-              <div class="section-copy">处理主页显示、浏览器通知和初始化入口。</div>
+              <h2>主页工具</h2>
+              <div class="section-copy">主页列表冻结、浏览器通知、历史数据和初始化入口。</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -10945,21 +12058,21 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
         <div class="card">
           <div class="section-head">
             <div>
-              <h2>页面偏好</h2>
-              <div class="section-copy">这些选项只影响当前浏览器。</div>
+              <h2>浏览器偏好</h2>
+              <div class="section-copy">实时轨迹和 2 小时轨迹过滤保存在当前浏览器。</div>
             </div>
           </div>
           <div class="checks pref-checks" style="margin-top:14px">
             <label><input id="pref-realtime-track" type="checkbox"> 实时轨迹</label>
             <label><input id="pref-track-2h" type="checkbox"> 只显示近 2 小时轨迹</label>
           </div>
-          <div class="micro">关闭实时轨迹后，地图只显示手动勾选目标的轨迹。</div>
+          <div class="micro">实时轨迹关闭时，地图轨迹来自手动勾选目标。</div>
         </div>
         <div class="card">
           <div class="section-head">
             <div>
-              <h2>AP 与扫描日志</h2>
-              <div class="section-copy">查看附近 AP 和最近扫描日志；刷新不会修改配置。</div>
+              <h2>实时 AP</h2>
+              <div class="section-copy">附近 AP 列表和最近扫描日志，内容来自运行时缓存。</div>
             </div>
             <button class="btn ghost" id="btn-refresh-runtime" type="button">刷新</button>
           </div>
@@ -10975,23 +12088,15 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
       <div class="split-actions">
         <div>
           <h2>原始配置文件</h2>
-          <div class="section-copy">直接编辑 rid_config.json，适合批量调整或排查配置问题。</div>
+          <div class="section-copy">rid_config.json 原文内容，适合批量调整或排查配置问题。</div>
         </div>
         <div class="row-actions">
           <button class="btn" id="btn-load-raw" type="button">读取原始文件</button>
-          <button class="btn warn" id="btn-save-raw" type="button">保存并热重载</button>
+        <button class="btn warn" id="btn-save-raw" type="button">检查并应用</button>
         </div>
       </div>
       <div class="field full" style="margin-top:14px"><label>rid_config.json</label><textarea id="raw-editor" spellcheck="false"></textarea></div>
       <div id="status-raw" class="status">-</div>
-    </div>
-  </div>
-  <div class="panel" data-tab="api">
-    <div class="card">
-      <h2>API 文档</h2>
-      <div class="section-copy">外部 API 使用独立 Token，并可限制允许访问的 IP。</div>
-      <div class="field full" style="margin-top:14px"><label>接口文档</label><textarea id="api-docs" readonly spellcheck="false"></textarea></div>
-      <div id="status-api" class="status">-</div>
     </div>
   </div>
 </div>
@@ -10999,7 +12104,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
     <h3>再次验证</h3>
-    <div class="section-copy">显示或复制 Token 前需要重新输入网页登录账号和密码。</div>
+    <div class="section-copy">二次验证保护 Token 显示、复制和 SSO 链接生成。</div>
     <div class="grid" style="margin-top:14px">
       <div class="field full"><label>账号</label><input id="reauth-user" type="text" autocomplete="username"></div>
       <div class="field full"><label>密码</label><input id="reauth-pass" type="password" autocomplete="current-password"></div>
@@ -11009,6 +12114,33 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
       <button class="btn" id="btn-reauth-confirm" type="button">确认</button>
     </div>
     <div id="reauth-status" class="status">-</div>
+  </div>
+</div>
+<div class="modal-mask" id="one-time-modal">
+  <div class="modal-card">
+    <h3 id="one-time-title">只显示一次</h3>
+    <div class="section-copy" id="one-time-note">关闭后不能再次查看或复制。</div>
+    <div class="one-time-secret" id="one-time-secret"></div>
+    <div class="row-actions" style="margin-top:14px">
+      <button class="btn" id="btn-one-time-copy" type="button">复制</button>
+      <button class="btn ghost" id="btn-one-time-close" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+<div class="modal-mask" id="model-map-modal">
+  <div class="modal-card wide">
+    <h3>识别库编辑</h3>
+    <div class="section-copy">编辑本地 rid_models.json 条目，保存后立即刷新实时和历史机型。</div>
+    <div class="model-editor">
+      <div class="model-editor-toolbar">
+        <input id="model-map-search" type="text" placeholder="前缀或机型">
+        <button class="btn ghost" id="btn-model-map-add" type="button">新增</button>
+        <button class="btn" id="btn-model-map-save" type="button">保存列表</button>
+      </div>
+      <div id="model-map-list" class="model-map-list"></div>
+      <div class="micro" id="model-map-editor-state">当前模型映射文件保存识别库条目。</div>
+    </div>
+    <div class="row-actions" style="margin-top:14px"><button class="btn ghost" id="btn-model-map-close" type="button">关闭</button></div>
   </div>
 </div>
 <script>
@@ -11024,14 +12156,40 @@ function isLocalHostName(host){
   var h = String(host || '').toLowerCase();
   return h === 'localhost' || h === '127.0.0.1';
 }
-var apiTokenAction = '__KEEP__';
 var apiTokenLastReveal = '';
+var apiTokenRevealTarget = '';
+var apiTokenRows = [];
+var oneTimeSecretValue = '';
 var reauthAction = null;
+var loginLinks = [];
+var modelMapRows = [];
+var modelMapPath = '';
 var settingsState = {visualLoaded:false, rawLoaded:false, apiLoaded:false, channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}};
 var metricsState = {window:'12h', zoom:1, panSec:0, hover:null, drag:null, chartMeta:{}, items:[]};
+var SETTINGS_DRAFT_SECTIONS = [
+  {key:'capture', label:'采集'},
+  {key:'map', label:'地图与基站'},
+  {key:'zones', label:'报警区域'},
+  {key:'access', label:'通知与访问控制'},
+  {key:'metrics', label:'节点负载'}
+];
 var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
 var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
 var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
+function on(id, type, handler){
+  var el = qs(id);
+  if(el) el.addEventListener(type, handler);
+  return el;
+}
+async function guarded(action, statusId, okText, okMs, warnMs){
+  try{
+    await action();
+    if(okText) showNotice(okText, 'ok', okMs || 2200);
+  }catch(e){
+    if(statusId) setStatus(statusId, e.message || e, true);
+    showNotice(e.message || e, 'warn', warnMs || 3800);
+  }
+}
 function syncSettingsViewport(){
   var vp = window.visualViewport;
   var vh = Math.max(320, Math.round((vp && vp.height) ? vp.height : window.innerHeight || 0));
@@ -11283,17 +12441,12 @@ async function ensureTabLoaded(tab){
     await loadRaw();
     settingsState.rawLoaded = true;
   }
-  if(tab === 'api' && !settingsState.apiLoaded){
-    await loadApiDocs();
-    settingsState.apiLoaded = true;
-  }
 }
 function activateTab(tab){
   qsa('.tab').forEach(function(btn){ btn.classList.toggle('active', btn.getAttribute('data-tab')===tab); });
   qsa('.panel').forEach(function(p){ p.classList.toggle('active', p.getAttribute('data-tab')===tab); });
   ensureTabLoaded(tab).catch(function(e){
     if(tab === 'raw') setStatus('status-raw', e.message || e, true);
-    else if(tab === 'api') setStatus('status-api', e.message || e, true);
   });
 }
 function applyTabs(){
@@ -11756,6 +12909,107 @@ async function updateModelsNow(){
     if(btn) btn.disabled = false;
   }
 }
+function cleanModelPrefix(prefix){
+  return String(prefix == null ? '' : prefix).toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 32);
+}
+function syncModelRowsFromInputs(){
+  qsa('#model-map-list .model-map-row').forEach(function(row){
+    var idx = Number(row.getAttribute('data-index'));
+    if(!isFinite(idx) || !modelMapRows[idx]) return;
+    var p = row.querySelector('.model-prefix');
+    var m = row.querySelector('.model-name');
+    modelMapRows[idx].prefix = cleanModelPrefix(p ? p.value : '');
+    modelMapRows[idx].model = String((m && m.value) || '').trim();
+    if(p) p.value = modelMapRows[idx].prefix;
+  });
+}
+function filteredModelRows(){
+  var q = String((qs('model-map-search') && qs('model-map-search').value) || '').trim().toLowerCase();
+  return modelMapRows.map(function(row, idx){
+    return {idx:idx, prefix:String(row.prefix || ''), model:String(row.model || '')};
+  }).filter(function(row){
+    if(!q) return true;
+    return row.prefix.toLowerCase().indexOf(q) >= 0 || row.model.toLowerCase().indexOf(q) >= 0;
+  });
+}
+function renderModelMapRows(){
+  var root = qs('model-map-list');
+  if(!root) return;
+  var rows = filteredModelRows();
+  if(!rows.length){
+    root.innerHTML = '<div class="model-map-empty">暂无匹配条目。</div>';
+  }else{
+    root.innerHTML = rows.map(function(row){
+      return '<div class="model-map-row" data-index="'+row.idx+'">'
+        + '<input class="model-prefix" value="'+enc(row.prefix)+'" maxlength="32" spellcheck="false" placeholder="前缀">'
+        + '<input class="model-name" value="'+enc(row.model)+'" spellcheck="false" placeholder="机型名称">'
+        + '<button class="btn warn model-row-delete" type="button">删除</button>'
+        + '</div>';
+    }).join('');
+  }
+  var state = qs('model-map-editor-state');
+  if(state){
+    var suffix = modelMapPath ? (' | ' + modelMapPath) : '';
+    state.textContent = '当前 ' + String(modelMapRows.length) + ' 条，保存后会立即刷新实时与历史机型。' + suffix;
+  }
+}
+function collectModelMapRows(){
+  syncModelRowsFromInputs();
+  var seen = {};
+  var out = [];
+  modelMapRows.forEach(function(row){
+    var prefix = cleanModelPrefix(row && row.prefix);
+    var model = String((row && row.model) || '').trim();
+    if(!prefix && !model) return;
+    if(!prefix || !model) return;
+    seen[prefix] = model;
+  });
+  Object.keys(seen).sort().forEach(function(prefix){
+    out.push({prefix:prefix, model:seen[prefix]});
+  });
+  return out;
+}
+function addModelMapRow(prefix, model){
+  syncModelRowsFromInputs();
+  modelMapRows.unshift({prefix:cleanModelPrefix(prefix), model:String(model || '').trim()});
+  if(qs('model-map-search')) qs('model-map-search').value = '';
+  renderModelMapRows();
+  var first = document.querySelector('#model-map-list .model-map-row input');
+  if(first) first.focus();
+}
+async function loadModelEditor(){
+  const data = await getJson('/api/settings/models/list');
+  modelMapRows = (Array.isArray(data.items) ? data.items : []).map(function(row){
+    return {prefix:cleanModelPrefix(row && row.prefix), model:String((row && row.model) || '').trim()};
+  });
+  modelMapPath = String(data.path || '');
+  renderModelMapRows();
+  if(data.warning && qs('model-map-editor-state')){
+    qs('model-map-editor-state').textContent = String(data.warning);
+  }
+}
+async function saveModelEditor(){
+  var btn = qs('btn-model-map-save');
+  try{
+    if(btn) btn.disabled = true;
+    var items = collectModelMapRows();
+    const data = await postJson('/api/settings/models/save', {items:items});
+    modelMapRows = (Array.isArray(data.items) ? data.items : items).map(function(row){
+      return {prefix:cleanModelPrefix(row && row.prefix), model:String((row && row.model) || '').trim()};
+    });
+    modelMapPath = String(data.path || modelMapPath || '');
+    renderModelMapRows();
+    if(qs('model-update-state') && data.state){
+      qs('model-update-state').textContent = '已加载 ' + String((data.state && data.state.loaded_count) || modelMapRows.length) + ' 条';
+    }
+    showNotice(data.message || '识别库已保存。', 'ok', 2600);
+  }catch(e){
+    showNotice(e.message || e, 'warn', 4200);
+    if(qs('model-map-editor-state')) qs('model-map-editor-state').textContent = '保存失败: ' + (e.message || e);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
 function collectVisualPayload(){
   return {
     basic: {
@@ -11789,6 +13043,9 @@ function collectVisualPayload(){
       base_zoom: n('cfg-base-zoom'),
       heading_ref_deg: n('cfg-heading-ref'),
       map_auto_center_idle_sec: n('cfg-map-idle'),
+      access_list_enabled: check('cfg-web-access-enabled'),
+      access_list_mode: v('cfg-web-access-mode') || 'allow',
+      access_list: splitLines(qs('cfg-web-access-list').value || ''),
       alarm_zones: collectZoneRows()
     },
     notify: {
@@ -11800,8 +13057,8 @@ function collectVisualPayload(){
     },
     api: {
       enabled: check('cfg-api-enabled'),
-      token: (v('cfg-api-token-new') || ((apiTokenAction === '__CLEAR__') ? '__CLEAR__' : '__KEEP__')),
       whitelist_enabled: check('cfg-api-whitelist-enabled'),
+      whitelist_mode: v('cfg-api-whitelist-mode') || 'allow',
       whitelist: splitLines(qs('cfg-api-whitelist').value || '')
     },
     auth: {
@@ -11815,6 +13072,9 @@ function collectVisualPayload(){
       enabled: check('cfg-model-update-enabled'),
       url: v('cfg-model-update-url')
     },
+    app_update: {
+      enabled: check('cfg-app-update-enabled')
+    },
     metrics: {
       retention_days: n('cfg-metrics-retention')
     }
@@ -11823,7 +13083,7 @@ function collectVisualPayload(){
 function visualPayloadSections(payload){
   payload = payload || {};
   return {
-    capture: Object.assign({}, payload.basic || {}, {model_update: payload.model_update || {}}),
+    capture: Object.assign({}, payload.basic || {}, {model_update: payload.model_update || {}, app_update: payload.app_update || {}}),
     map: {
       dji_lookup_url: ((payload.web || {}).dji_lookup_url),
       base_name: ((payload.web || {}).base_name),
@@ -11854,15 +13114,12 @@ function setDraftUi(dirtyMap){
   if(qs('btn-save-visual')) qs('btn-save-visual').disabled = !settingsState.visualDirty;
   if(qs('draft-title')) qs('draft-title').textContent = settingsState.visualDirty ? '有未保存修改' : '当前没有未保存修改';
   if(qs('draft-meta')){
-    var names = [];
-    if(dirtyMap.capture) names.push('采集');
-    if(dirtyMap.map) names.push('地图与基站');
-    if(dirtyMap.zones) names.push('报警区域');
-    if(dirtyMap.access) names.push('通知与访问控制');
-    if(dirtyMap.metrics) names.push('负载趋势');
+    var names = SETTINGS_DRAFT_SECTIONS
+      .filter(function(item){ return !!dirtyMap[item.key]; })
+      .map(function(item){ return item.label; });
     qs('draft-meta').textContent = settingsState.visualDirty
-      ? ('已改动: ' + names.join('、') + '。先测试，再决定是否保存。')
-      : '修改过的项目会标记出来；测试不会改写配置文件。';
+      ? ('已改动: ' + names.join('、') + '。测试结果独立于保存动作。')
+      : '未保存改动按配置分组标记；测试结果独立于配置文件。';
   }
 }
 function updateVisualDraftState(){
@@ -11888,7 +13145,7 @@ function bindVisualDraftTracking(){
   root.setAttribute('data-dirty-bind', '1');
   root.addEventListener('input', function(ev){
     var t = ev.target;
-    if(t && t.id === 'cfg-api-token-current') return;
+    if(t && t.classList && t.classList.contains('api-token-current')) return;
     updateVisualDraftState();
   });
   root.addEventListener('change', function(){
@@ -11916,16 +13173,15 @@ function setChannelUi(editing){
   if(editBtn) editBtn.textContent = editing ? '锁定' : '编辑';
   if(resetBtn) resetBtn.style.display = settingsState.channelUseDefault ? 'none' : '';
   if(hint){
-    hint.textContent = settingsState.channelUseDefault
-      ? '默认 CH6。'
-      : '当前使用自定义信道。';
+    hint.textContent = '';
+    hint.style.display = 'none';
   }
 }
 function openReauth(action){
   reauthAction = action;
   qs('reauth-user').value = '';
   qs('reauth-pass').value = '';
-  setStatus('reauth-status', '请输入网页登录账号和密码。', false);
+  setStatus('reauth-status', '二次验证使用网页登录账号和密码。', false);
   qs('reauth-modal').classList.add('show');
   window.setTimeout(function(){ try{ qs('reauth-user').focus(); }catch(_e){} }, 30);
 }
@@ -11933,17 +13189,30 @@ function closeReauth(){
   reauthAction = null;
   qs('reauth-modal').classList.remove('show');
 }
+function showOneTimeSecret(title, secret, note){
+  oneTimeSecretValue = String(secret || '');
+  qs('one-time-title').textContent = String(title || '只显示一次');
+  qs('one-time-note').textContent = String(note || '关闭后不能再次查看或复制。');
+  qs('one-time-secret').textContent = oneTimeSecretValue;
+  qs('one-time-modal').classList.add('show');
+}
+function closeOneTimeSecret(){
+  oneTimeSecretValue = '';
+  qs('one-time-secret').textContent = '';
+  qs('one-time-modal').classList.remove('show');
+}
 async function performTokenReauth(action){
   var user = String(qs('reauth-user').value || '').trim();
   var pass = String(qs('reauth-pass').value || '');
   if(!user || !pass){
-    setStatus('reauth-status', '请输入完整账号和密码。', true);
+    setStatus('reauth-status', '账号和密码不完整。', true);
     return;
   }
+  var tokenId = String(apiTokenRevealTarget || '');
   const r = await fetch(apiUrl('/api/settings/api-token/reveal'), {
     method:'POST',
     headers:pageHeaders({'Content-Type':'application/json'}),
-    body:JSON.stringify({username:user, password:pass})
+    body:JSON.stringify({username:user, password:pass, id:tokenId})
   });
   const d = await r.json().catch(()=>({}));
   if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
@@ -11951,24 +13220,114 @@ async function performTokenReauth(action){
     throw new Error(d.error || ('HTTP ' + r.status));
   }
   apiTokenLastReveal = String(d.token || '');
-  qs('cfg-api-token-current').value = apiTokenLastReveal;
-  qs('cfg-api-token-current').type = (action === 'reveal') ? 'text' : 'password';
+  var row = null;
+  if(tokenId){
+    qsa('.api-token-row').some(function(it){ if(String(it.getAttribute('data-id') || '') === tokenId){ row = it; return true; } return false; });
+  }
+  var current = row ? row.querySelector('.api-token-current') : null;
+  if(current){
+    current.textContent = (action === 'reveal') ? apiTokenLastReveal : '已通过二次验证';
+    current.title = apiTokenLastReveal;
+  }
   if(action === 'copy'){
     if(!apiTokenLastReveal) throw new Error('当前 Token 不可复制');
     await copyTextPlain(apiTokenLastReveal);
   }
 }
+function absoluteLoginLink(item){
+  item = item || {};
+  var raw = String(item.url || item.path || '');
+  if(!raw) return '';
+  if(/^https?:\\/\\//i.test(raw)) return raw;
+  return location.origin + raw;
+}
+function compactLoginLink(url){
+  return String(url || '');
+}
+function fmtSsoExpiry(item){
+  item = item || {};
+  var expiresAt = Number(item.expires_at || 0);
+  if(!isFinite(expiresAt) || expiresAt <= 0) return '无限时间';
+  var left = Math.max(0, expiresAt - Date.now() / 1000);
+  if(left <= 0) return '已过期';
+  if(left < 3600) return Math.max(1, Math.round(left / 60)) + ' 分钟';
+  if(left < 86400) return Math.round(left / 3600) + ' 小时';
+  return Math.round(left / 86400) + ' 天';
+}
+function renderLoginLinks(items){
+  loginLinks = Array.isArray(items) ? items.slice() : [];
+  var root = qs('login-link-list');
+  if(!root) return;
+  if(!loginLinks.length){
+    root.innerHTML = '<div class="empty-state">暂无 SSO 登录链接。</div>';
+    return;
+  }
+  root.innerHTML = loginLinks.map(function(item, idx){
+    var name = enc(item.name || ('SSO 链接 ' + (idx + 1)));
+    var check = enc(item.check || '');
+    var status = String(item.status || (item.active === false ? 'expired' : 'active'));
+    var stateLabel = enc(item.status_label || (status === 'active' ? '可用' : '不可用'));
+    var expireLabel = enc(fmtSsoExpiry(item));
+    var modeLabel = item.single_use ? '<span class="sso-link-badge">单次</span>' : '<span class="sso-link-badge">多次</span>';
+    var bad = (status === 'active') ? '' : ' bad';
+    return '<div class="list-row sso-link-row" data-check="'+check+'">'
+      + '<div class="sso-link-meta"><div class="sso-link-title"><span>'+name+'</span>'
+      + '<span class="sso-link-badge'+bad+'">'+stateLabel+'</span><span class="sso-link-badge">'+expireLabel+'</span>'+modeLabel+'</div>'
+      + '<div class="micro">创建后的链接只显示一次；当前记录仅用于删除和状态查看。</div></div>'
+      + '<button class="btn ghost warn login-link-row-delete" type="button">删除</button>'
+      + '</div>';
+  }).join('');
+}
+async function deleteLoginLink(check){
+  const r = await fetch(apiUrl('/api/settings/login-link/delete'), {
+    method:'POST',
+    headers:pageHeaders({'Content-Type':'application/json'}),
+    body:JSON.stringify({check:String(check || '')})
+  });
+  const d = await r.json().catch(()=>({}));
+  if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP ' + r.status));
+  renderLoginLinks(d.links || []);
+  qs('login-link-state').textContent = '已删除校验码，对应 SSO 链接立即失效。';
+  return d;
+}
+function collectLoginLinkOptions(){
+  var mode = String((qs('login-link-expire-mode') && qs('login-link-expire-mode').value) || '86400');
+  var body = {
+    name: String(qs('login-link-name').value || '').trim(),
+    next: '/',
+    single_use: !!(qs('login-link-single-use') && qs('login-link-single-use').checked)
+  };
+  if(mode === 'never'){
+    body.expires = 'never';
+  }else if(mode === 'custom'){
+    body.ttl_min = Math.max(1, Number((qs('login-link-ttl-min') && qs('login-link-ttl-min').value) || 1440));
+  }else{
+    body.ttl_sec = Math.max(60, Number(mode || 86400));
+  }
+  return body;
+}
+function setLoginLinkExpiryUi(){
+  var mode = String((qs('login-link-expire-mode') && qs('login-link-expire-mode').value) || '86400');
+  var custom = qs('login-link-ttl-min');
+  var field = qs('login-link-custom-field');
+  if(custom) custom.disabled = (mode !== 'custom');
+  if(field) field.classList.toggle('hidden', mode !== 'custom');
+}
 async function createLoginLinkWithCreds(){
   var user = String(qs('reauth-user').value || '').trim();
   var pass = String(qs('reauth-pass').value || '');
   if(!user || !pass){
-    setStatus('reauth-status', '请输入完整账号和密码。', true);
+    setStatus('reauth-status', '账号和密码不完整。', true);
     return null;
   }
+  var reqBody = collectLoginLinkOptions();
+  reqBody.username = user;
+  reqBody.password = pass;
   const r = await fetch(apiUrl('/api/settings/login-link/create'), {
     method:'POST',
     headers:pageHeaders({'Content-Type':'application/json'}),
-    body:JSON.stringify({username:user, password:pass, next:'/'})
+    body:JSON.stringify(reqBody)
   });
   const d = await r.json().catch(()=>({}));
   if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
@@ -11976,17 +13335,16 @@ async function createLoginLinkWithCreds(){
     throw new Error(d.error || ('HTTP ' + r.status));
   }
   var url = String(d.url || d.path || '');
-  qs('login-link-url').value = url;
-  var exp = d.expires_in_sec == null ? '' : ('，约 ' + Math.max(1, Math.round(Number(d.expires_in_sec) / 60)) + ' 分钟内有效');
-  qs('login-link-state').textContent = '编号 ' + String(d.code || '-').slice(0, 10) + '...' + exp + '，使用后立即失效。';
-  qs('btn-login-link-copy').disabled = !url;
-  await copyTextPlain(url);
+  var expireText = d.expires_at ? ('有效期至 ' + fmtMetricTime(d.expires_at)) : '无限时间';
+  qs('login-link-state').textContent = '校验码 ' + String(d.check || '-').slice(0, 10) + '... 已加入列表；' + expireText + (d.single_use ? '；单次登录。' : '。');
+  renderLoginLinks(d.links || []);
+  showOneTimeSecret('SSO 登录链接', url, '这个链接只在本次弹窗显示，关闭后只能删除记录再重新生成。');
   return d;
 }
 function fillIfaceOptions(items, selected){
   const sel = qs('cfg-iface');
   if(!sel) return;
-  const opts = ['<option value="">请选择默认网卡</option>'];
+  const opts = ['<option value="">未绑定</option>'];
   (Array.isArray(items)?items:[]).forEach(function(it){
     const name = String(it.name || '');
     if(!name) return;
@@ -12006,7 +13364,7 @@ function renderHookRows(items){
     return '<div class="list-row hook-row" data-index="'+enc(index)+'">'
       +'<div class="hook-layout">'
       +'<div class="field"><label>通道名称</label><input class="hook-name" type="text" value="'+name+'"></div>'
-      +'<div class="field"><label>Webhook Key</label><input class="hook-key" type="password" value="" placeholder="'+(mask || '输入新的 Key')+'"><div class="micro">当前值: '+(mask || '未设置')+'</div></div>'
+      +'<div class="field"><label>Webhook Key</label><input class="hook-key" type="password" value="" placeholder="'+(mask ? '留空即不修改' : '新的 Key')+'"><div class="micro">已保存的 Key 不在页面显示。</div></div>'
       +'<div class="field"><label>启用</label><input class="hook-enabled" type="checkbox" '+(item.enabled ? 'checked' : '')+'></div>'
       +'<div class="field"><label>&nbsp;</label><button class="btn ghost row-remove" type="button">移除</button></div>'
       +'</div></div>';
@@ -12066,6 +13424,104 @@ function collectZoneRows(){
     return zone;
   }).filter(function(x){ return !!x; });
 }
+function fmtApiTokenExpiry(item){
+  return fmtSsoExpiry(item || {});
+}
+function renderApiTokenRows(items){
+  var root = qs('api-token-list');
+  if(!root) return;
+  apiTokenRows = Array.isArray(items) ? items.slice() : [];
+  if(!apiTokenRows.length){
+    root.innerHTML = '<div class="empty-state">暂无 API Token。添加后才能启用外部 API。</div>';
+    return;
+  }
+  root.innerHTML = apiTokenRows.map(function(item, idx){
+    item = item || {};
+    var id = String(item.id || '');
+    var name = enc(item.name || ('API Token ' + (idx + 1)));
+    var status = String(item.status || (item.active === false ? 'expired' : 'active'));
+    var stateLabel = enc(item.status_label || (status === 'active' ? '可用' : '不可用'));
+    var bad = (status === 'active' || status === 'new') ? '' : ' bad';
+    return '<div class="api-token-row" data-id="'+enc(id)+'" data-status="'+enc(status)+'" data-status-label="'+stateLabel+'">'
+      + '<div class="api-token-head">'
+      + '<div class="api-token-name" title="'+name+'">'+name+'</div>'
+      + '<div class="api-token-badges"><span class="api-token-badge'+bad+'">'+stateLabel+'</span><span class="api-token-badge">'+enc(fmtApiTokenExpiry(item))+'</span><span class="api-token-badge">'+(item.single_use ? '单次' : '多次')+'</span></div>'
+      + '</div>'
+      + '<div class="api-token-grid">'
+      + '<div class="micro">Token 只在创建成功时显示一次，之后不能查看、复制或修改。</div>'
+      + '<button class="btn ghost warn api-token-row-remove" type="button">删除</button>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+}
+function collectApiTokenCreateOptions(){
+  var mode = String((qs('api-token-new-expire-mode') && qs('api-token-new-expire-mode').value) || '86400');
+  var body = {
+    name: String((qs('api-token-new-name') && qs('api-token-new-name').value) || '').trim(),
+    single_use: !!(qs('api-token-new-single-use') && qs('api-token-new-single-use').checked)
+  };
+  if(mode === 'never') body.expires = 'never';
+  else if(mode === 'custom') body.ttl_min = Math.max(1, Number((qs('api-token-new-ttl-min') && qs('api-token-new-ttl-min').value) || 1440));
+  else body.ttl_sec = Math.max(60, Number(mode || 86400));
+  return body;
+}
+function setApiTokenCreateExpiryUi(){
+  var mode = String((qs('api-token-new-expire-mode') && qs('api-token-new-expire-mode').value) || '86400');
+  var custom = qs('api-token-new-ttl-min');
+  var field = qs('api-token-custom-field');
+  if(custom) custom.disabled = (mode !== 'custom');
+  if(field) field.classList.toggle('hidden', mode !== 'custom');
+}
+function updateApiWhitelistUi(effective){
+  var block = qs('api-whitelist-block');
+  var enabled = !!effective;
+  if(block) block.classList.toggle('disabled-block', !enabled);
+  ['cfg-api-whitelist-enabled','cfg-api-whitelist-mode','cfg-api-whitelist'].forEach(function(id){
+    var el = qs(id);
+    if(el) el.disabled = !enabled;
+  });
+}
+async function createApiTokenWithCreds(){
+  var user = String(qs('reauth-user').value || '').trim();
+  var pass = String(qs('reauth-pass').value || '');
+  if(!user || !pass){
+    setStatus('reauth-status', '账号和密码不完整。', true);
+    return null;
+  }
+  var reqBody = collectApiTokenCreateOptions();
+  reqBody.username = user;
+  reqBody.password = pass;
+  const r = await fetch(apiUrl('/api/settings/api-token/create'), {
+    method:'POST',
+    headers:pageHeaders({'Content-Type':'application/json'}),
+    body:JSON.stringify(reqBody)
+  });
+  const d = await r.json().catch(()=>({}));
+  if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
+  if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP ' + r.status));
+  renderApiTokenRows(d.tokens || []);
+  updateApiWhitelistUi(true);
+  showOneTimeSecret('API Token', String(d.token || ''), '这个 Token 只在本次弹窗显示，关闭后不能再次查看或复制。');
+  if(qs('api-token-new-name')) qs('api-token-new-name').value = '';
+  return d;
+}
+async function handleApiTokenListClick(ev){
+  var row = ev.target && ev.target.closest ? ev.target.closest('.api-token-row') : null;
+  if(!row) return;
+  try{
+    if(ev.target.closest('.api-token-row-remove')){
+      var id = String(row.getAttribute('data-id') || '');
+      if(!id) return;
+      const d = await postJson('/api/settings/api-token/delete', {id:id});
+      renderApiTokenRows(d.tokens || []);
+      showNotice('API Token 已删除。', 'ok', 2200);
+      return;
+    }
+  }catch(e){
+    showNotice(e.message || e, 'warn', 3600);
+  }
+}
+function handleApiTokenListChange(_ev){}
 function attachRowRemove(rootId, onEmptyFactory){
   var root = qs(rootId);
   if(!root) return;
@@ -12081,7 +13537,7 @@ function attachRowRemove(rootId, onEmptyFactory){
 async function useBrowserLocation(){
   if(!navigator.geolocation){ setStatus('status-visual', '当前浏览器不支持地理定位。', true); return; }
   if(!window.isSecureContext && !isLocalHostName(location.hostname || '')){
-    setStatus('status-visual', '当前页面不是安全上下文，部分浏览器会拒绝定位。若读取失败，请改用 HTTPS 或手动填写。', true);
+    setStatus('status-visual', '当前页面不是安全上下文，浏览器可能拒绝定位；HTTPS 或手动填写更稳定。', true);
   }
   navigator.geolocation.getCurrentPosition(function(pos){
     qs('cfg-base-lat').value = String(pos.coords.latitude || '');
@@ -12095,7 +13551,7 @@ async function useBrowserLocation(){
 async function loadVisual(){
   const data = await getJson('/api/settings/view');
   const s = data.visual || {};
-  const b = s.basic || {}, w = s.web || {}, nt = s.notify || {}, api = s.api || {}, auth = s.auth || {}, mu = s.model_update || {}, mc = s.metrics || {};
+  const b = s.basic || {}, w = s.web || {}, nt = s.notify || {}, api = s.api || {}, auth = s.auth || {}, mu = s.model_update || {}, au = s.app_update || {}, mc = s.metrics || {};
   fillIfaceOptions(data.interfaces || [], b.iface || '');
   settingsState.visualLoaded = true;
   settingsState.channelUseDefault = !b.channel_custom;
@@ -12106,6 +13562,7 @@ async function loadVisual(){
   qs('cfg-rssi-delta').value = String(b.rssi_delta ?? '');
   qs('cfg-model-map').value = String(b.model_map || '');
   qs('cfg-model-update-enabled').checked = mu.enabled !== false;
+  qs('cfg-app-update-enabled').checked = au.enabled !== false;
   qs('cfg-model-update-url').value = String(mu.url || '');
   var must = (mu.state || {});
   qs('model-update-state').textContent = '已加载 ' + String(must.loaded_count || 0)
@@ -12131,6 +13588,9 @@ async function loadVisual(){
   qs('cfg-base-zoom').value = String(w.base_zoom ?? '');
   qs('cfg-heading-ref').value = String(w.heading_ref_deg ?? '');
   qs('cfg-map-idle').value = String(w.map_auto_center_idle_sec ?? '');
+  qs('cfg-web-access-enabled').checked = !!w.access_list_enabled;
+  qs('cfg-web-access-mode').value = String(w.access_list_mode || 'allow');
+  qs('cfg-web-access-list').value = Array.isArray(w.access_list) ? w.access_list.join('\\n') : '';
   renderZoneRows(Array.isArray(w.alarm_zones) ? w.alarm_zones : []);
   renderHostStats(data.host || {}, b);
   loadRuntimePanel().catch(function(){});
@@ -12141,31 +13601,39 @@ async function loadVisual(){
   qs('cfg-send-timeout').value = String(nt.send_timeout_sec ?? '');
   renderHookRows(Array.isArray(nt.wecom_webhooks) ? nt.wecom_webhooks : []);
   qs('cfg-api-enabled').checked = !!api.enabled;
-  apiTokenAction = '__KEEP__';
   apiTokenLastReveal = '';
-  qs('cfg-api-token-current').value = '';
-  qs('cfg-api-token-current').type = 'password';
-  qs('cfg-api-token-current').placeholder = api.token_masked || '未设置';
-  qs('cfg-api-token-new').value = '';
-  qs('cfg-api-token-new').placeholder = api.token_masked ? '留空则保持不变' : '请输入新的 Token';
+  apiTokenRevealTarget = '';
+  renderApiTokenRows(Array.isArray(api.tokens) ? api.tokens : []);
   qs('cfg-api-whitelist-enabled').checked = !!api.whitelist_enabled;
+  qs('cfg-api-whitelist-mode').value = String(api.whitelist_mode || 'allow');
   qs('cfg-api-whitelist').value = Array.isArray(api.whitelist) ? api.whitelist.join('\\n') : '';
+  updateApiWhitelistUi(!!api.whitelist_effective);
   qs('cfg-auth-enabled').checked = !!auth.enabled;
   qs('cfg-auth-user').value = '';
-  qs('cfg-auth-user').placeholder = auth.username_masked || '留空则保持不变';
+  qs('cfg-auth-user').placeholder = '留空即不修改';
   qs('cfg-auth-pass').value = '';
-  qs('cfg-auth-pass').placeholder = auth.password_masked || '留空则保持不变';
+  qs('cfg-auth-pass').placeholder = '留空即不修改';
   qs('cfg-auth-realm').value = String(auth.realm || 'Light RID Scanner');
   qs('cfg-auth-ttl').value = String(auth.session_ttl_min || 30);
-  qs('login-link-url').value = '';
+  qs('login-link-name').value = '';
+  if(qs('login-link-expire-mode')) qs('login-link-expire-mode').value = '86400';
+  if(qs('login-link-ttl-min')) qs('login-link-ttl-min').value = '1440';
+  if(qs('login-link-single-use')) qs('login-link-single-use').checked = false;
+  if(qs('api-token-new-expire-mode')) qs('api-token-new-expire-mode').value = '86400';
+  if(qs('api-token-new-ttl-min')) qs('api-token-new-ttl-min').value = '1440';
+  if(qs('api-token-new-single-use')) qs('api-token-new-single-use').checked = false;
+  setLoginLinkExpiryUi();
+  setApiTokenCreateExpiryUi();
   qs('login-link-state').textContent = auth.enabled && auth.configured
-    ? '生成前需要再次验证账号和密码；链接只可使用一次。'
-    : '启用并完成网页登录账号密码后可生成一键登录链接。';
+    ? 'SSO 链接由校验码、有效期和单次登录状态控制；过期记录保留在列表。'
+    : '网页登录账号密码完整时，SSO 登录链接可用。';
   qs('btn-login-link-create').disabled = !(auth.enabled && auth.configured);
-  qs('btn-login-link-copy').disabled = true;
+  qs('btn-api-token-add').disabled = !(auth.enabled && auth.configured);
+  renderLoginLinks(auth.sso_links || []);
   qs('cfg-metrics-retention').value = String(mc.retention_days || 7);
+  var apiTokenCount = Array.isArray(api.tokens) ? api.tokens.length : 0;
   qs('secret-state').textContent = '通知通道 ' + String((nt.wecom_webhooks || []).length || 0)
-    + ' | Token ' + (api.token_masked || '未设置')
+    + ' | API Token ' + String(apiTokenCount) + ' 个'
     + ' | 外部 API ' + (api.enabled ? '开启' : '关闭')
     + ' | 登录 ' + (auth.enabled ? (auth.configured ? '开启' : '未完成') : '关闭');
   resetVisualDraftState();
@@ -12205,85 +13673,131 @@ async function loadApiDocs(){
   qs('api-docs').value = JSON.stringify(data, null, 2);
   setStatus('status-api', 'API 文档已生成。启用 Token 后可在 Header 中使用 X-API-Token 或 Authorization: Bearer。', false);
 }
-qs('btn-back').addEventListener('click', function(){ location.href='/'; });
-qs('btn-logs').addEventListener('click', function(){ location.href='/logs'; });
-qs('btn-theme').addEventListener('click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
-qs('btn-open-hw').addEventListener('click', function(){ location.href='/hardware-assistant'; });
-qs('btn-diagnostic-export').addEventListener('click', async function(){
-  try{
-    qs('btn-diagnostic-export').disabled = true;
-    await downloadQualityReport();
-  }catch(e){
-    setStatus('status-visual', '质量分析包导出失败: ' + (e.message || e), true);
-    showNotice(e.message || e, 'warn', 4200);
-  }finally{
-    qs('btn-diagnostic-export').disabled = false;
-  }
-});
-qs('btn-refresh-host').addEventListener('click', async function(){ try{ await loadVisual(); }catch(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
-qs('btn-refresh-runtime').addEventListener('click', async function(){ try{ await loadRuntimePanel(); showNotice('运行数据已刷新。', 'ok', 1800); }catch(e){ setStatus('status-runtime', e.message || e, true); showNotice(e.message || e, 'warn', 3600); } });
-qs('btn-reload-view').addEventListener('click', async function(){ try{ await loadVisual(); showNotice('设置已重新读取。', 'ok', 2200); }catch(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
-qs('btn-model-update-now').addEventListener('click', updateModelsNow);
-qsa('.metric-window').forEach(function(btn){
-  btn.addEventListener('click', function(){ setMetricWindow(btn.getAttribute('data-window') || '12h'); });
-});
-qs('metrics-zoom').addEventListener('input', function(){
-  metricSetZoom(Number(qs('metrics-zoom').value || 1), 0.5);
-});
-qsa('.metric-spark').forEach(function(canvas){
-  metricBindCanvasEvents(canvas);
-});
-qs('btn-home-freeze').addEventListener('click', freezeHomeOnReturn);
-qs('btn-settings-web-notify').addEventListener('click', requestSettingsWebNotify);
-qs('btn-settings-clear-history').addEventListener('click', clearHistoryFromSettings);
-qs('btn-oobe-simple').addEventListener('click', function(){ location.href = '/oobe?manual=1&mode=simple'; });
-qs('btn-oobe-full').addEventListener('click', function(){ location.href = '/settings?oobe=full'; showNotice('完整 OOBE 可直接在本页完成所有配置。', 'ok', 2600); });
-qs('btn-channel-edit').addEventListener('click', function(){
-  setChannelUi(!settingsState.channelEditing);
-});
-qs('btn-channel-reset').addEventListener('click', function(){
-  settingsState.channelUseDefault = true;
-  qs('cfg-channel').value = '6';
-  setChannelUi(false);
-});
-qs('cfg-channel').addEventListener('input', function(){
-  var val = Number(qs('cfg-channel').value || '');
-  settingsState.channelUseDefault = !(isFinite(val) && val !== 6);
-  setChannelUi(settingsState.channelEditing);
-});
-qs('btn-api-token-clear').addEventListener('click', function(){
-  apiTokenAction = '__CLEAR__';
-  apiTokenLastReveal = '';
-  qs('cfg-api-token-current').value = '';
-  qs('cfg-api-token-current').type = 'password';
-  qs('cfg-api-token-current').placeholder = '将于保存时清空';
-  qs('cfg-api-token-new').value = '';
-  updateVisualDraftState();
-  setStatus('status-visual', '当前 API Token 已标记为清空，等待测试或保存。', false);
-});
-qs('btn-api-token-reveal').addEventListener('click', function(){ openReauth('reveal'); });
-qs('btn-api-token-copy').addEventListener('click', function(){ openReauth('copy'); });
-qs('btn-login-link-create').addEventListener('click', function(){ openReauth('login-link'); });
-qs('btn-login-link-copy').addEventListener('click', async function(){
+function bindShellActions(){
+  on('btn-back', 'click', function(){ location.href='/'; });
+  on('btn-logs', 'click', function(){ location.href='/logs'; });
+  on('btn-theme', 'click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
+  on('btn-open-hw', 'click', function(){ location.href='/hardware-assistant'; });
+  on('btn-diagnostic-export', 'click', async function(){
+    var btn = qs('btn-diagnostic-export');
+    try{
+      if(btn) btn.disabled = true;
+      await downloadQualityReport();
+    }catch(e){
+      setStatus('status-visual', '质量分析包导出失败: ' + (e.message || e), true);
+      showNotice(e.message || e, 'warn', 4200);
+    }finally{
+      if(btn) btn.disabled = false;
+    }
+  });
+  on('btn-refresh-host', 'click', function(){
+    guarded(loadVisual, 'status-visual');
+  });
+  on('btn-refresh-runtime', 'click', function(){
+    guarded(loadRuntimePanel, 'status-runtime', '运行数据已刷新。', 1800, 3600);
+  });
+  on('btn-reload-view', 'click', function(){
+    guarded(loadVisual, 'status-visual', '设置已重新读取。', 2200);
+  });
+}
+function bindModelEditorActions(){
+  on('btn-model-map-open', 'click', function(){
+    qs('model-map-modal').classList.add('show');
+    loadModelEditor().catch(function(e){ if(qs('model-map-editor-state')) qs('model-map-editor-state').textContent = '识别库读取失败: ' + (e.message || e); });
+  });
+  on('btn-model-map-close', 'click', function(){ qs('model-map-modal').classList.remove('show'); });
+  on('model-map-modal', 'click', function(ev){ if(ev.target === qs('model-map-modal')) qs('model-map-modal').classList.remove('show'); });
+  on('btn-model-update-now', 'click', updateModelsNow);
+  on('btn-model-map-add', 'click', function(){ addModelMapRow('', ''); });
+  on('btn-model-map-save', 'click', saveModelEditor);
+  on('model-map-search', 'input', function(){ syncModelRowsFromInputs(); renderModelMapRows(); });
+  on('model-map-list', 'input', function(ev){
+    var t = ev.target;
+    if(t && t.classList && t.classList.contains('model-prefix')){
+      t.value = cleanModelPrefix(t.value);
+    }
+    syncModelRowsFromInputs();
+  });
+  on('model-map-list', 'click', function(ev){
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.model-row-delete') : null;
+    if(!btn) return;
+    var row = btn.closest('.model-map-row');
+    var idx = row ? Number(row.getAttribute('data-index')) : -1;
+    if(isFinite(idx) && idx >= 0){
+      syncModelRowsFromInputs();
+      modelMapRows.splice(idx, 1);
+      renderModelMapRows();
+    }
+  });
+}
+function bindMetricActions(){
+  qsa('.metric-window').forEach(function(btn){
+    btn.addEventListener('click', function(){ setMetricWindow(btn.getAttribute('data-window') || '12h'); });
+  });
+  on('metrics-zoom', 'input', function(){
+    metricSetZoom(Number(qs('metrics-zoom').value || 1), 0.5);
+  });
+  qsa('.metric-spark').forEach(function(canvas){
+    metricBindCanvasEvents(canvas);
+  });
+}
+function bindHomeToolActions(){
+  on('btn-home-freeze', 'click', freezeHomeOnReturn);
+  on('btn-settings-web-notify', 'click', requestSettingsWebNotify);
+  on('btn-settings-clear-history', 'click', clearHistoryFromSettings);
+  on('btn-oobe-simple', 'click', function(){ location.href = '/oobe?manual=1&mode=simple'; });
+  on('btn-oobe-full', 'click', function(){ location.href = '/settings?oobe=full'; showNotice('完整 OOBE 可直接在本页完成所有配置。', 'ok', 2600); });
+}
+function bindCaptureActions(){
+  on('btn-channel-edit', 'click', function(){
+    setChannelUi(!settingsState.channelEditing);
+  });
+  on('btn-channel-reset', 'click', function(){
+    settingsState.channelUseDefault = true;
+    qs('cfg-channel').value = '6';
+    setChannelUi(false);
+  });
+  on('cfg-channel', 'input', function(){
+    var val = Number(qs('cfg-channel').value || '');
+    settingsState.channelUseDefault = !(isFinite(val) && val !== 6);
+    setChannelUi(settingsState.channelEditing);
+  });
+}
+async function copyCurrentLoginLink(){
   try{
     var url = String(qs('login-link-url').value || '').trim();
-    if(!url) throw new Error('请先生成一键登录链接');
+    if(!url) throw new Error('没有 SSO 登录链接');
     await copyTextPlain(url);
-    showNotice('一键登录链接已复制。', 'ok', 2200);
+    showNotice('SSO 登录链接已复制。', 'ok', 2200);
   }catch(e){
     showNotice(e.message || e, 'warn', 3200);
   }
-});
-qs('btn-reauth-cancel').addEventListener('click', function(){ closeReauth(); });
-qs('reauth-modal').addEventListener('click', function(ev){ if(ev.target === qs('reauth-modal')) closeReauth(); });
-document.addEventListener('keydown', function(ev){ if(ev.key === 'Escape' && qs('reauth-modal').classList.contains('show')) closeReauth(); });
-qs('btn-reauth-confirm').addEventListener('click', async function(){
+}
+async function handleLoginLinkListClick(ev){
+  var row = ev.target && ev.target.closest ? ev.target.closest('.sso-link-row') : null;
+  if(!row) return;
+  var check = row.getAttribute('data-check') || '';
+  try{
+    if(ev.target.closest('.login-link-row-delete')){
+      await deleteLoginLink(check);
+      showNotice('SSO 校验码已删除。', 'ok', 2400);
+      return;
+    }
+  }catch(e){
+    showNotice(e.message || e, 'warn', 3600);
+  }
+}
+async function confirmReauthAction(){
   try{
     var action = reauthAction || 'copy';
     if(action === 'login-link'){
       await createLoginLinkWithCreds();
-      setStatus('status-visual', '一键登录链接已生成并复制。', false);
-      showNotice('一键登录链接已生成并复制。', 'ok', 2600);
+      setStatus('status-visual', 'SSO 登录链接已生成，只在弹窗中显示一次。', false);
+      showNotice('SSO 登录链接已生成。', 'ok', 2600);
+    }else if(action === 'api-token-create'){
+      await createApiTokenWithCreds();
+      setStatus('status-visual', 'API Token 已生成，只在弹窗中显示一次。', false);
+      showNotice('API Token 已生成。', 'ok', 2600);
     }else{
       await performTokenReauth(action);
     }
@@ -12299,74 +13813,115 @@ qs('btn-reauth-confirm').addEventListener('click', async function(){
     setStatus('reauth-status', e.message || e, true);
     showNotice(e.message || e, 'warn', 3600);
   }
-});
-qs('btn-load-raw').addEventListener('click', async function(){ try{ await loadRaw(); showNotice('原始配置已读取。', 'ok', 2200); }catch(e){ setStatus('status-raw', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
-qs('btn-save-raw').addEventListener('click', async function(){ try{ await saveRaw(); showNotice('原始配置已保存。', 'ok', 2600); }catch(e){ setStatus('status-raw', e.message || e, true); showNotice(e.message || e, 'warn', 3800); } });
-qs('btn-test-visual').addEventListener('click', async function(){
-  try{
-    setVisualActionBusy(true);
-    await testVisual();
-  }catch(e){
-    setStatus('status-visual', e.message || e, true);
-    showNotice(e.message || e, 'warn', 3800);
-  }finally{
-    setVisualActionBusy(false);
-  }
-});
-qs('btn-save-visual').addEventListener('click', async function(){
-  try{
-    setVisualActionBusy(true);
-    await saveVisual();
-    apiTokenAction = '__KEEP__';
-    qs('cfg-api-token-new').value = '';
-  }catch(e){
-    setStatus('status-visual', e.message || e, true);
-    showNotice(e.message || e, 'warn', 3800);
-  }finally{
-    setVisualActionBusy(false);
-  }
-});
-qs('cfg-api-token-new').addEventListener('input', function(){
-  if(String(qs('cfg-api-token-new').value || '').trim()){
-    apiTokenAction = '__KEEP__';
-    qs('cfg-api-token-current').placeholder = qs('cfg-api-token-current').placeholder || '已设置';
-  }
-  updateVisualDraftState();
-});
-qs('btn-hook-add').addEventListener('click', function(){
-  var rows = collectHookRows();
-  rows.push({index:null, name:'新通道', enabled:true, key:''});
-  renderHookRows(rows);
-  updateVisualDraftState();
-});
-qs('btn-zone-add').addEventListener('click', function(){
-  var rows = collectZoneRows();
-  rows.push({name:'报警区域 ' + (rows.length + 1), enabled:false, lat1:null, lon1:null, lat2:null, lon2:null});
-  renderZoneRows(rows);
-  updateVisualDraftState();
-});
-qs('btn-browser-loc').addEventListener('click', useBrowserLocation);
-qs('btn-clear-base-loc').addEventListener('click', function(){ qs('cfg-base-lat').value=''; qs('cfg-base-lon').value=''; updateVisualDraftState(); setStatus('status-visual', '已清空基站坐标，等待测试或保存。', false); });
-['pref-realtime-track','pref-track-2h'].forEach(function(id){
-  var el = qs(id);
-  if(el) el.addEventListener('change', saveBrowserPrefs);
-});
-attachRowRemove('wecom-list', function(){ renderHookRows([]); });
-attachRowRemove('zone-list', function(){ renderZoneRows([]); });
-applyTheme(loadTheme());
-applyTabs();
-bindVisualDraftTracking();
-updateHomeActionButtons();
-syncSettingsViewport();
-loadBrowserPrefs();
-window.addEventListener('resize', function(){ syncSettingsViewport(); drawMetricsChart(); });
-if(window.visualViewport){
-  try{
-    window.visualViewport.addEventListener('resize', syncSettingsViewport);
-    window.visualViewport.addEventListener('scroll', syncSettingsViewport);
-  }catch(_e){}
 }
-loadVisual().catch(function(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); });
+function bindAccessActions(){
+  on('btn-api-token-add', 'click', function(){ openReauth('api-token-create'); });
+  on('api-token-list', 'click', handleApiTokenListClick);
+  on('api-token-list', 'change', handleApiTokenListChange);
+  on('btn-login-link-create', 'click', function(){ openReauth('login-link'); });
+  on('login-link-expire-mode', 'change', setLoginLinkExpiryUi);
+  on('api-token-new-expire-mode', 'change', setApiTokenCreateExpiryUi);
+  on('login-link-list', 'click', handleLoginLinkListClick);
+  on('btn-one-time-copy', 'click', function(){ copyTextPlain(oneTimeSecretValue).then(function(){ showNotice('已复制。', 'ok', 1800); }).catch(function(e){ showNotice(e.message || e, 'warn', 2600); }); });
+  on('btn-one-time-close', 'click', closeOneTimeSecret);
+  on('one-time-modal', 'click', function(ev){ if(ev.target === qs('one-time-modal')) closeOneTimeSecret(); });
+  on('btn-reauth-cancel', 'click', function(){ closeReauth(); });
+  on('reauth-modal', 'click', function(ev){ if(ev.target === qs('reauth-modal')) closeReauth(); });
+  document.addEventListener('keydown', function(ev){ if(ev.key === 'Escape' && qs('reauth-modal').classList.contains('show')) closeReauth(); });
+  on('btn-reauth-confirm', 'click', confirmReauthAction);
+  on('btn-hook-add', 'click', function(){
+    var rows = collectHookRows();
+    rows.push({index:null, name:'新通道', enabled:true, key:''});
+    renderHookRows(rows);
+    updateVisualDraftState();
+  });
+}
+function bindRawActions(){
+  on('btn-load-raw', 'click', function(){
+    guarded(loadRaw, 'status-raw', '原始配置已读取。', 2200);
+  });
+  on('btn-save-raw', 'click', function(){
+    guarded(saveRaw, 'status-raw', '原始配置已检查并应用。', 2600);
+  });
+}
+function bindSaveActions(){
+  on('btn-test-visual', 'click', async function(){
+    try{
+      setVisualActionBusy(true);
+      await testVisual();
+    }catch(e){
+      setStatus('status-visual', e.message || e, true);
+      showNotice(e.message || e, 'warn', 3800);
+    }finally{
+      setVisualActionBusy(false);
+    }
+  });
+  on('btn-save-visual', 'click', async function(){
+    try{
+      setVisualActionBusy(true);
+      await saveVisual();
+    }catch(e){
+      setStatus('status-visual', e.message || e, true);
+      showNotice(e.message || e, 'warn', 3800);
+    }finally{
+      setVisualActionBusy(false);
+    }
+  });
+}
+function bindMapAndZoneActions(){
+  on('btn-zone-add', 'click', function(){
+    var rows = collectZoneRows();
+    rows.push({name:'报警区域 ' + (rows.length + 1), enabled:false, lat1:null, lon1:null, lat2:null, lon2:null});
+    renderZoneRows(rows);
+    updateVisualDraftState();
+  });
+  on('btn-browser-loc', 'click', useBrowserLocation);
+  on('btn-clear-base-loc', 'click', function(){
+    qs('cfg-base-lat').value='';
+    qs('cfg-base-lon').value='';
+    updateVisualDraftState();
+    setStatus('status-visual', '已清空基站坐标，等待测试或保存。', false);
+  });
+  attachRowRemove('zone-list', function(){ renderZoneRows([]); });
+}
+function bindBrowserPreferenceActions(){
+  ['pref-realtime-track','pref-track-2h'].forEach(function(id){
+    on(id, 'change', saveBrowserPrefs);
+  });
+}
+function bindViewportActions(){
+  window.addEventListener('resize', function(){ syncSettingsViewport(); drawMetricsChart(); });
+  if(window.visualViewport){
+    try{
+      window.visualViewport.addEventListener('resize', syncSettingsViewport);
+      window.visualViewport.addEventListener('scroll', syncSettingsViewport);
+    }catch(_e){}
+  }
+}
+function initializeSettingsPage(){
+  bindShellActions();
+  bindCaptureActions();
+  bindModelEditorActions();
+  bindMetricActions();
+  bindHomeToolActions();
+  bindAccessActions();
+  bindRawActions();
+  bindSaveActions();
+  bindMapAndZoneActions();
+  bindBrowserPreferenceActions();
+  bindViewportActions();
+  attachRowRemove('wecom-list', function(){ renderHookRows([]); });
+  applyTheme(loadTheme());
+  applyTabs();
+  bindVisualDraftTracking();
+  updateHomeActionButtons();
+  syncSettingsViewport();
+  loadBrowserPrefs();
+  loadVisual().catch(function(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); });
+  window.setInterval(function(){ loadRuntimePanel().catch(function(){}); }, 2000);
+  window.setInterval(function(){ loadMetrics().catch(function(){}); }, 2000);
+}
+initializeSettingsPage();
 </script></body></html>"""
 
 def http_server_thread() -> None:
@@ -12553,7 +14108,7 @@ def http_server_thread() -> None:
             self.send_header("Content-Type", "application/json; charset=utf-8")
             body = json.dumps({
                 "ok": False,
-                "error": "api whitelist denied",
+                "error": "当前无权访问该界面",
             }, ensure_ascii=False).encode("utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -12562,7 +14117,23 @@ def http_server_thread() -> None:
             except Exception:
                 pass
 
+        def _access_denied_page(self):
+            body = b'<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>403</title><style>body{margin:0;min-height:100dvh;display:grid;place-items:center;background:#201f1e;color:#f3f2f1;font-family:"Segoe UI","Microsoft YaHei",sans-serif}.box{border:1px solid #3b3a39;background:#2b2a29;padding:24px;border-radius:4px}h1{margin:0;font-size:26px}</style></head><body><div class="box"><h1>当前无权访问该界面</h1></div></body></html>'
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
         def _require_auth(self) -> bool:
+            if not _web_access_allowed(_client_ip_from_handler(self)):
+                _op_log("web-access-deny", str(self.path or ""), ip=_client_ip_from_handler(self), ok=False)
+                self._access_denied_page()
+                return False
             if not _auth_enabled():
                 return True
             if _auth_check_session_cookie(self.headers.get("Cookie"), refresh=True):
@@ -12588,6 +14159,10 @@ def http_server_thread() -> None:
             return False
 
         def _require_page_api(self) -> bool:
+            if not _web_access_allowed(_client_ip_from_handler(self)):
+                _op_log("web-api-deny", str(self.path or ""), ip=_client_ip_from_handler(self), ok=False)
+                self._page_api_fail(403, "当前无权访问该界面")
+                return False
             if not _request_same_origin(self.headers):
                 self._page_api_fail(403, "cross-origin page api denied")
                 return False
@@ -12603,7 +14178,7 @@ def http_server_thread() -> None:
             if not _api_token_enabled():
                 return False
             ip = self.client_address[0] if self.client_address else ""
-            if bool(API_CFG.get("whitelist_enabled")) and (not _api_ip_allowed(ip, API_CFG.get("whitelist") or [])):
+            if bool(API_CFG.get("whitelist_enabled")) and (not _api_access_allowed(ip)):
                 _op_log("api-whitelist-deny", str(self.path or ""), ip=str(ip or "-"), ok=False)
                 self._api_whitelist_fail()
                 return False
@@ -12612,7 +14187,10 @@ def http_server_thread() -> None:
                 self._rate_limit_fail(retry_after)
                 return False
             token = _api_token_from_request(self.headers, query)
-            if _api_token_check_value(token):
+            matched_token = _api_token_check_value(token)
+            if matched_token:
+                if bool(matched_token.get("single_use")):
+                    _api_mark_token_used(str(matched_token.get("id") or ""))
                 _rate_note("api-token", ip, str(self.path or ""), success=True, limit=24, window_sec=120, block_sec=600)
                 return True
             _rate_note("api-token", ip, str(self.path or ""), success=False, limit=24, window_sec=120, block_sec=600)
@@ -12635,6 +14213,10 @@ def http_server_thread() -> None:
                 self.send_header("Cache-Control", "max-age=86400")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
+                return
+            if (not path.startswith("/api/")) and path != "/ws" and (not _web_access_allowed(_client_ip_from_handler(self))):
+                _op_log("web-access-deny", str(self.path or ""), ip=_client_ip_from_handler(self), ok=False)
+                self._access_denied_page()
                 return
             if path == "/api/oobe/status":
                 if not self._require_page_api():
@@ -12706,24 +14288,36 @@ def http_server_thread() -> None:
                     return
                 user_hash = str((query.get("user") or [""])[0] or "")
                 pass_hash = str((query.get("password") or [""])[0] or "")
+                check_code = str((query.get("check") or [""])[0] or "")
                 if user_hash and not pass_hash and ",password=" in user_hash:
                     user_hash, pass_hash = user_hash.split(",password=", 1)
+                if user_hash and not pass_hash and "?password=" in user_hash:
+                    user_hash, pass_hash = user_hash.split("?password=", 1)
+                if pass_hash and not check_code and "?check=" in pass_hash:
+                    pass_hash, check_code = pass_hash.split("?check=", 1)
                 if user_hash and pass_hash:
                     ip = _client_ip_from_handler(self)
-                    limited, retry_after = _rate_limited("login-sso", ip, user_hash, limit=8, window_sec=300, block_sec=900)
+                    subject = (user_hash[:12] + ":" + check_code[:12])
+                    limited, retry_after = _rate_limited("login-sso", ip, subject, limit=8, window_sec=300, block_sec=900)
                     if limited:
                         self._rate_limit_fail(retry_after)
                         return
-                    ok_login = _auth_check_userpass_hash(user_hash, pass_hash)
-                    _rate_note("login-sso", ip, user_hash, success=ok_login, limit=8, window_sec=300, block_sec=900)
-                    _op_log("login-sso", "next=" + next_path, actor=user_hash[:12], ip=ip, ok=ok_login)
+                    sso_item = _auth_check_sso_link(user_hash, pass_hash, check_code)
+                    ok_login = bool(sso_item)
+                    _rate_note("login-sso", ip, subject, success=ok_login, limit=8, window_sec=300, block_sec=900)
+                    _op_log("login-sso", "next=" + next_path, actor=subject, ip=ip, ok=ok_login)
                     if ok_login:
+                        if bool((sso_item or {}).get("single_use")):
+                            _auth_mark_sso_used(check_code)
                         self._auth_set_cookie_token = _auth_issue_session()
-                        self._redirect(next_path)
+                        sso_next = str((sso_item or {}).get("next") or next_path or "/")
+                        if not sso_next.startswith("/") or sso_next.startswith("//"):
+                            sso_next = "/"
+                        self._redirect(sso_next)
                     else:
                         body = _build_login_html(next_path).replace(
                             '<span class="status" id="status"></span>',
-                            '<span class="status err" id="status">SSO 登录失败</span>',
+                            '<span class="status err" id="status">SSO 登录失败或链接已失效</span>',
                             1,
                         ).encode("utf-8")
                         self.send_response(401)
@@ -12780,6 +14374,9 @@ def http_server_thread() -> None:
                     },
                 }, 200)
                 return
+            if path in ("/api/v1", "/api/v1/"):
+                self._send_json(_api_v1_home_payload(), 200)
+                return
             if path == "/api/v1/snapshot":
                 self._send_json({
                     "ok": True,
@@ -12791,6 +14388,7 @@ def http_server_thread() -> None:
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
+                    "auth": (_api_v1_home_payload().get("auth") or {}),
                 }, 200)
                 return
             if path == "/api/v1/drones":
@@ -12953,11 +14551,14 @@ def http_server_thread() -> None:
                     limit = NOTIFICATION_CENTER_MAX
                 self._send_json(_notification_payload(limit), 200)
             elif path == "/api/settings/api-token/status":
+                token_items = _api_tokens_public(API_CFG)
+                first_token = token_items[0] if token_items else {}
                 self._send_json({
                     "ok": True,
-                    "configured": bool(str(API_CFG.get("token_sha256") or "").strip()),
-                    "copy_supported": bool(str(API_CFG.get("token") or "").strip()),
-                    "masked": (_mask_secret(str(API_CFG.get("token") or ""), keep=4) if str(API_CFG.get("token") or "").strip() else ("********" if str(API_CFG.get("token_sha256") or "").strip() else "")),
+                    "configured": _api_tokens_have_secret(API_CFG),
+                    "copy_supported": any(bool(item.get("copy_supported")) for item in token_items),
+                    "masked": str(first_token.get("token_masked") or ""),
+                    "tokens": token_items,
                 }, 200)
             elif path == "/api/settings/runtime":
                 try:
@@ -12974,6 +14575,8 @@ def http_server_thread() -> None:
                 else:
                     window_sec = 24 * 3600
                 self._send_json(_host_metrics_payload(window_sec=window_sec), 200)
+            elif path == "/api/settings/models/list":
+                self._send_json(_model_map_editor_payload(), 200)
             elif path == "/api/logs/view":
                 try:
                     limit = int((query.get("limit") or ["500"])[0] or "500")
@@ -13523,38 +15126,66 @@ def http_server_thread() -> None:
                 body = self._read_json_body()
                 rsp = update_model_map_from_url(manual=True, url_override=str(body.get("url") or "").strip() or None)
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
-            elif path == "/api/settings/api-token/reveal":
-                if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
-                    self._send_json({"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400)
-                    return
+            elif path == "/api/settings/models/save":
                 body = self._read_json_body()
-                reauth_ok = False
+                try:
+                    rsp = save_model_map_entries(body.get("items") if isinstance(body, dict) else None)
+                    self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                except Exception as e:
+                    _op_log("model-map-save", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e), "state": _model_update_status_payload()}, 400)
+            elif path == "/api/settings/models/upsert":
+                body = self._read_json_body()
+                try:
+                    rsp = upsert_model_map_entry(
+                        prefix=str(body.get("prefix") or ""),
+                        model=str(body.get("model") or ""),
+                        sn=str(body.get("sn") or ""),
+                    )
+                    self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                except Exception as e:
+                    _op_log("model-map-upsert", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e), "state": _model_update_status_payload()}, 400)
+            elif path == "/api/settings/api-token/reveal":
+                self._send_json({"ok": False, "error": "API Token 只在创建成功时显示一次，之后不能查看或复制"}, 400)
+                return
+            elif path == "/api/settings/api-token/create":
+                body = self._read_json_body()
                 ip = _client_ip_from_handler(self)
                 subject = str(body.get("username") or "-") if body else "-"
-                limited, retry_after = _rate_limited("token-reveal", ip, subject, limit=5, window_sec=300, block_sec=900)
+                limited, retry_after = _rate_limited("api-token-create", ip, subject, limit=5, window_sec=300, block_sec=900)
                 if limited:
                     self._rate_limit_fail(retry_after)
                     return
-                if body:
-                    reauth_ok = _auth_check_userpass(str(body.get("username") or ""), str(body.get("password") or ""))
-                if not reauth_ok and self.headers.get("Authorization"):
-                    reauth_ok = _auth_check_basic_header(self.headers.get("Authorization"))
-                if not reauth_ok:
-                    _rate_note("token-reveal", ip, subject, success=False, limit=5, window_sec=300, block_sec=900)
-                    _op_log("token-reveal", "", actor=subject, ip=ip, ok=False)
-                    self._send_json({"ok": False, "error": "账号或密码错误"}, 401)
+                payload, code = _build_api_token_create_payload(body, headers=self.headers, client_ip=ip)
+                _rate_note("api-token-create", ip, subject, success=bool(payload.get("ok")), limit=5, window_sec=300, block_sec=900)
+                self._send_json(payload, code)
+            elif path == "/api/settings/api-token/delete":
+                body = self._read_json_body()
+                token_id = str(body.get("id") or "").strip()
+                if not token_id:
+                    self._send_json({"ok": False, "error": "id required"}, 400)
                     return
-                _rate_note("token-reveal", ip, subject, success=True, limit=5, window_sec=300, block_sec=900)
-                _op_log("token-reveal", "", actor=subject, ip=ip, ok=True)
-                token_plain = str(API_CFG.get("token") or "").strip()
-                if not token_plain:
-                    self._send_json({"ok": False, "error": "当前 Token 只有哈希或尚未设置，请先重新设置一次 Token"}, 400)
+                def _remove_token(tokens):
+                    return [x for x in tokens if str((x or {}).get("id") or "") != token_id]
+                ok, msg, tokens = _api_mutate_tokens(_remove_token, tag="api_token_delete")
+                if not ok:
+                    self._send_json({"ok": False, "error": msg, "tokens": tokens}, 500)
                     return
-                self._send_json({"ok": True, "token": token_plain}, 200)
+                _op_log("api-token-delete", "id=" + token_id[:16], actor="-", ip=_client_ip_from_handler(self), ok=True)
+                self._send_json({"ok": True, "deleted": True, "tokens": tokens}, 200)
+            elif path == "/api/v1/auth/sso-links/create":
+                body = self._read_json_body()
+                ip = _client_ip_from_handler(self)
+                payload, code = _build_sso_link_payload(body, require_reauth=False, headers=self.headers, client_ip=ip)
+                if payload.get("ok"):
+                    host = str(self.headers.get("Host") or "").strip()
+                    scheme = "https" if str(self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
+                    path_url = str(payload.get("path") or "")
+                    payload["url"] = (f"{scheme}://{host}{path_url}" if host and path_url else path_url)
+                    _op_log("api-sso-create", "next=" + str(payload.get("next") or "/"), ip=ip, ok=True)
+                self._send_json(payload, code)
             elif path == "/api/settings/login-link/create":
-                if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
-                    self._send_json({"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400)
-                    return
                 body = self._read_json_body()
                 ip = _client_ip_from_handler(self)
                 subject = str(body.get("username") or "-") if body else "-"
@@ -13562,31 +15193,31 @@ def http_server_thread() -> None:
                 if limited:
                     self._rate_limit_fail(retry_after)
                     return
-                reauth_ok = _auth_check_userpass(str(body.get("username") or ""), str(body.get("password") or "")) if body else False
-                if not reauth_ok:
+                payload, code = _build_sso_link_payload(body, require_reauth=True, headers=self.headers, client_ip=ip)
+                if payload.get("ok"):
+                    _rate_note("login-link-create", ip, subject, success=True, limit=5, window_sec=300, block_sec=900)
+                    host = str(self.headers.get("Host") or "").strip()
+                    scheme = "https" if str(self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
+                    path_url = str(payload.get("path") or "")
+                    payload["url"] = (f"{scheme}://{host}{path_url}" if host and path_url else path_url)
+                    _op_log("login-link-create", "sso next=" + str(payload.get("next") or "/"), actor=subject, ip=ip, ok=True)
+                elif code == 401:
                     _rate_note("login-link-create", ip, subject, success=False, limit=5, window_sec=300, block_sec=900)
-                    _op_log("login-link-create", "", actor=subject, ip=ip, ok=False)
-                    self._send_json({"ok": False, "error": "账号或密码错误"}, 401)
+                self._send_json(payload, code)
+            elif path == "/api/settings/login-link/delete":
+                body = self._read_json_body()
+                check = str(body.get("check") or "").strip()
+                if not check:
+                    self._send_json({"ok": False, "error": "check required"}, 400)
                     return
-                _rate_note("login-link-create", ip, subject, success=True, limit=5, window_sec=300, block_sec=900)
-                next_path = str(body.get("next") or "/").strip() or "/"
-                if not next_path.startswith("/") or next_path.startswith("//"):
-                    next_path = "/"
-                item = _auth_issue_oneshot_link(next_path=next_path)
-                from urllib.parse import quote
-                host = str(self.headers.get("Host") or "").strip()
-                scheme = "https" if str(self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
-                path_url = "/login?next=" + quote(str(item.get("next") or "/"), safe="/") + "&code=" + quote(str(item.get("code") or ""), safe="")
-                url = (f"{scheme}://{host}{path_url}" if host else path_url)
-                _op_log("login-link-create", "next=" + next_path, actor=subject, ip=ip, ok=True)
-                self._send_json({
-                    "ok": True,
-                    "code": item.get("code"),
-                    "expires_at": item.get("expires_at"),
-                    "expires_in_sec": int(max(0, float(item.get("expires_at") or 0.0) - time.time())),
-                    "path": path_url,
-                    "url": url,
-                }, 200)
+                def _remove_link(links):
+                    return [x for x in links if str((x or {}).get("check") or "") != check]
+                ok, msg, links = _auth_mutate_sso_links(_remove_link, tag="sso_delete")
+                if not ok:
+                    self._send_json({"ok": False, "error": msg, "links": links}, 500)
+                    return
+                _op_log("login-link-delete", "check=" + check[:12], actor="-", ip=_client_ip_from_handler(self), ok=True)
+                self._send_json({"ok": True, "deleted": True, "links": links}, 200)
             elif path == "/api/web/base/save":
                 body = self._read_json_body()
                 if not APP_CONFIG_PATH:
@@ -14303,6 +15934,7 @@ def main() -> None:
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_model_update_from_config(APP_CONFIG)
+    init_app_update_from_config(APP_CONFIG)
     init_metrics_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
     init_api_from_config(APP_CONFIG)
@@ -14406,6 +16038,7 @@ def main() -> None:
     start_hw_worker()
     start_notify_worker()
     start_model_update_worker()
+    start_app_update_check()
 
     def sniff_thread():
         global sniff_iface_name

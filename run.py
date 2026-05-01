@@ -86,8 +86,7 @@ API_VERSION = "v1"
 BUILD_INFO_FILE = "rid_build_info.json"
 EULA_SET_FILE = "EULA.set"
 EULA_MARKDOWN_FILE = "EULA.md"
-EULA_LICENSE_FILE = "LICENSE"
-EULA_URL = "https://www.gnu.org/licenses/gpl-3.0.txt"
+EULA_URL = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/EULA.md"
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
@@ -223,6 +222,14 @@ APP_UPDATE_CFG: dict = {
     "enabled": True,
     "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
 }
+APP_UPDATE_STATE: dict = {
+    "running": False,
+    "last_check_ts": 0.0,
+    "latest_commit": "",
+    "current_commit": "",
+    "update_available": False,
+    "last_error": "",
+}
 MODEL_UPDATE_STATE: dict = {
     "running": False,
     "last_check_ts": 0.0,
@@ -234,6 +241,7 @@ MODEL_UPDATE_STATE: dict = {
 model_update_lock = Lock()
 model_map_file_lock = Lock()
 model_update_worker_started = False
+app_update_lock = Lock()
 
 METRICS_CFG: dict = {
     "retention_days": HOST_METRICS_RETENTION_DAYS_DEFAULT,
@@ -397,6 +405,17 @@ def _write_eula_acceptance() -> tuple[bool, str]:
         _op_log("eula-accept", str(e), ok=False)
         return False, str(e)
 
+def _revoke_eula_acceptance() -> tuple[bool, str]:
+    try:
+        path = _eula_set_path()
+        if os.path.exists(path):
+            os.remove(path)
+        _op_log("eula-revoke", f"path={path}", ok=True)
+        return True, path
+    except Exception as e:
+        _op_log("eula-revoke", str(e), ok=False)
+        return False, str(e)
+
 def _eula_status_payload() -> dict:
     return {
         "ok": True,
@@ -414,6 +433,7 @@ def _eula_redirect_required(req_path: str | None) -> bool:
         "/eula.html",
         "/api/eula/status",
         "/api/eula/accept",
+        "/api/eula/revoke",
         "/favicon.ico",
     }
     return path not in allowed
@@ -501,29 +521,16 @@ def _markdown_to_html(md: str) -> str:
     return "\n".join(out)
 
 def _load_eula_markdown() -> str:
-    parts: list[str] = []
     md_path = _app_file_path(EULA_MARKDOWN_FILE)
     if os.path.exists(md_path):
         try:
             with open(md_path, "r", encoding="utf-8") as f:
-                parts.append(f.read().strip())
+                text = f.read().strip()
+            if text:
+                return text
         except Exception as e:
-            parts.append(f"# GNU GPL v3.0\n\nEULA.md 读取失败：{e}")
-    if not parts:
-        parts.append(
-            "# GNU General Public License v3.0\n\n"
-            f"正式许可文本以 GNU 官方版本为准：[{EULA_URL}]({EULA_URL})。"
-        )
-    license_path = _app_file_path(EULA_LICENSE_FILE)
-    if os.path.exists(license_path):
-        try:
-            with open(license_path, "r", encoding="utf-8", errors="replace") as f:
-                license_text = f.read().strip()
-            if license_text:
-                parts.append("## GNU GPL v3.0 正式文本\n\n```text\n" + license_text + "\n```")
-        except Exception as e:
-            parts.append(f"## GNU GPL v3.0 正式文本\n\nLICENSE 读取失败：{e}")
-    return "\n\n".join(x for x in parts if x)
+            return f"# 最终用户许可协议\n\n本地 EULA.md 读取失败：{e}\n\n请查看：[EULA.md]({EULA_URL})。"
+    return "# 最终用户许可协议\n\n当前未能读取许可协议正文，请稍后刷新或查看：[EULA.md](" + EULA_URL + ")。"
 
 def _history_mark_dirty() -> None:
     global history_persist_dirty
@@ -1302,7 +1309,9 @@ def _settings_view_payload() -> dict:
                 "state": _model_update_status_payload(),
             },
             "app_update": {
-                "enabled": bool(app_update.get("enabled")),
+                "enabled": bool(app_update.get("enabled", True)),
+                "commit_url": str(app_update.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT),
+                "state": _app_update_status_payload(),
             },
             "metrics": {
                 "retention_days": int(metrics_cfg.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT),
@@ -1313,6 +1322,7 @@ def _settings_view_payload() -> dict:
         "host": host,
         "interfaces": interfaces,
         "oobe": _oobe_state(),
+        "eula": _eula_status_payload(),
         "hardware_link": "/hardware-assistant",
     }
 
@@ -1558,6 +1568,11 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     if p_app_update:
         if "enabled" in p_app_update:
             app_update["enabled"] = bool(p_app_update.get("enabled"))
+        if "commit_url" in p_app_update:
+            url = str(p_app_update.get("commit_url") or "").strip()
+            if url and not (url.startswith("https://") or url.startswith("http://")):
+                return None, "invalid app_update.commit_url"
+            app_update["commit_url"] = url or APP_UPDATE_COMMIT_URL_DEFAULT
         cfg["app_update"] = _normalize_app_update_cfg({"app_update": app_update})
 
     if p_metrics:
@@ -4803,26 +4818,71 @@ def _app_version_label() -> str:
             build = int(time.time())
     return f"commit:{commit}#{build}"
 
-def _check_app_update_once() -> None:
-    if not bool(APP_UPDATE_CFG.get("enabled", True)):
-        return
+def _short_commit(commit: str) -> str:
+    text = str(commit or "").strip()
+    return text[:12] if text else ""
+
+def _app_update_status_payload() -> dict:
+    current = _local_app_commit() or _fallback_private_commit()
+    with app_update_lock:
+        cfg = dict(APP_UPDATE_CFG)
+        state = dict(APP_UPDATE_STATE)
+    state["current_commit"] = current
+    state["current_short"] = _short_commit(current)
+    state["latest_short"] = _short_commit(state.get("latest_commit") or "")
+    state["commit_url"] = str(cfg.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT)
+    state["checked"] = bool(state.get("last_check_ts"))
+    return state
+
+def _check_app_update_once(manual: bool = False) -> dict:
+    if not manual and not bool(APP_UPDATE_CFG.get("enabled", True)):
+        return {"ok": True, "skipped": True, "state": _app_update_status_payload()}
+    with app_update_lock:
+        if bool(APP_UPDATE_STATE.get("running")):
+            busy = True
+        else:
+            busy = False
+            APP_UPDATE_STATE["running"] = True
+            APP_UPDATE_STATE["last_error"] = ""
+            commit_url = str(APP_UPDATE_CFG.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT)
+    if busy:
+        return {"ok": False, "error": "程序更新检查正在运行", "state": _app_update_status_payload()}
     try:
         local_commit = _local_app_commit()
         if not local_commit:
             local_commit = _fallback_private_commit()
         req = urllib.request.Request(
-            str(APP_UPDATE_CFG.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT),
-            headers={"User-Agent": "LightRIDScanner/1.0 (+startup update check)"},
+            commit_url,
+            headers={"User-Agent": "LightRIDScanner/1.0 (+version check)"},
         )
         with urllib.request.urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read(256 * 1024).decode("utf-8", errors="replace"))
         remote_commit = str((data if isinstance(data, dict) else {}).get("sha") or "").strip()
-        if remote_commit and local_commit and not remote_commit.startswith(local_commit) and not local_commit.startswith(remote_commit[:7]):
+        update_available = bool(remote_commit and local_commit and not remote_commit.startswith(local_commit) and not local_commit.startswith(remote_commit[:7]))
+        with app_update_lock:
+            APP_UPDATE_STATE.update({
+                "running": False,
+                "last_check_ts": time.time(),
+                "latest_commit": remote_commit,
+                "current_commit": local_commit,
+                "update_available": update_available,
+                "last_error": "",
+            })
+        if update_available:
             _log(f"[INFO] 检测到程序更新: local={local_commit[:12]} remote={remote_commit[:12]}")
         elif remote_commit:
             _log(f"[INFO] 程序更新检查完成: local={local_commit[:12]} remote={remote_commit[:12]}")
+        return {"ok": True, "manual": bool(manual), "state": _app_update_status_payload()}
     except Exception as e:
+        with app_update_lock:
+            APP_UPDATE_STATE.update({
+                "running": False,
+                "last_check_ts": time.time(),
+                "current_commit": _local_app_commit() or _fallback_private_commit(),
+                "last_error": str(e),
+            })
         _log(f"[WARN] 程序更新检查失败: {e}")
+        return {"ok": False, "error": str(e), "state": _app_update_status_payload()}
 
 def start_app_update_check() -> None:
     Thread(target=_check_app_update_once, daemon=True).start()
@@ -11465,7 +11525,7 @@ button:hover{{transform:translateY(-1px);filter:brightness(1.05)}}
 </style></head><body>
 <main class="card">
   <h1 class="brand">Light RID Scanner</h1>
-  <p class="desc">登录后进入监控台。外部 API 继续使用独立 Token，不走网页登录会话。</p>
+  <p class="desc">登录到在线监控平台</p>
   <form id="login-form">
     <div class="field"><label for="user">账号</label><input id="user" autocomplete="username" autofocus></div>
     <div class="field"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>
@@ -11536,6 +11596,7 @@ h1{{margin:0;font:700 26px/1.1 var(--font-ui);letter-spacing:0}}
 .accept{{border:1px solid var(--border);background:var(--card);border-radius:4px;padding:14px;display:grid;gap:12px}}
 .check{{display:flex;gap:10px;align-items:flex-start;line-height:1.5;color:var(--txt)}}
 input[type=checkbox]{{width:16px;height:16px;flex:0 0 auto;margin-top:2px;accent-color:var(--blue)}}
+.read-state{{font:600 13px/1.5 var(--font-ui);color:var(--muted)}}
 .actions{{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}}
 button{{height:42px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:0 16px;font:700 14px/1 var(--font-ui);cursor:pointer}}
 button.primary{{border-color:var(--blue);background:var(--blue);color:white}}
@@ -11548,12 +11609,13 @@ button:disabled{{opacity:.58;cursor:not-allowed}}
   <div class="head">
     <div>
       <h1>Light RID Scanner 许可协议</h1>
-      <div class="source">官方 GPL v3 文本：<a href="{_html_escape(EULA_URL)}" target="_blank" rel="noopener noreferrer">{_html_escape(EULA_URL)}</a></div>
+      <div class="source">EULA 来源：<a href="{_html_escape(EULA_URL)}" target="_blank" rel="noopener noreferrer">{_html_escape(EULA_URL)}</a></div>
     </div>
   </div>
-  <article class="license">{eula_html}</article>
+  <article class="license" id="eula-scroll" tabindex="0" aria-label="许可协议正文">{eula_html}</article>
   <section class="accept">
-    <label class="check"><input id="agree" type="checkbox"> <span>我已阅读并同意以上许可协议，确认继续使用本软件。</span></label>
+    <div class="read-state" id="read-state">请阅读 EULA，5 秒后才能勾选同意。</div>
+    <label class="check"><input id="agree" type="checkbox" disabled> <span>我已完整阅读并同意以上许可协议，确认继续使用本软件。</span></label>
     <div class="actions">
       <button class="warn" id="decline" type="button">不同意</button>
       <button class="primary" id="accept" type="button" disabled>同意并继续</button>
@@ -11563,12 +11625,38 @@ button:disabled{{opacity:.58;cursor:not-allowed}}
 </main>
 <script>
 const nextPath = {json.dumps(safe_next, ensure_ascii=False)};
+const READ_WAIT_MS = 5000;
+const readStartMs = Date.now();
 function qs(id){{ return document.getElementById(id); }}
 function pageHeaders(extra){{ var h={{'X-LightRID-Page':'1'}}; if(extra) Object.keys(extra).forEach(function(k){{ h[k]=extra[k]; }}); return h; }}
 function setStatus(text, err){{ qs('status').textContent = text || '-'; qs('status').classList.toggle('err', !!err); }}
-qs('agree').addEventListener('change', function(){{ qs('accept').disabled = !qs('agree').checked; }});
+function readWaitLeft(){{
+  return Math.max(0, READ_WAIT_MS - (Date.now() - readStartMs));
+}}
+function updateReadState(){{
+  var left = readWaitLeft();
+  var ready = left <= 0;
+  qs('agree').disabled = !ready;
+  if(!ready){{
+    qs('agree').checked = false;
+    qs('accept').disabled = true;
+    qs('read-state').textContent = '请阅读 EULA，' + Math.ceil(left / 1000) + ' 秒后才能勾选同意。';
+  }}else{{
+    qs('read-state').textContent = '已达到阅读等待时间，可以勾选同意。';
+    qs('accept').disabled = !qs('agree').checked;
+  }}
+}}
+window.addEventListener('resize', updateReadState);
+window.addEventListener('load', updateReadState);
+var readTimer = setInterval(function(){{
+  updateReadState();
+  if(readWaitLeft() <= 0) clearInterval(readTimer);
+}}, 250);
+setTimeout(updateReadState, 60);
+qs('agree').addEventListener('change', function(){{ updateReadState(); }});
 qs('decline').addEventListener('click', function(){{ setStatus('未同意许可协议，当前不会进入系统。', true); }});
 qs('accept').addEventListener('click', async function(){{
+  if(readWaitLeft() > 0){{ setStatus('请先阅读 EULA，等待时间结束后再继续。', true); return; }}
   if(!qs('agree').checked){{ setStatus('请先勾选同意许可协议。', true); return; }}
   var btn = qs('accept');
   btn.disabled = true;
@@ -11980,11 +12068,15 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <label>识别库在线更新</label>
               <div class="model-update-row">
                 <label><input id="cfg-model-update-enabled" type="checkbox"> 自动更新</label>
-                <label><input id="cfg-app-update-enabled" type="checkbox"> 启动检查程序更新</label>
                 <input id="cfg-model-update-url" type="text" placeholder="留空使用官方源">
                 <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
               </div>
               <div class="micro" id="model-update-state">本地识别库可从官方源或自定义地址同步。</div>
+              <div class="model-update-row" style="margin-top:10px">
+                <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
+                <div class="micro" id="app-update-state">当前版本与最新版本尚未检查。</div>
+                <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
+              </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
             <div class="field full"><label>历史缓存文件</label><input id="cfg-history-file" type="text"></div>
@@ -12143,7 +12235,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">API 白名单</div>
-                  <div class="access-subcopy">限制外部 API 来源地址；没有 API Token 时此规则不生效。</div>
+                  <div class="access-subcopy">限制外部 API 来源地址</div>
                 </div>
               </div>
               <div id="api-whitelist-block">
@@ -12227,6 +12319,19 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             <button class="btn" id="btn-oobe-full" type="button">完整 OOBE</button>
           </div>
           <div id="status-home-actions" class="status">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>许可协议</h2>
+              <div class="section-copy">查看当前 EULA 阅读确认状态；撤回后会重新进入首次运行许可确认。</div>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-eula-view" type="button">查看 EULA</button>
+            <button class="btn warn" id="btn-eula-revoke" type="button">撤回同意</button>
+          </div>
+          <div id="status-eula" class="status">-</div>
         </div>
         <div class="card">
           <div class="section-head">
@@ -12604,6 +12709,34 @@ async function clearHistoryFromSettings(){
     setStatus('status-home-actions', '清空失败: ' + (e.message || e), true);
     showNotice(e.message || e, 'warn', 3800);
   }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+function renderEulaState(eula){
+  eula = eula || {};
+  var status = qs('status-eula');
+  var revokeBtn = qs('btn-eula-revoke');
+  if(status){
+    status.textContent = (eula.accepted ? '当前已同意许可协议。' : '当前未同意许可协议。')
+      + '\\n状态文件: ' + String(eula.set_path || 'EULA.set')
+      + '\\n官方文本: ' + String(eula.source_url || '');
+    status.classList.toggle('err', !eula.accepted);
+  }
+  if(revokeBtn) revokeBtn.disabled = !eula.accepted;
+}
+async function revokeEulaAcceptance(){
+  if(!confirm('撤回同意后，系统会立即回到许可协议确认页。确定撤回？')) return;
+  var btn = qs('btn-eula-revoke');
+  if(btn) btn.disabled = true;
+  setStatus('status-eula', '正在撤回许可协议同意状态...', false);
+  try{
+    const data = await postJson('/api/eula/revoke', {});
+    setStatus('status-eula', '已撤回同意。即将跳转到 EULA 页面。\\n状态文件: ' + String(data.set_path || ''), true);
+    showNotice('已撤回 EULA 同意状态。', 'warn', 2600);
+    window.setTimeout(function(){ location.href = '/eula?next=/settings'; }, 700);
+  }catch(e){
+    setStatus('status-eula', '撤回失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 3600);
     if(btn) btn.disabled = false;
   }
 }
@@ -13080,6 +13213,34 @@ async function updateModelsNow(){
     if(btn) btn.disabled = false;
   }
 }
+function renderAppUpdateState(state){
+  var el = qs('app-update-state');
+  if(!el) return;
+  state = state || {};
+  var current = state.current_short || (state.current_commit ? String(state.current_commit).slice(0, 12) : '');
+  var latest = state.latest_short || (state.latest_commit ? String(state.latest_commit).slice(0, 12) : '');
+  var lines = ['当前 commit: ' + (current || '未知')];
+  lines.push('最新 commit: ' + (latest || '尚未检查'));
+  if(state.running) lines.push('正在检查版本...');
+  else if(state.last_error) lines.push('检查失败: ' + String(state.last_error));
+  else if(state.checked) lines.push(state.update_available ? '发现新版本，更新需手动处理。' : '当前已是检查到的最新版本。');
+  else lines.push('自动/手动检查只比较版本，不会自动更新程序。');
+  el.textContent = lines.join(' | ');
+}
+async function checkAppVersionNow(){
+  var btn = qs('btn-app-update-check');
+  try{
+    if(btn) btn.disabled = true;
+    renderAppUpdateState({running:true});
+    const data = await postJson('/api/settings/app-update/check', {});
+    renderAppUpdateState((data && data.state) || {});
+    showNotice(data && data.state && data.state.update_available ? '发现新版本，请手动更新。' : '版本检查完成。', 'ok', 3000);
+  }catch(e){
+    showNotice(e.message || e, 'warn', 4200);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
 function cleanModelPrefix(prefix){
   return String(prefix == null ? '' : prefix).toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 32);
 }
@@ -13399,7 +13560,7 @@ function renderLoginLinks(items){
     return '<div class="list-row sso-link-row" data-check="'+check+'">'
       + '<div class="sso-link-meta"><div class="sso-link-title"><span>'+name+'</span>'
       + '<span class="sso-link-badge'+bad+'">'+stateLabel+'</span><span class="sso-link-badge">'+expireLabel+'</span>'+modeLabel+'</div>'
-      + '<div class="micro">创建后的链接只显示一次；当前记录仅用于删除和状态查看。</div></div>'
+      + '<div class="micro">使用此链接可一键登录系统</div></div>'
       + '<button class="btn ghost warn login-link-row-delete" type="button">删除</button>'
       + '</div>';
   }).join('');
@@ -13490,7 +13651,7 @@ function renderHookRows(items){
     return '<div class="list-row hook-row" data-index="'+enc(index)+'">'
       +'<div class="hook-layout">'
       +'<div class="field"><label>通道名称</label><input class="hook-name" type="text" value="'+name+'"></div>'
-      +'<div class="field"><label>Webhook Key</label><input class="hook-key" type="password" value="" placeholder="'+(mask ? '留空即不修改' : '新的 Key')+'"><div class="micro">已保存的 Key 不在页面显示。</div></div>'
+      +'<div class="field"><label>Key</label><input class="hook-key" type="password" value="" placeholder="'+(mask ? '留空即不修改' : '新的 Key')+'"></div>'
       +'<div class="field"><label>启用</label><input class="hook-enabled" type="checkbox" '+(item.enabled ? 'checked' : '')+'></div>'
       +'<div class="field"><label>&nbsp;</label><button class="btn ghost row-remove" type="button">移除</button></div>'
       +'</div></div>';
@@ -13691,6 +13852,7 @@ async function loadVisual(){
   qs('cfg-model-update-enabled').checked = mu.enabled !== false;
   qs('cfg-app-update-enabled').checked = au.enabled !== false;
   qs('cfg-model-update-url').value = String(mu.url || '');
+  renderAppUpdateState((au && au.state) || {});
   var must = (mu.state || {});
   qs('model-update-state').textContent = '已加载 ' + String(must.loaded_count || 0)
     + ' 条 | 上次成功 ' + (must.last_success_ts ? fmtMetricTime(must.last_success_ts) : '尚未成功')
@@ -13720,6 +13882,7 @@ async function loadVisual(){
   qs('cfg-web-access-list').value = Array.isArray(w.access_list) ? w.access_list.join('\\n') : '';
   renderZoneRows(Array.isArray(w.alarm_zones) ? w.alarm_zones : []);
   renderHostStats(data.host || {}, b);
+  renderEulaState(data.eula || {});
   loadRuntimePanel().catch(function(){});
   loadMetrics().catch(function(){});
   qs('cfg-notify-enabled').checked = !!nt.enabled;
@@ -13750,7 +13913,7 @@ async function loadVisual(){
   setLoginLinkExpiryUi();
   setApiTokenCreateExpiryUi();
   qs('login-link-state').textContent = auth.enabled && auth.configured
-    ? 'SSO 链接由校验码、有效期和单次登录状态控制；过期记录保留在列表。'
+    ? '生成的链接可在下面管理'
     : '网页登录账号密码完整时，SSO 登录链接可用。';
   qs('btn-login-link-create').disabled = !(auth.enabled && auth.configured);
   qs('btn-api-token-add').disabled = !(auth.enabled && auth.configured);
@@ -13827,6 +13990,7 @@ function bindModelEditorActions(){
   on('btn-model-map-close', 'click', function(){ qs('model-map-modal').classList.remove('show'); });
   on('model-map-modal', 'click', function(ev){ if(ev.target === qs('model-map-modal')) qs('model-map-modal').classList.remove('show'); });
   on('btn-model-update-now', 'click', updateModelsNow);
+  on('btn-app-update-check', 'click', checkAppVersionNow);
   on('btn-model-map-add', 'click', function(){ addModelMapRow('', ''); });
   on('btn-model-map-save', 'click', saveModelEditor);
   on('model-map-search', 'input', function(){ syncModelRowsFromInputs(); renderModelMapRows(); });
@@ -13866,6 +14030,8 @@ function bindHomeToolActions(){
   on('btn-settings-clear-history', 'click', clearHistoryFromSettings);
   on('btn-oobe-simple', 'click', function(){ location.href = '/oobe?manual=1&mode=simple'; });
   on('btn-oobe-full', 'click', function(){ location.href = '/settings?oobe=full'; showNotice('完整 OOBE 可直接在本页完成所有配置。', 'ok', 2600); });
+  on('btn-eula-view', 'click', function(){ location.href = '/eula?next=/settings'; });
+  on('btn-eula-revoke', 'click', revokeEulaAcceptance);
 }
 function bindCaptureActions(){
   on('btn-channel-edit', 'click', function(){
@@ -14934,6 +15100,14 @@ def http_server_thread() -> None:
                 cleared = _notification_clear()
                 self._send_json({"ok": True, "cleared": cleared, "seq": int(notification_seq), "count": 0, "items": []}, 200)
                 return
+            if path == "/api/eula/revoke":
+                self._read_json_body()
+                ok, msg = _revoke_eula_acceptance()
+                if not ok:
+                    self._send_json({"ok": False, "error": msg}, 500)
+                    return
+                self._send_json({"ok": True, "accepted": False, "set_path": msg, "next": "/eula?next=/settings"}, 200)
+                return
             if path == "/api/v1/auth/logout":
                 self._send_json({"ok": True, "api": _api_meta(), "logout": False, "token_api": True}, 200)
                 return
@@ -15241,6 +15415,10 @@ def http_server_thread() -> None:
             elif path == "/api/settings/models/update":
                 body = self._read_json_body()
                 rsp = update_model_map_from_url(manual=True, url_override=str(body.get("url") or "").strip() or None)
+                self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/settings/app-update/check":
+                self._read_json_body()
+                rsp = _check_app_update_once(manual=True)
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
             elif path == "/api/settings/models/save":
                 body = self._read_json_body()

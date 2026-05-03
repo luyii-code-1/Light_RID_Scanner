@@ -47,6 +47,13 @@ MSG_TYPE_SYSTEM      = 0x4
 MSG_TYPE_PACK        = 0xF
 ODID_MSG_SIZE        = 25
 ODID_PROTOCOL_MAX    = 2
+DJI_RID_VENDOR_TYPE  = 0x0D
+DJI_RID_VENDOR_PREFIX = ODID_OUI + bytes([DJI_RID_VENDOR_TYPE])
+RID_NEW_FW_BODY_MIN  = 28
+RID_NEW_FW_SN_LEN    = 20
+RID_NEW_FW_UAS_LEN   = 8
+RID_NEW_FW_COORD_SEARCH_MAX = 80
+RID_NEW_FW_SIG_BYTES = 160
 
 UA_ID_TYPE = {0:"None", 1:"Serial", 2:"CAA", 3:"UTM", 4:"Session"}
 
@@ -79,10 +86,19 @@ LOG_BUF_SIZE = 4000   # Log ring buffer size
 TUI_REFRESH  = 0.5    # Forced TUI refresh interval (seconds)
 CONFIG_FILE_DEFAULT = "rid_config.json"
 HISTORY_STORE_DEFAULT = "rid_history_cache.json"
+SYSTEMD_SERVICE_NAME = "light-rid-scanner.service"
+SYSTEMD_SERVICE_PATH = "/etc/systemd/system/" + SYSTEMD_SERVICE_NAME
+IW_PACKAGE_NAME = "iw"
+RUNTIME_SERVICE_USER = "rid"
+RUNTIME_SERVICE_HOME = "/var/lib/light-rid"
+RUNTIME_SERVICE_CAPABILITIES = ("CAP_NET_ADMIN", "CAP_NET_RAW")
 HISTORY_SAVE_INTERVAL = 5.0
 HTTP_JSON_MAX_BYTES = 1024 * 1024
 API_NAME = "Light RID Scanner API"
 API_VERSION = "v1"
+APP_RELEASE_VERSION = "2.0"
+APP_HTTP_USER_AGENT = f"LightRIDScanner/{APP_RELEASE_VERSION}"
+APP_SERVER_HEADER = f"LightRID/{APP_RELEASE_VERSION}"
 BUILD_INFO_FILE = "rid_build_info.json"
 EULA_SET_FILE = "EULA.set"
 EULA_MARKDOWN_FILE = "EULA.md"
@@ -146,6 +162,9 @@ OOBE_REASON: str = ""
 OOBE_LOCK = Lock()
 APP_START_CWD: str = os.getcwd()
 APP_START_WALL: float = time.time()
+RAW_CONFIG_UNLOCK_TTL_SEC = 15 * 60
+raw_config_unlock_lock = Lock()
+raw_config_unlocks: dict[str, float] = {}
 WEB_CFG: dict = {
     "dji_lookup_url": DJI_LOOKUP_URL_DEFAULT,
     "allow_restart": True,
@@ -184,15 +203,21 @@ AUTH_CFG: dict = {
     "password_sha256": "",
     "realm": "Light RID Scanner",
     "session_ttl_min": 30,
+    "login_methods": ["password", "passkey", "sso"],
     "sso_links": [],
+    "passkeys": [],
 }
 AUTH_SESSION_COOKIE = "rid_auth"
 AUTH_SESSION_TTL_SEC = 30 * 60
 auth_session_lock = Lock()
 auth_sso_lock = Lock()
+auth_passkey_lock = Lock()
 api_token_lock = Lock()
 auth_sessions: dict[str, float] = {}
 auth_session_secret = secrets.token_hex(16)
+PASSKEY_CHALLENGE_TTL_SEC = 5 * 60
+passkey_challenge_lock = Lock()
+passkey_challenges: dict[str, dict] = {}
 API_CFG: dict = {
     "enabled": False,
     "token": "",
@@ -218,6 +243,10 @@ MODEL_UPDATE_CFG: dict = {
     "enabled": True,
     "url": RID_MODELS_UPDATE_URL_DEFAULT,
 }
+CONFIG_UPDATE_CFG: dict = {
+    "enabled": False,
+    "url": "",
+}
 APP_UPDATE_CFG: dict = {
     "enabled": True,
     "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
@@ -241,14 +270,35 @@ MODEL_UPDATE_STATE: dict = {
 model_update_lock = Lock()
 model_map_file_lock = Lock()
 model_update_worker_started = False
+CONFIG_UPDATE_STATE: dict = {
+    "running": False,
+    "last_check_ts": 0.0,
+    "last_success_ts": 0.0,
+    "last_error": "",
+    "last_message": "",
+    "last_count": 0,
+}
+config_update_lock = Lock()
+config_update_worker_started = False
 app_update_lock = Lock()
 
 METRICS_CFG: dict = {
     "retention_days": HOST_METRICS_RETENTION_DAYS_DEFAULT,
+    "temperature_source": "auto",
 }
 HOST_METRICS_PATH = os.path.join(HOST_METRICS_DIR_DEFAULT, HOST_METRICS_FILE_DEFAULT)
 host_metrics_lock = Lock()
 host_metrics_last_sample_wall: float = 0.0
+iw_check_lock = Lock()
+IW_CHECK_STATE: dict = {
+    "checked": False,
+    "available": False,
+    "path": "",
+    "install_attempted": False,
+    "install_ok": False,
+    "message": "",
+    "manual_hint": "",
+}
 
 notify_queue: "queue.Queue[dict]" = queue.Queue(maxsize=256)
 notify_worker_started = False
@@ -611,6 +661,44 @@ def _track_append_point(entry: dict, lat: float, lon: float, wall_ts: float) -> 
     entry["track_updated_wall_ts"] = float(wall_ts)
     return True
 
+# -----------------------------------------------------------------------------
+# Track query helpers
+# -----------------------------------------------------------------------------
+# Page endpoints can request shorter windows/limits for rendering without
+# mutating the persisted full track kept in memory/history.
+def _track_query_value(query: dict | None, key: str) -> str:
+    if not isinstance(query, dict):
+        return ""
+    try:
+        v = query.get(key)
+        if isinstance(v, list):
+            return str(v[0] if v else "")
+        return str(v or "")
+    except Exception:
+        return ""
+
+def _track_for_query(raw, query: dict | None = None) -> list[dict]:
+    # Always normalize stored points before applying request-level trimming.
+    track = _sanitize_track(raw or [])
+    if not isinstance(query, dict):
+        return track
+    try:
+        window_sec = float(_track_query_value(query, "window") or 0.0)
+    except Exception:
+        window_sec = 0.0
+    if window_sec > 0:
+        window_sec = min(max(window_sec, 1.0), 30.0 * 86400.0)
+        cutoff = time.time() - window_sec
+        track = [p for p in track if float(p.get("ts") or 0.0) >= cutoff]
+    try:
+        limit = int(float(_track_query_value(query, "limit") or 0))
+    except Exception:
+        limit = 0
+    if limit > 0:
+        limit = max(10, min(limit, TRACK_MAX_POINTS))
+        track = track[-limit:]
+    return track
+
 def _history_disk_items_locked() -> list[dict]:
     items: list[dict] = []
     for sn, e in history_table.items():
@@ -620,6 +708,7 @@ def _history_disk_items_locked() -> list[dict]:
             "sn": sn,
             "src_mac": e.get("src_mac"),
             "id_type": e.get("id_type"),
+            "uas_id": _uas_id_clean(e.get("uas_id")),
             "model": _resolve_model_name(sn, e.get("scan_type"), e.get("model")),
             "last_ch": e.get("last_ch"),
             "ch_assumed": bool(e.get("ch_assumed")),
@@ -636,6 +725,7 @@ def _history_disk_items_locked() -> list[dict]:
             "move_dir": e.get("move_dir"),
             "ssid": e.get("ssid"),
             "capture_type": e.get("capture_type"),
+            "firmware_type": _firmware_type_key(e.get("firmware_type")),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
             "raw_packets": list(e.get("raw_packets") or [])[-3:],
             "scan_type": _scan_type_key(e.get("scan_type")),
@@ -666,6 +756,7 @@ def load_history_store(path: str | None) -> None:
             return
         loaded = 0
         repaired_model = 0
+        compat_dirty = False
         with state_lock:
             for raw in items:
                 if not isinstance(raw, dict):
@@ -673,12 +764,16 @@ def load_history_store(path: str | None) -> None:
                 sn = str(raw.get("sn","") or "").strip()
                 if not sn:
                     continue
+                if "firmware_type" not in raw or "uas_id" not in raw:
+                    compat_dirty = True
                 h = history_table.get(sn) or {"sn": sn}
                 h["sn"] = sn
                 for k in HISTORY_DETAIL_KEYS:
                     if k in raw:
                         h[k] = raw.get(k)
                 h["scan_type"] = _scan_type_key(h.get("scan_type"))
+                h["firmware_type"] = _firmware_type_key(h.get("firmware_type"))
+                h["uas_id"] = _uas_id_clean(h.get("uas_id"))
                 old_model = str(h.get("model") or "").strip()
                 new_model = _resolve_model_name(sn, h.get("scan_type"), h.get("model"))
                 if new_model != (old_model if old_model else "N/A"):
@@ -695,8 +790,11 @@ def load_history_store(path: str | None) -> None:
             history_persist_dirty = False
             history_persist_last_save_wall = time.time()
         _log(f"[INFO] history cache loaded: {path} ({loaded} items)")
-        if repaired_model:
+        if repaired_model or compat_dirty:
             _history_mark_dirty()
+        if compat_dirty:
+            _log("[INFO] history cache upgraded for firmware/UAS fields")
+        if repaired_model:
             _log(f"[INFO] history model repaired from SN map: {repaired_model}")
     except Exception as e:
         _log(f"[WARN] history cache load failed: {e}")
@@ -715,7 +813,7 @@ def save_history_store(force: bool = False) -> bool:
             if not force and (not history_persist_dirty or (now_wall - history_persist_last_save_wall) < HISTORY_SAVE_INTERVAL):
                 return False
             payload = {
-                "version": 2,
+                "version": 3,
                 "saved_at": now_wall,
                 "items": _history_disk_items_locked(),
             }
@@ -822,10 +920,10 @@ def clear_track_store(sn: str | None = None) -> int:
     return affected
 
 HISTORY_DETAIL_KEYS = (
-    "src_mac","id_type","model","last_ch","ch_assumed","lat","lon",
+    "src_mac","id_type","uas_id","model","last_ch","ch_assumed","lat","lon",
     "alt","speed","vspeed","pilot_lat","pilot_lon","pilot_loc_type","pilot_loc_type_text",
     "rssi","move_dir","ssid",
-    "capture_type","last_capture_wall_ts","raw_packets",
+    "capture_type","firmware_type","last_capture_wall_ts","raw_packets",
     "scan_type","track","track_updated_wall_ts",
     "first_seen_wall_ts","last_seen_wall_ts",
     "notify_first_online_sent","notify_last_wall_ts",
@@ -854,6 +952,8 @@ def _history_apply_raw_locked(raw: dict) -> tuple[bool, bool]:
         else:
             h[k] = raw.get(k)
     h["scan_type"] = _scan_type_key(h.get("scan_type"))
+    h["firmware_type"] = _firmware_type_key(h.get("firmware_type"))
+    h["uas_id"] = _uas_id_clean(h.get("uas_id"))
     h["model"] = _resolve_model_name(sn, h.get("scan_type"), h.get("model"))
     h["track"] = _sanitize_track(h.get("track") or [])
     if h.get("track") and h.get("track_updated_wall_ts") is None:
@@ -925,6 +1025,7 @@ def _deep_merge_dict(base: dict, override: dict) -> dict:
 
 def default_app_config() -> dict:
     return {
+        "version": 1,
         "basic": {
             "iface": None,
             "channel": None,
@@ -993,12 +1094,17 @@ def default_app_config() -> dict:
             "enabled": True,
             "url": RID_MODELS_UPDATE_URL_DEFAULT,
         },
+        "config_update": {
+            "enabled": False,
+            "url": "",
+        },
         "app_update": {
             "enabled": True,
             "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
         },
         "metrics": {
             "retention_days": HOST_METRICS_RETENTION_DAYS_DEFAULT,
+            "temperature_source": "auto",
         },
         "auth": {
             "enabled": False,
@@ -1006,6 +1112,8 @@ def default_app_config() -> dict:
             "password_sha256": "",
             "realm": "Light RID Scanner",
             "session_ttl_min": 30,
+            "login_methods": ["password", "passkey", "sso"],
+            "passkeys": [],
         },
         "api": {
             "enabled": False,
@@ -1191,6 +1299,250 @@ def restore_config_backup(path: str | None, backup_path: str | None) -> tuple[bo
     except Exception as e:
         return False, str(e)
 
+# -----------------------------------------------------------------------------
+# Raw config editor helpers
+# -----------------------------------------------------------------------------
+def _config_root_dir() -> str:
+    path = APP_CONFIG_PATH or os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT)
+    try:
+        return os.path.abspath(os.path.dirname(path) or os.getcwd())
+    except Exception:
+        return os.path.abspath(os.getcwd())
+
+def _config_path_within_root(path: str | None, root_dir: str | None = None) -> bool:
+    # The raw-config UI is intentionally jailed to the active config root.
+    if not path:
+        return False
+    try:
+        root = os.path.abspath(root_dir or _config_root_dir())
+        candidate = os.path.abspath(str(path))
+        return os.path.commonpath([root, candidate]) == root
+    except Exception:
+        return False
+
+def _config_rel_path(path: str | None, root_dir: str | None = None) -> str:
+    if not path:
+        return ""
+    try:
+        root = os.path.abspath(root_dir or _config_root_dir())
+        candidate = os.path.abspath(str(path))
+        if not _config_path_within_root(candidate, root):
+            return ""
+        rel = os.path.relpath(candidate, root)
+        return "." if rel == "." else rel.replace("\\", "/")
+    except Exception:
+        return ""
+
+def _config_resolve_path(path: str | None, root_dir: str | None = None) -> str | None:
+    raw = str(path or "").strip()
+    if not raw:
+        return None
+    root = os.path.abspath(root_dir or _config_root_dir())
+    candidate = os.path.abspath(raw if os.path.isabs(raw) else os.path.join(root, raw))
+    if not _config_path_within_root(candidate, root):
+        return None
+    return candidate
+
+def _config_file_stat(path: str) -> dict:
+    st = os.stat(path)
+    return {
+        "path": path,
+        "name": os.path.basename(path),
+        "rel_path": _config_rel_path(path),
+        "type": "file",
+        "size": int(st.st_size),
+        "mtime": float(st.st_mtime),
+    }
+
+def _config_tree_entries(root_dir: str | None = None, *, max_depth: int = 3, max_entries: int = 600) -> dict:
+    root = os.path.abspath(root_dir or _config_root_dir())
+    root_name = os.path.basename(root.rstrip("\\/")) or root
+    visited = 0
+
+    def walk(dir_path: str, depth: int) -> list[dict]:
+        nonlocal visited
+        nodes: list[dict] = []
+        if depth < 0 or visited >= max_entries:
+            return nodes
+        try:
+            entries = list(os.scandir(dir_path))
+        except Exception:
+            return nodes
+        dirs: list[os.DirEntry] = []
+        files: list[os.DirEntry] = []
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    dirs.append(entry)
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(entry)
+            except Exception:
+                continue
+        for entry in sorted(dirs, key=lambda e: e.name.lower()):
+            visited += 1
+            if visited > max_entries:
+                break
+            child_path = entry.path
+            node = {
+                "name": entry.name,
+                "path": child_path,
+                "rel_path": _config_rel_path(child_path, root),
+                "type": "dir",
+                "children": [],
+            }
+            if depth > 0:
+                node["children"] = walk(child_path, depth - 1)
+            nodes.append(node)
+        for entry in sorted(files, key=lambda e: e.name.lower()):
+            visited += 1
+            if visited > max_entries:
+                break
+            try:
+                nodes.append(_config_file_stat(entry.path))
+            except Exception:
+                continue
+        return nodes
+    return {
+        "root": root,
+        "root_name": root_name,
+        "tree": walk(root, max(0, int(max_depth or 0))),
+    }
+
+# Raw config editing uses a short-lived secondary unlock tied to the current
+# page session so the password check does not permanently open write access.
+def _raw_config_unlock_key(cookie_header: str | None) -> str:
+    return _auth_cookie_parse(cookie_header, AUTH_SESSION_COOKIE)
+
+def _raw_config_unlock_cleanup(now_wall: float | None = None) -> None:
+    now_wall = float(now_wall or time.time())
+    with raw_config_unlock_lock:
+        stale = [k for k, exp in raw_config_unlocks.items() if float(exp or 0.0) <= now_wall]
+        for key in stale:
+            raw_config_unlocks.pop(key, None)
+
+def _raw_config_unlock_set(cookie_header: str | None, ttl_sec: int = RAW_CONFIG_UNLOCK_TTL_SEC) -> bool:
+    key = _raw_config_unlock_key(cookie_header)
+    if not key:
+        return False
+    now_wall = time.time()
+    with raw_config_unlock_lock:
+        raw_config_unlocks[key] = now_wall + float(max(60, int(ttl_sec or RAW_CONFIG_UNLOCK_TTL_SEC)))
+        if len(raw_config_unlocks) > 4096:
+            stale = [k for k, exp in raw_config_unlocks.items() if float(exp or 0.0) <= now_wall]
+            for item in stale[:2048]:
+                raw_config_unlocks.pop(item, None)
+    return True
+
+def _raw_config_unlocked(cookie_header: str | None) -> bool:
+    key = _raw_config_unlock_key(cookie_header)
+    if not key:
+        return False
+    now_wall = time.time()
+    with raw_config_unlock_lock:
+        exp = raw_config_unlocks.get(key)
+        if not exp or float(exp) <= now_wall:
+            raw_config_unlocks.pop(key, None)
+            return False
+        return True
+
+def _raw_config_access_payload(headers=None) -> dict:
+    unlocked = _raw_config_unlocked(headers.get("Cookie") if headers is not None else None)
+    return {
+        "required": bool(_auth_enabled() and _auth_hashes_present(AUTH_CFG)),
+        "unlocked": bool(unlocked),
+        "ttl_sec": int(RAW_CONFIG_UNLOCK_TTL_SEC),
+        "root": _config_root_dir(),
+    }
+
+def _config_file_payload(path: str | None = None, *, root_dir: str | None = None) -> dict:
+    root = os.path.abspath(root_dir or _config_root_dir())
+    abs_path = _config_resolve_path(path or APP_CONFIG_PATH or os.path.join(root, CONFIG_FILE_DEFAULT), root)
+    if not abs_path:
+        raise ValueError("invalid config path")
+    with open(abs_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    stat = os.stat(abs_path)
+    return {
+        "ok": True,
+        "path": abs_path,
+        "rel_path": _config_rel_path(abs_path, root),
+        "root": root,
+        "name": os.path.basename(abs_path),
+        "text": text,
+        "size": int(stat.st_size),
+        "mtime": float(stat.st_mtime),
+        "tree": _config_tree_entries(root),
+        "raw_access": _raw_config_access_payload(),
+    }
+
+def _config_file_save_payload(path: str | None, text: str, *, tag: str = "raw") -> dict:
+    root = _config_root_dir()
+    abs_path = _config_resolve_path(path or APP_CONFIG_PATH or os.path.join(root, CONFIG_FILE_DEFAULT), root)
+    if not abs_path:
+        raise ValueError("invalid config path")
+    raw_text = str(text or "")
+    if not raw_text.strip():
+        raise ValueError("empty config text")
+    try:
+        parsed = json.loads(raw_text)
+        if not isinstance(parsed, dict):
+            raise ValueError("config root must be object")
+    except Exception as e:
+        raise ValueError(f"invalid json: {e}") from e
+    parsed = _deep_merge_dict(default_app_config(), parsed)
+    parsed, guard_err = _prepare_security_cfg_for_save(parsed)
+    if guard_err:
+        raise ValueError(guard_err)
+    b_ok, backup_path = create_config_backup(abs_path, tag=tag)
+    if not b_ok:
+        raise ValueError(f"backup failed: {backup_path}")
+    ok, msg = save_app_config(abs_path, parsed)
+    if not ok:
+        raise ValueError(f"save failed: {msg}")
+    reload_msg = "skipped"
+    if APP_CONFIG_PATH and os.path.abspath(abs_path) == os.path.abspath(APP_CONFIG_PATH):
+        cfg_loaded = load_app_config(abs_path)
+        r_ok, r_msg = reload_runtime_config(cfg_loaded)
+        if not r_ok:
+            restore_config_backup(abs_path, backup_path)
+            raise ValueError(f"reload failed: {r_msg}")
+        reload_msg = r_msg
+    return {
+        "ok": True,
+        "saved_to": abs_path,
+        "backup_path": backup_path,
+        "reloaded": bool(APP_CONFIG_PATH and os.path.abspath(abs_path) == os.path.abspath(APP_CONFIG_PATH)),
+        "reload_msg": reload_msg,
+        "root": root,
+        "raw_access": _raw_config_access_payload(),
+    }
+
+def _config_file_delete_payload(path: str | None) -> dict:
+    root = _config_root_dir()
+    abs_path = _config_resolve_path(path or "", root)
+    if not abs_path:
+        raise ValueError("invalid config path")
+    if APP_CONFIG_PATH and os.path.abspath(abs_path) == os.path.abspath(APP_CONFIG_PATH):
+        raise ValueError("active config file cannot be deleted")
+    if not os.path.exists(abs_path):
+        raise ValueError("file not found")
+    backup_path = ""
+    try:
+        b_ok, backup_path = create_config_backup(abs_path, tag="delete")
+        if not b_ok:
+            raise ValueError(f"backup failed: {backup_path}")
+        os.remove(abs_path)
+        return {
+            "ok": True,
+            "deleted": True,
+            "deleted_path": abs_path,
+            "backup_path": backup_path,
+            "root": root,
+            "raw_access": _raw_config_access_payload(),
+        }
+    except Exception:
+        raise
+
 def _settings_view_payload() -> dict:
     cfg = load_app_config(APP_CONFIG_PATH) if APP_CONFIG_PATH else default_app_config()
     basic = cfg.get("basic") if isinstance(cfg, dict) else {}
@@ -1209,6 +1561,7 @@ def _settings_view_payload() -> dict:
     if not isinstance(auth, dict):
         auth = {}
     model_update = _normalize_model_update_cfg(cfg)
+    config_update = _normalize_config_update_cfg(cfg)
     app_update = _normalize_app_update_cfg(cfg)
     metrics_cfg = _normalize_metrics_cfg(cfg)
     api_prepared = _prepare_api_cfg_for_save(api)
@@ -1301,12 +1654,19 @@ def _settings_view_payload() -> dict:
                 "password_masked": ("********" if str(auth_prepared.get("password_sha256") or "").strip() else ""),
                 "realm": str(auth_prepared.get("realm") or "Light RID Scanner"),
                 "session_ttl_min": int(auth_prepared.get("session_ttl_min") or 30),
+                "login_methods": list(auth_prepared.get("login_methods") or []),
                 "sso_links": _auth_sso_public_links(auth_prepared),
+                "passkeys": _auth_passkeys_public(auth_prepared),
             },
             "model_update": {
                 "enabled": bool(model_update.get("enabled")),
                 "url": "" if str(model_update.get("url") or "").strip() in ("", RID_MODELS_UPDATE_URL_DEFAULT) else str(model_update.get("url") or ""),
                 "state": _model_update_status_payload(),
+            },
+            "config_update": {
+                "enabled": bool(config_update.get("enabled")),
+                "url": str(config_update.get("url") or ""),
+                "state": _config_update_status_payload(),
             },
             "app_update": {
                 "enabled": bool(app_update.get("enabled", True)),
@@ -1315,6 +1675,7 @@ def _settings_view_payload() -> dict:
             },
             "metrics": {
                 "retention_days": int(metrics_cfg.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT),
+                "temperature_source": str(metrics_cfg.get("temperature_source") or "auto"),
                 "store_path": HOST_METRICS_PATH,
                 "sample_interval_sec": int(HOST_METRICS_SAMPLE_SEC),
             },
@@ -1323,6 +1684,7 @@ def _settings_view_payload() -> dict:
         "interfaces": interfaces,
         "oobe": _oobe_state(),
         "eula": _eula_status_payload(),
+        "raw_access": _raw_config_access_payload(),
         "hardware_link": "/hardware-assistant",
     }
 
@@ -1534,6 +1896,12 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
             auth["session_ttl_min"] = max(1, min(10080, int(p_auth.get("session_ttl_min") or 30)))
         except Exception:
             return None, "invalid session_ttl_min"
+    if "login_methods" in p_auth:
+        auth["login_methods"] = _normalize_auth_login_methods(
+            p_auth.get("login_methods"),
+            default_missing=[],
+            default_empty=[],
+        )
     if "username" in p_auth:
         raw_user = str(p_auth.get("username") or "").strip()
         if raw_user not in ("", "__KEEP__", "已设置"):
@@ -1581,6 +1949,8 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
                 metrics["retention_days"] = max(1, min(90, int(p_metrics.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT)))
             except Exception:
                 return None, "invalid metrics.retention_days"
+        if "temperature_source" in p_metrics:
+            metrics["temperature_source"] = str(p_metrics.get("temperature_source") or "auto")
         cfg["metrics"] = _normalize_metrics_cfg({"metrics": metrics})
 
     cfg, guard_err = _prepare_security_cfg_for_save(cfg)
@@ -1872,6 +2242,21 @@ def _normalize_model_update_cfg(cfg: dict | None) -> dict:
     base["url"] = url
     return base
 
+def _normalize_config_update_cfg(cfg: dict | None) -> dict:
+    base = dict(CONFIG_UPDATE_CFG)
+    if isinstance(cfg, dict):
+        raw = cfg.get("config_update")
+        if isinstance(raw, dict):
+            for k in base.keys():
+                if k in raw:
+                    base[k] = raw.get(k)
+    base["enabled"] = bool(base.get("enabled", False))
+    url = str(base.get("url") or "").strip()
+    if url and not (url.startswith("https://") or url.startswith("http://")):
+        url = ""
+    base["url"] = url
+    return base
+
 def _normalize_app_update_cfg(cfg: dict | None) -> dict:
     base = dict(APP_UPDATE_CFG)
     if isinstance(cfg, dict):
@@ -1899,6 +2284,22 @@ def _normalize_metrics_cfg(cfg: dict | None) -> dict:
         base["retention_days"] = max(1, min(90, int(base.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT)))
     except Exception:
         base["retention_days"] = HOST_METRICS_RETENTION_DAYS_DEFAULT
+    raw_temp_source = str(base.get("temperature_source") or "auto").strip().lower().replace("-", "_")
+    temp_alias = {
+        "": "auto",
+        "auto": "auto",
+        "vcgencmd": "vcgencmd",
+        "vcgen": "vcgencmd",
+        "thermal": "thermal_zone",
+        "thermal_zone": "thermal_zone",
+        "thermalzone": "thermal_zone",
+        "sysfs": "thermal_zone",
+        "hwmon": "hwmon",
+        "off": "off",
+        "none": "off",
+        "disabled": "off",
+    }
+    base["temperature_source"] = temp_alias.get(raw_temp_source, "auto")
     return base
 
 def _sha256_hex(text: str) -> str:
@@ -2208,6 +2609,103 @@ def _api_tokens_public(api_cfg: dict | None = None) -> list[dict]:
         })
     return out
 
+def _normalize_passkeys(raw) -> list[dict]:
+    src = raw if isinstance(raw, list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    now_wall = time.time()
+    for idx, item in enumerate(src, 1):
+        if not isinstance(item, dict):
+            continue
+        pk_id = str(item.get("id") or item.get("credential_id") or "").strip()
+        if not pk_id:
+            continue
+        if pk_id in seen:
+            continue
+        seen.add(pk_id)
+        pk_name = str(item.get("name") or f"通行密钥 {idx}").strip() or f"通行密钥 {idx}"
+        public_key = item.get("public_key") if isinstance(item.get("public_key"), dict) else {}
+        x = str(public_key.get("x") or item.get("x") or "").strip()
+        y = str(public_key.get("y") or item.get("y") or "").strip()
+        if not x or not y:
+            continue
+        try:
+            sign_count = max(0, int(item.get("sign_count") or 0))
+        except Exception:
+            sign_count = 0
+        try:
+            created_ts = float(item.get("created_ts") or 0.0)
+        except Exception:
+            created_ts = 0.0
+        if created_ts <= 0.0:
+            created_ts = now_wall
+        try:
+            last_used_ts = max(0.0, float(item.get("last_used_ts") or 0.0))
+        except Exception:
+            last_used_ts = 0.0
+        out.append({
+            "id": pk_id[:128],
+            "name": pk_name[:80],
+            "user_handle": str(item.get("user_handle") or ""),
+            "public_key": {"kty": "EC", "crv": "P-256", "x": x, "y": y},
+            "sign_count": sign_count,
+            "created_ts": created_ts,
+            "last_used_ts": last_used_ts,
+            "enabled": bool(item.get("enabled", True)),
+        })
+    return out[:32]
+
+def _normalize_auth_login_methods(raw, *, default_missing=None, default_empty=None) -> list[str]:
+    alias = {
+        "password": "password",
+        "userpass": "password",
+        "user_pass": "password",
+        "username_password": "password",
+        "account_password": "password",
+        "passkey": "passkey",
+        "webauthn": "passkey",
+        "sso": "sso",
+        "sso_url": "sso",
+        "login_link": "sso",
+        "login_links": "sso",
+    }
+    if raw is None:
+        src = []
+        fallback = default_missing
+    elif isinstance(raw, dict):
+        src = [k for k, enabled in raw.items() if enabled]
+        fallback = default_empty
+    elif isinstance(raw, (list, tuple, set)):
+        src = list(raw)
+        fallback = default_empty
+    else:
+        src = re.split(r"[\s,;|]+", str(raw or ""))
+        fallback = default_empty
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in src:
+        key = alias.get(str(item or "").strip().lower().replace("-", "_"))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    if out:
+        return out
+    if fallback is None:
+        return []
+    return _normalize_auth_login_methods(fallback, default_missing=None, default_empty=None)
+
+def _auth_login_methods(auth_cfg: dict | None = None) -> list[str]:
+    source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
+    return _normalize_auth_login_methods(
+        source.get("login_methods") if isinstance(source, dict) else None,
+        default_missing=("password", "passkey", "sso"),
+        default_empty=("password", "passkey", "sso"),
+    )
+
+def _auth_login_method_enabled(method: str, auth_cfg: dict | None = None) -> bool:
+    return str(method or "").strip().lower() in _auth_login_methods(auth_cfg)
+
 def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
     raw = dict(auth_cfg) if isinstance(auth_cfg, dict) else {}
     out = dict(raw)
@@ -2229,9 +2727,15 @@ def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
         out["session_ttl_min"] = max(1, min(10080, int(out.get("session_ttl_min") or 30)))
     except Exception:
         out["session_ttl_min"] = 30
+    out["login_methods"] = _normalize_auth_login_methods(
+        out.get("login_methods"),
+        default_missing=("password", "passkey", "sso"),
+        default_empty=[],
+    )
     out["username_sha256"] = user_hash
     out["password_sha256"] = pass_hash
     out["sso_links"] = _normalize_sso_links(out.get("sso_links"))
+    out["passkeys"] = _normalize_passkeys(out.get("passkeys"))
     return out
 
 def _prepare_api_cfg_for_save(api_cfg: dict | None) -> dict:
@@ -2270,6 +2774,13 @@ def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None, web
     auth = _prepare_auth_cfg_for_save(auth_cfg)
     api = _prepare_api_cfg_for_save(api_cfg)
     web = web_cfg if isinstance(web_cfg, dict) else {}
+    if not list(auth.get("login_methods") or []):
+        return "至少保留一种网页登录方式"
+    if bool(auth.get("enabled")) and ("password" not in list(auth.get("login_methods") or [])):
+        passkey_ready = any(bool(item.get("enabled", True)) for item in _normalize_passkeys(auth.get("passkeys")))
+        sso_ready = any(bool(_sso_link_state(item).get("active")) for item in _normalize_sso_links(auth.get("sso_links")))
+        if (not passkey_ready) and (not sso_ready):
+            return "关闭账号密码登录前，至少先准备一把可用 PassKey 或一条有效的 SSO URL 登录链接"
     if bool(auth.get("enabled")) and (not _auth_hashes_present(auth)):
         return "启用网页登录鉴权前，必须先设置网页登录账号和密码"
     api_rule_err = _access_rule_empty_error(
@@ -2327,6 +2838,11 @@ def _normalize_auth_cfg(cfg: dict | None) -> dict:
         base["session_ttl_min"] = max(1, min(10080, int(base.get("session_ttl_min") or 30)))
     except Exception:
         base["session_ttl_min"] = 30
+    base["login_methods"] = _normalize_auth_login_methods(
+        base.get("login_methods"),
+        default_missing=("password", "passkey", "sso"),
+        default_empty=("password", "passkey", "sso"),
+    )
     u = str(base.get("username_sha256") or "").strip().lower()
     p = str(base.get("password_sha256") or "").strip().lower()
     if (not u) and plain_user:
@@ -2342,6 +2858,7 @@ def _normalize_auth_cfg(cfg: dict | None) -> dict:
     base["username_sha256"] = u
     base["password_sha256"] = p
     base["sso_links"] = _normalize_sso_links(base.get("sso_links"))
+    base["passkeys"] = _normalize_passkeys(base.get("passkeys"))
     if base["enabled"] and (not u or not p):
         _log("[WARN] auth enabled but username/password hash missing, fallback disabled")
         base["enabled"] = False
@@ -2528,6 +3045,25 @@ def _sn_source_display(id_type: str | None) -> str:
         return str(WEB_CFG.get("sn_source_ssid") or "SSID")
     return str(WEB_CFG.get("sn_source_rid") or "RID包")
 
+def _firmware_type_key(v: str | None) -> str:
+    s = str(v or "").strip().lower()
+    if s in ("new", "new_fw", "new_firmware", "新固件", "新版固件"):
+        return "new"
+    if s in ("old", "legacy", "old_fw", "old_firmware", "老固件", "旧固件", "旧版固件"):
+        return "old"
+    return "old"
+
+def _firmware_type_display(v: str | None) -> str:
+    return "新版固件" if _firmware_type_key(v) == "new" else "旧版固件"
+
+def _uas_id_clean(v) -> str:
+    try:
+        s = str(v or "")
+    except Exception:
+        return ""
+    s = "".join(c for c in s.strip() if 32 <= ord(c) <= 126)
+    return s[:64]
+
 def init_ap_from_config(cfg: dict | None) -> None:
     global AP_CFG
     AP_CFG = _normalize_ap_cfg(cfg)
@@ -2535,6 +3071,10 @@ def init_ap_from_config(cfg: dict | None) -> None:
 def init_model_update_from_config(cfg: dict | None) -> None:
     global MODEL_UPDATE_CFG
     MODEL_UPDATE_CFG = _normalize_model_update_cfg(cfg)
+
+def init_config_update_from_config(cfg: dict | None) -> None:
+    global CONFIG_UPDATE_CFG
+    CONFIG_UPDATE_CFG = _normalize_config_update_cfg(cfg)
 
 def init_app_update_from_config(cfg: dict | None) -> None:
     global APP_UPDATE_CFG
@@ -2576,6 +3116,7 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_model_update_from_config(APP_CONFIG)
+    init_config_update_from_config(APP_CONFIG)
     init_app_update_from_config(APP_CONFIG)
     init_metrics_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
@@ -2947,7 +3488,7 @@ def _load_oui_map_from_file(path: str | None) -> dict[str, str]:
 def _download_oui_db(path: str) -> tuple[bool, str]:
     req = urllib.request.Request(
         OUI_DB_URL,
-        headers={"User-Agent": "RIDMonitor/1.0 (+OUI cache)"},
+        headers={"User-Agent": APP_HTTP_USER_AGENT + " (+OUI cache)"},
         method="GET",
     )
     try:
@@ -3374,7 +3915,7 @@ def update_model_map_from_url(manual: bool = False, url_override: str | None = N
     try:
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "LightRIDScanner/1.0 (+model-map update)"},
+            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+model-map update)"},
             method="GET",
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -3437,6 +3978,105 @@ def model_update_loop() -> None:
             _log(f"[WARN] model update loop failed: {e}")
         time.sleep(300.0)
 
+# -----------------------------------------------------------------------------
+# Remote config update
+# -----------------------------------------------------------------------------
+def _config_update_status_payload() -> dict:
+    with config_update_lock:
+        state = dict(CONFIG_UPDATE_STATE)
+    state["enabled"] = bool(CONFIG_UPDATE_CFG.get("enabled", False))
+    state["url"] = str(CONFIG_UPDATE_CFG.get("url") or "")
+    state["target"] = APP_CONFIG_PATH or ""
+    return state
+
+def update_config_from_url(manual: bool = False, url_override: str | None = None) -> dict:
+    url = str(url_override or CONFIG_UPDATE_CFG.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "config update url missing", "state": _config_update_status_payload()}
+    if not (url.startswith("https://") or url.startswith("http://")):
+        return {"ok": False, "error": "config update url must start with http:// or https://", "state": _config_update_status_payload()}
+    if not APP_CONFIG_PATH:
+        return {"ok": False, "error": "config path missing", "state": _config_update_status_payload()}
+    busy = False
+    with config_update_lock:
+        if CONFIG_UPDATE_STATE.get("running"):
+            busy = True
+        else:
+            CONFIG_UPDATE_STATE["running"] = True
+            CONFIG_UPDATE_STATE["last_check_ts"] = time.time()
+            CONFIG_UPDATE_STATE["last_error"] = ""
+            CONFIG_UPDATE_STATE["last_message"] = "downloading config"
+    if busy:
+        return {"ok": False, "error": "config update already running", "state": _config_update_status_payload()}
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+config update)"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = resp.read(2 * 1024 * 1024)
+        if not data:
+            raise ValueError("empty response")
+        parsed = json.loads(data.decode("utf-8", errors="replace"))
+        if not isinstance(parsed, dict):
+            raise ValueError("remote config root must be object")
+        # Remote config updates follow the same guard rails as manual saves:
+        # merge defaults, validate security, backup, save, reload, rollback.
+        candidate = _deep_merge_dict(default_app_config(), parsed)
+        candidate, guard_err = _prepare_security_cfg_for_save(candidate)
+        if guard_err:
+            raise ValueError(guard_err)
+        b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="config_update")
+        if not b_ok:
+            raise ValueError("backup failed: " + backup_path)
+        ok, msg = save_app_config(APP_CONFIG_PATH, candidate)
+        if not ok:
+            raise ValueError("save failed: " + msg)
+        cfg_loaded = load_app_config(APP_CONFIG_PATH)
+        r_ok, r_msg = reload_runtime_config(cfg_loaded)
+        if not r_ok:
+            restore_config_backup(APP_CONFIG_PATH, backup_path)
+            raise ValueError("reload failed: " + r_msg)
+        msg = f"config updated from url; keys={len(candidate.keys())}"
+        with config_update_lock:
+            CONFIG_UPDATE_STATE["running"] = False
+            CONFIG_UPDATE_STATE["last_success_ts"] = time.time()
+            CONFIG_UPDATE_STATE["last_error"] = ""
+            CONFIG_UPDATE_STATE["last_message"] = msg
+            CONFIG_UPDATE_STATE["last_count"] = len(candidate.keys())
+        _op_log("config-update", f"manual={manual} target={APP_CONFIG_PATH}", ok=True)
+        return {"ok": True, "message": msg, "saved_to": APP_CONFIG_PATH, "state": _config_update_status_payload()}
+    except Exception as e:
+        msg = str(e)
+        with config_update_lock:
+            CONFIG_UPDATE_STATE["running"] = False
+            CONFIG_UPDATE_STATE["last_error"] = msg
+            CONFIG_UPDATE_STATE["last_message"] = "config update failed"
+        _op_log("config-update", f"manual={manual} error={msg}", ok=False)
+        return {"ok": False, "error": msg, "state": _config_update_status_payload()}
+
+def config_update_loop() -> None:
+    time.sleep(20.0)
+    while True:
+        try:
+            if bool(CONFIG_UPDATE_CFG.get("enabled", False)):
+                with config_update_lock:
+                    last = float(CONFIG_UPDATE_STATE.get("last_check_ts") or 0.0)
+                    running = bool(CONFIG_UPDATE_STATE.get("running"))
+                if (not running) and (time.time() - last >= 24 * 3600):
+                    update_config_from_url(manual=False)
+        except Exception as e:
+            _log(f"[WARN] config update loop failed: {e}")
+        time.sleep(300.0)
+
+def start_config_update_worker() -> None:
+    global config_update_worker_started
+    if config_update_worker_started:
+        return
+    config_update_worker_started = True
+    Thread(target=config_update_loop, daemon=True).start()
+
 def start_model_update_worker() -> None:
     global model_update_worker_started
     if model_update_worker_started:
@@ -3483,6 +4123,743 @@ def run_cmd(cmd: str, timeout: int = 5) -> str:
         return (r.stdout or "").strip()
     except Exception:
         return ""
+
+def _is_linux_host() -> bool:
+    return platform.system().lower() == "linux"
+
+def _is_root_user() -> bool:
+    try:
+        return bool(hasattr(os, "geteuid") and os.geteuid() == 0)
+    except Exception:
+        return False
+
+def _command_path(name: str) -> str:
+    try:
+        return str(shutil.which(str(name or "").strip()) or "")
+    except Exception:
+        return ""
+
+def _current_uid() -> int | None:
+    try:
+        if hasattr(os, "geteuid"):
+            return int(os.geteuid())
+    except Exception:
+        pass
+    return None
+
+def _capability_bit(name: str) -> int | None:
+    caps = {
+        "CAP_NET_ADMIN": 12,
+        "CAP_NET_RAW": 13,
+    }
+    return caps.get(str(name or "").strip().upper())
+
+def _process_has_capabilities(names: tuple[str, ...] | list[str]) -> bool:
+    if not _is_linux_host():
+        return False
+    try:
+        wanted = [_capability_bit(str(x)) for x in names]
+        wanted = [int(x) for x in wanted if x is not None]
+        if not wanted:
+            return False
+        with open("/proc/self/status", "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("CapEff:"):
+                    value = int(line.split(":", 1)[1].strip(), 16)
+                    return all((value & (1 << bit)) for bit in wanted)
+    except Exception:
+        pass
+    return False
+
+def _username_for_uid(uid: int | None) -> str:
+    try:
+        if uid is not None and _is_linux_host():
+            import pwd
+            return str(pwd.getpwuid(int(uid)).pw_name or "")
+    except Exception:
+        pass
+    try:
+        return str(os.environ.get("USER") or os.environ.get("USERNAME") or "")
+    except Exception:
+        return ""
+
+def _local_user_exists(name: str) -> bool:
+    user = str(name or "").strip()
+    if not user or not _is_linux_host():
+        return False
+    try:
+        import pwd
+        pwd.getpwnam(user)
+        return True
+    except KeyError:
+        return False
+    except Exception:
+        ok, _out, _rc = _run_program(["id", "-u", user], timeout=4)
+        return bool(ok)
+
+def _local_group_exists(name: str) -> bool:
+    group = str(name or "").strip()
+    if not group or not _is_linux_host():
+        return False
+    try:
+        import grp
+        grp.getgrnam(group)
+        return True
+    except KeyError:
+        return False
+    except Exception:
+        ok, _out, _rc = _run_program(["getent", "group", group], timeout=4)
+        return bool(ok)
+
+def _sudo_available() -> bool:
+    return bool(_is_linux_host() and _command_path("sudo"))
+
+def _sudo_password_from_body(body: dict | None) -> str:
+    if not isinstance(body, dict):
+        return ""
+    try:
+        return str(body.get("sudo_password") or body.get("password") or "")
+    except Exception:
+        return ""
+
+def _truncate_text(text: str, limit: int = 3600) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + "\n...输出已截断..."
+
+def _run_program(args: list[str], timeout: int = 30, env: dict | None = None, input_text: str | None = None) -> tuple[bool, str, int]:
+    try:
+        r = subprocess.run(
+            [str(x) for x in args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            input=input_text,
+        )
+        out = ((r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")).strip()
+        return r.returncode == 0, _truncate_text(out), int(r.returncode)
+    except Exception as e:
+        return False, str(e), -1
+
+def _run_privileged(args: list[str], timeout: int = 30, env: dict | None = None, sudo_password: str | None = None) -> tuple[bool, str, int]:
+    cmd = [str(x) for x in args]
+    if not cmd:
+        return False, "empty command", -1
+    if _is_root_user():
+        return _run_program(cmd, timeout=timeout, env=env)
+    sudo = _command_path("sudo")
+    if not sudo:
+        return False, "当前进程不是 root，且未检测到 sudo。", -1
+    password = "" if sudo_password is None else str(sudo_password)
+    if password:
+        return _run_program([sudo, "-S", "-p", "", "--"] + cmd, timeout=timeout, env=env, input_text=password + "\n")
+    return _run_program([sudo, "-n", "--"] + cmd, timeout=timeout, env=env)
+
+def _systemctl(args: list[str], timeout: int = 20, sudo_password: str | None = None, privileged: bool = False) -> tuple[bool, str, int]:
+    cmd = [_command_path("systemctl") or "systemctl"] + [str(x) for x in args]
+    if privileged:
+        return _run_privileged(cmd, timeout=timeout, sudo_password=sudo_password)
+    return _run_program(cmd, timeout=timeout)
+
+def _systemctl_privileged(args: list[str], timeout: int = 20, sudo_password: str | None = None) -> tuple[bool, str, int]:
+    return _systemctl(args, timeout=timeout, sudo_password=sudo_password, privileged=True)
+
+def _iw_manual_install_hint() -> str:
+    return "请手动安装: sudo apt-get update && sudo apt-get install -y iw"
+
+def _iw_missing_message() -> str:
+    return "未检测到 iw 命令，无法枚举或切换无线网卡。"
+
+def _set_iw_check_state(**updates) -> dict:
+    with iw_check_lock:
+        IW_CHECK_STATE.update(updates)
+        return dict(IW_CHECK_STATE)
+
+def _refresh_iw_check_state(message: str | None = None) -> dict:
+    path = _command_path(IW_PACKAGE_NAME)
+    available = bool(path)
+    msg = str(message or "").strip()
+    if not msg:
+        msg = f"iw 可用: {path}" if available else _iw_missing_message()
+    return _set_iw_check_state(
+        checked=True,
+        available=available,
+        path=path,
+        message=msg,
+        manual_hint=("" if available else _iw_manual_install_hint()),
+    )
+
+def _iw_status_payload(refresh: bool = True) -> dict:
+    with iw_check_lock:
+        checked = bool(IW_CHECK_STATE.get("checked"))
+    if refresh or not checked:
+        snap = _refresh_iw_check_state()
+    else:
+        with iw_check_lock:
+            snap = dict(IW_CHECK_STATE)
+    snap["sudo_available"] = _sudo_available()
+    snap["can_install"] = bool(_is_linux_host() and (_is_root_user() or _sudo_available()) and _command_path("apt-get"))
+    snap["package"] = IW_PACKAGE_NAME
+    return snap
+
+def _install_iw_package(sudo_password: str | None = None) -> dict:
+    existing = _iw_status_payload(refresh=True)
+    if existing.get("available"):
+        return {
+            "ok": True,
+            "installed": False,
+            "message": "iw 已可用，无需安装。",
+            "iw": existing,
+        }
+    _set_iw_check_state(install_attempted=True, install_ok=False)
+    if not _is_linux_host():
+        snap = _refresh_iw_check_state("当前主机不是 Linux，无法自动安装 iw。")
+        return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
+    if not _command_path("apt-get"):
+        snap = _refresh_iw_check_state("未检测到 apt-get，无法自动安装 iw。")
+        return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
+    if not (_is_root_user() or _sudo_available()):
+        snap = _refresh_iw_check_state("自动安装 iw 需要 root 或 sudo 提权。")
+        return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
+
+    env = dict(os.environ)
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    ok_update, out_update, rc_update = _run_privileged(["apt-get", "update"], timeout=300, env=env, sudo_password=sudo_password)
+    if not ok_update:
+        snap = _refresh_iw_check_state("apt-get update 失败，iw 未安装。")
+        return {
+            "ok": False,
+            "installed": False,
+            "error": snap.get("message"),
+            "returncode": rc_update,
+            "output": out_update,
+            "iw": snap,
+        }
+    ok_install, out_install, rc_install = _run_privileged(["apt-get", "install", "-y", IW_PACKAGE_NAME], timeout=300, env=env, sudo_password=sudo_password)
+    snap = _refresh_iw_check_state("iw 安装完成。" if ok_install else "apt-get install iw 失败。")
+    installed = bool(ok_install and snap.get("available"))
+    _set_iw_check_state(install_ok=installed)
+    snap = _iw_status_payload(refresh=False)
+    return {
+        "ok": installed,
+        "installed": installed,
+        "error": "" if installed else str(snap.get("message") or "iw install failed"),
+        "returncode": rc_install,
+        "output": _truncate_text((out_update + "\n" + out_install).strip()),
+        "iw": snap,
+    }
+
+def _prompt_install_iw_on_startup() -> bool:
+    try:
+        return bool(sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty())
+    except Exception:
+        return False
+
+def check_iw_available_on_startup() -> bool:
+    snap = _iw_status_payload(refresh=True)
+    if snap.get("available"):
+        _log(f"[INFO] iw command available: {snap.get('path')}")
+        return True
+
+    msg = f"{snap.get('message') or _iw_missing_message()} {snap.get('manual_hint') or _iw_manual_install_hint()}"
+    _log(f"[WARN] {msg}")
+    _sniff_note_error(msg)
+    if not (_is_linux_host() and _is_root_user() and _command_path("apt-get") and _prompt_install_iw_on_startup()):
+        _log("[WARN] 启动环境无法交互确认自动安装 iw，请手动安装后重启服务。")
+        return False
+
+    try:
+        answer = input("未检测到 iw，是否现在自动安装？这将执行 apt-get update && apt-get install -y iw [y/N]: ")
+    except Exception:
+        answer = ""
+    if str(answer or "").strip().lower() not in ("y", "yes"):
+        _log(f"[WARN] 已跳过 iw 自动安装。{_iw_manual_install_hint()}")
+        return False
+
+    rsp = _install_iw_package()
+    if rsp.get("ok"):
+        _log("[INFO] iw installed successfully")
+        return True
+    _log(f"[WARN] iw 自动安装失败: {rsp.get('error') or rsp.get('output') or 'unknown error'}")
+    _log(f"[WARN] {_iw_manual_install_hint()}")
+    return False
+
+# -----------------------------------------------------------------------------
+# Privileged runtime repair / systemd helpers
+# -----------------------------------------------------------------------------
+def _systemd_supported() -> tuple[bool, str]:
+    if not _is_linux_host():
+        return False, "当前主机不是 Linux。"
+    if not _command_path("systemctl"):
+        return False, "未检测到 systemctl。"
+    return True, ""
+
+def _systemd_quote_arg(value: str) -> str:
+    s = str(value or "")
+    if not s:
+        return '""'
+    if re.search(r"\s|[\"\\]", s):
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return s
+
+def _systemd_service_spec() -> dict:
+    # Always point the generated unit at the current script/config pair and
+    # force no-TUI mode for unattended service execution.
+    script = os.path.abspath(str(sys.argv[0] or os.path.join(APP_START_CWD, "run.py")))
+    workdir = os.path.abspath(APP_START_CWD or os.path.dirname(script) or ".")
+    config_path = os.path.abspath(APP_CONFIG_PATH or os.path.join(workdir, CONFIG_FILE_DEFAULT))
+    py = os.path.abspath(sys.executable or "python3")
+    exec_start = " ".join([
+        _systemd_quote_arg(py),
+        _systemd_quote_arg(script),
+        "--config",
+        _systemd_quote_arg(config_path),
+        "--no-tui",
+    ])
+    service_lines = [
+        "[Unit]",
+        "Description=Light RID Scanner",
+        "Wants=network-online.target",
+        "After=network-online.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        "Environment=PYTHONUNBUFFERED=1",
+        f"WorkingDirectory={_systemd_quote_arg(workdir)}",
+        f"ExecStart={exec_start}",
+        f"User={RUNTIME_SERVICE_USER}",
+    ]
+    if _local_group_exists(RUNTIME_SERVICE_USER):
+        service_lines.append(f"Group={RUNTIME_SERVICE_USER}")
+    if _local_group_exists("netdev"):
+        service_lines.append("SupplementaryGroups=netdev")
+    caps = " ".join(RUNTIME_SERVICE_CAPABILITIES)
+    service_lines.extend([
+        f"AmbientCapabilities={caps}",
+        f"CapabilityBoundingSet={caps}",
+        "Restart=on-failure",
+        "RestartSec=3",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "",
+    ])
+    unit = "\n".join(service_lines)
+    return {
+        "service_name": SYSTEMD_SERVICE_NAME,
+        "service_path": SYSTEMD_SERVICE_PATH,
+        "python": py,
+        "script": script,
+        "cwd": workdir,
+        "config_path": config_path,
+        "exec_start": exec_start,
+        "service_user": RUNTIME_SERVICE_USER,
+        "service_home": RUNTIME_SERVICE_HOME,
+        "service_capabilities": list(RUNTIME_SERVICE_CAPABILITIES),
+        "unit_text": unit,
+    }
+
+def _read_systemd_unit_text() -> tuple[str, str]:
+    try:
+        if os.path.exists(SYSTEMD_SERVICE_PATH):
+            with open(SYSTEMD_SERVICE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read(), ""
+    except Exception as e:
+        return "", str(e)
+    return "", ""
+
+def _unit_declared_user(unit_text: str) -> str:
+    try:
+        for line in str(unit_text or "").splitlines():
+            s = line.strip()
+            if s.startswith("User="):
+                return s.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+def _runtime_security_payload(unit_text: str | None = None) -> dict:
+    uid = _current_uid()
+    current_user = _username_for_uid(uid)
+    running_as_root = _is_root_user()
+    if unit_text is None:
+        unit_text, _err = _read_systemd_unit_text()
+    actual_service_user = _unit_declared_user(unit_text or "")
+    dedicated_exists = _local_user_exists(RUNTIME_SERVICE_USER)
+    sudo_available = _sudo_available()
+    caps_ok = bool(_process_has_capabilities(list(RUNTIME_SERVICE_CAPABILITIES)))
+    risk = "当前程序以 root 权限运行，网页接口和采集进程拥有过高权限。"
+    no_caps = f"当前程序以 {current_user or '非 root'} 权限运行，但未检测到采集所需网络能力。"
+    ok_msg = f"当前程序以 {current_user or '非 root'} 权限运行。"
+    level = "warn" if running_as_root or (not running_as_root and _is_linux_host() and not caps_ok) else "ok"
+    return {
+        "ok": True,
+        "current_uid": uid,
+        "current_user": current_user,
+        "running_as_root": bool(running_as_root),
+        "has_network_capabilities": bool(caps_ok),
+        "risk": "root-runtime" if running_as_root else ("" if caps_ok or not _is_linux_host() else "missing-capabilities"),
+        "level": level,
+        "message": risk if running_as_root else (ok_msg if caps_ok or not _is_linux_host() else no_caps),
+        "dedicated_user": RUNTIME_SERVICE_USER,
+        "dedicated_user_exists": bool(dedicated_exists),
+        "service_user": actual_service_user,
+        "service_uses_dedicated_user": actual_service_user == RUNTIME_SERVICE_USER,
+        "sudo_available": bool(sudo_available),
+        "can_elevate": bool(_is_linux_host() and (running_as_root or sudo_available)),
+        "password_saved": False,
+    }
+
+def _runtime_path_targets() -> tuple[list[str], list[str]]:
+    dirs: set[str] = set()
+    files: set[str] = set()
+
+    def add_file(path: str | None) -> None:
+        p = str(path or "").strip()
+        if not p:
+            return
+        p = os.path.abspath(p)
+        files.add(p)
+        parent = os.path.dirname(p)
+        if parent:
+            dirs.add(parent)
+            dirs.add(os.path.join(parent, "backups"))
+
+    def add_dir(path: str | None) -> None:
+        p = str(path or "").strip()
+        if p:
+            dirs.add(os.path.abspath(p))
+
+    add_dir(APP_START_CWD)
+    add_file(APP_CONFIG_PATH)
+    if APP_CONFIG_PATH:
+        add_file(str(APP_CONFIG_PATH) + CONFIG_ROLLBACK_SUFFIX)
+    add_file(HISTORY_STORE_PATH)
+    add_file(_model_map_target_path())
+    add_file(_eula_set_path())
+    try:
+        add_file(str(AP_CFG.get("vendor_db_file") or ""))
+    except Exception:
+        pass
+    add_dir(os.path.dirname(os.path.abspath(HOST_METRICS_PATH)))
+    return sorted(dirs), sorted(files)
+
+def _runtime_traverse_dirs(dirs: list[str]) -> list[str]:
+    out: set[str] = set()
+    for raw in dirs:
+        try:
+            path = os.path.abspath(str(raw or ""))
+        except Exception:
+            continue
+        parent = os.path.dirname(path)
+        while parent and parent != path:
+            if parent == os.path.abspath(os.sep):
+                break
+            out.add(parent)
+            path = parent
+            parent = os.path.dirname(path)
+    return sorted(out, key=lambda p: len(p))
+
+def _run_repair_step(label: str, args: list[str], steps: list[dict], sudo_password: str | None = None, timeout: int = 30, optional: bool = False) -> bool:
+    ok, out, rc = _run_privileged(args, timeout=timeout, sudo_password=sudo_password)
+    steps.append({"label": label, "ok": bool(ok), "returncode": rc, "output": out})
+    return bool(ok or optional)
+
+def _run_as_runtime_user(args: list[str], sudo_password: str | None, timeout: int = 20) -> tuple[bool, str, int]:
+    cmd = [str(x) for x in args]
+    if not cmd:
+        return False, "empty command", -1
+    if _command_path("runuser"):
+        return _run_privileged(["runuser", "-u", RUNTIME_SERVICE_USER, "--"] + cmd, timeout=timeout, sudo_password=sudo_password)
+    sudo = _command_path("sudo")
+    if sudo:
+        return _run_privileged([sudo, "-u", RUNTIME_SERVICE_USER, "--"] + cmd, timeout=timeout, sudo_password=sudo_password)
+    return False, "未检测到 runuser/sudo，无法以 rid 账号验收权限。", -1
+
+def _verify_runtime_path_access(sudo_password: str | None, steps: list[dict]) -> bool:
+    dirs, files = _runtime_path_targets()
+    for d in dirs:
+        if not d:
+            continue
+        ok, out, rc = _run_as_runtime_user(["test", "-d", d, "-a", "-r", d, "-a", "-w", d, "-a", "-x", d], sudo_password=sudo_password)
+        steps.append({"label": f"rid 目录权限验收 {d}", "ok": bool(ok), "returncode": rc, "output": out})
+        if not ok:
+            return False
+    for f in files:
+        if not f or not os.path.exists(f):
+            continue
+        ok, out, rc = _run_as_runtime_user(["test", "-r", f, "-a", "-w", f], sudo_password=sudo_password)
+        steps.append({"label": f"rid 文件权限验收 {f}", "ok": bool(ok), "returncode": rc, "output": out})
+        if not ok:
+            return False
+    return True
+
+def _grant_runtime_path_access(sudo_password: str | None, steps: list[dict]) -> bool:
+    dirs, files = _runtime_path_targets()
+    for d in _runtime_traverse_dirs(dirs):
+        if not d or not os.path.isdir(d):
+            continue
+        acl_cmd = ["setfacl", "-m", f"u:{RUNTIME_SERVICE_USER}:x", d]
+        if _command_path("setfacl"):
+            if not _run_repair_step(f"上级目录进入权限 {d}", acl_cmd, steps, sudo_password=sudo_password, optional=False):
+                return False
+        else:
+            if not _run_repair_step(f"上级目录进入权限 {d}", ["chmod", "o+x", d], steps, sudo_password=sudo_password, optional=False):
+                return False
+    for d in dirs:
+        if not d:
+            continue
+        if not _run_repair_step(f"创建目录 {d}", ["mkdir", "-p", d], steps, sudo_password=sudo_password):
+            return False
+        if not _run_repair_step(f"目录授权 {d}", ["chgrp", RUNTIME_SERVICE_USER, d], steps, sudo_password=sudo_password, optional=False):
+            return False
+        if not _run_repair_step(f"目录写权限 {d}", ["chmod", "g+rwx,g+s", d], steps, sudo_password=sudo_password):
+            return False
+    for f in files:
+        if not f or not os.path.exists(f):
+            continue
+        if not _run_repair_step(f"文件授权 {f}", ["chgrp", RUNTIME_SERVICE_USER, f], steps, sudo_password=sudo_password):
+            return False
+        if not _run_repair_step(f"文件写权限 {f}", ["chmod", "g+rw", f], steps, sudo_password=sudo_password):
+            return False
+    return True
+
+def _write_systemd_unit_privileged(unit_text: str, sudo_password: str | None, steps: list[dict]) -> tuple[bool, str]:
+    backup_path = ""
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, prefix="light-rid-service-", suffix=".service") as f:
+            tmp_path = f.name
+            f.write(unit_text)
+    except Exception as e:
+        steps.append({"label": "生成临时服务文件", "ok": False, "returncode": -1, "output": str(e)})
+        return False, backup_path
+    try:
+        if os.path.exists(SYSTEMD_SERVICE_PATH):
+            backup_path = SYSTEMD_SERVICE_PATH + "." + time.strftime("%Y%m%d_%H%M%S") + ".bak"
+            if not _run_repair_step("备份 systemd 服务文件", ["cp", "-a", SYSTEMD_SERVICE_PATH, backup_path], steps, sudo_password=sudo_password):
+                return False, backup_path
+        if not _run_repair_step("写入 systemd 服务文件", ["install", "-m", "0644", tmp_path, SYSTEMD_SERVICE_PATH], steps, sudo_password=sudo_password):
+            return False, backup_path
+        return True, backup_path
+    finally:
+        try:
+            if tmp_path:
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+def _schedule_systemd_restart(sudo_password: str | None, steps: list[dict], delay_sec: int = 3) -> bool:
+    delay = max(1, int(delay_sec or 3))
+    systemctl = _command_path("systemctl") or "systemctl"
+    systemd_run = _command_path("systemd-run")
+    if systemd_run:
+        unit_name = f"light-rid-scanner-restart-{os.getpid()}-{int(time.time())}"
+        args = [
+            systemd_run,
+            f"--unit={unit_name}",
+            f"--on-active={delay}s",
+            "--collect",
+            systemctl,
+            "restart",
+            SYSTEMD_SERVICE_NAME,
+        ]
+        ok, out, rc = _run_privileged(args, timeout=20, sudo_password=sudo_password)
+        steps.append({"label": f"安排 {delay} 秒后自动重启服务", "ok": bool(ok), "returncode": rc, "output": out})
+        return bool(ok)
+
+    shell = f"sleep {delay}; exec {shlex.quote(systemctl)} restart {shlex.quote(SYSTEMD_SERVICE_NAME)}"
+    try:
+        if _is_root_user():
+            subprocess.Popen(
+                ["sh", "-c", shell],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        else:
+            sudo = _command_path("sudo")
+            if not sudo:
+                steps.append({"label": "安排自动重启服务", "ok": False, "returncode": -1, "output": "当前进程不是 root，且未检测到 sudo。"})
+                return False
+            password = "" if sudo_password is None else str(sudo_password)
+            if password:
+                proc = subprocess.Popen(
+                    [sudo, "-S", "-p", "", "--", "sh", "-c", shell],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                try:
+                    if proc.stdin:
+                        proc.stdin.write(password + "\n")
+                        proc.stdin.close()
+                finally:
+                    password = ""
+            else:
+                subprocess.Popen(
+                    [sudo, "-n", "--", "sh", "-c", shell],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+        steps.append({"label": f"安排 {delay} 秒后自动重启服务", "ok": True, "returncode": 0, "output": "已安排后台重启。"})
+        return True
+    except Exception as e:
+        steps.append({"label": "安排自动重启服务", "ok": False, "returncode": -1, "output": str(e)})
+        return False
+
+def repair_runtime_security(sudo_password: str | None = None) -> dict:
+    supported, reason = _systemd_supported()
+    steps: list[dict] = []
+    if not supported:
+        return {"ok": False, "error": reason, "status": _systemd_service_status_payload(), "steps": steps}
+    if not (_is_root_user() or _sudo_available()):
+        return {"ok": False, "error": "创建专用运行账号需要 root 或 sudo 提权。", "status": _systemd_service_status_payload(), "steps": steps}
+    if not _local_user_exists(RUNTIME_SERVICE_USER):
+        shell_path = "/usr/sbin/nologin" if os.path.exists("/usr/sbin/nologin") else "/bin/false"
+        useradd_cmd = [
+            _command_path("useradd") or "useradd",
+            "--system",
+            "--create-home",
+            "--home-dir",
+            RUNTIME_SERVICE_HOME,
+            "--shell",
+            shell_path,
+            "--user-group",
+            RUNTIME_SERVICE_USER,
+        ]
+        if not _run_repair_step(f"创建 {RUNTIME_SERVICE_USER} 账号", useradd_cmd, steps, sudo_password=sudo_password, timeout=30):
+            return {"ok": False, "error": f"创建 {RUNTIME_SERVICE_USER} 账号失败。", "status": _systemd_service_status_payload(), "steps": steps}
+    else:
+        steps.append({"label": f"{RUNTIME_SERVICE_USER} 账号已存在", "ok": True, "returncode": 0, "output": ""})
+    if not _run_repair_step("准备专用运行目录", ["install", "-d", "-o", RUNTIME_SERVICE_USER, "-g", RUNTIME_SERVICE_USER, "-m", "0750", RUNTIME_SERVICE_HOME], steps, sudo_password=sudo_password):
+        return {"ok": False, "error": "准备专用运行目录失败。", "status": _systemd_service_status_payload(), "steps": steps}
+    if _local_group_exists("netdev"):
+        _run_repair_step("加入 netdev 组", ["usermod", "-a", "-G", "netdev", RUNTIME_SERVICE_USER], steps, sudo_password=sudo_password, optional=True)
+    if not _grant_runtime_path_access(sudo_password, steps):
+        return {"ok": False, "error": "授予运行文件写权限失败。", "status": _systemd_service_status_payload(), "steps": steps}
+    if not _verify_runtime_path_access(sudo_password, steps):
+        return {"ok": False, "error": "rid 账号权限验收失败。请检查上方失败步骤后重试。", "status": _systemd_service_status_payload(), "steps": steps}
+    rsp = register_systemd_service(sudo_password=sudo_password, require_dedicated_user=True, _steps=steps)
+    payload = dict(rsp)
+    payload["steps"] = steps
+    if rsp.get("ok"):
+        restart_delay = 3
+        restart_scheduled = _schedule_systemd_restart(sudo_password, steps, delay_sec=restart_delay)
+        payload["steps"] = steps
+        payload["restart_scheduled"] = bool(restart_scheduled)
+        payload["restart_delay_sec"] = restart_delay
+        if restart_scheduled:
+            payload["message"] = "已创建/确认 rid 专用账号，并更新 systemd 服务为 rid 账号运行。服务将在几秒后自动重启，页面可能短暂断开。"
+        else:
+            payload["message"] = "已创建/确认 rid 专用账号，并更新 systemd 服务为 rid 账号运行；但自动重启安排失败，请手动重启 light-rid-scanner.service。"
+    return payload
+
+def _systemd_service_status_payload() -> dict:
+    supported, reason = _systemd_supported()
+    spec = _systemd_service_spec()
+    registered = os.path.exists(SYSTEMD_SERVICE_PATH)
+    enabled = "unknown"
+    active = "unknown"
+    unit_matches = False
+    last_error = ""
+    unit_text = ""
+    if registered:
+        unit_text, last_error = _read_systemd_unit_text()
+        unit_matches = (unit_text.strip() == str(spec.get("unit_text") or "").strip())
+    if supported and registered:
+        ok_enabled, out_enabled, _rc_enabled = _systemctl(["is-enabled", SYSTEMD_SERVICE_NAME], timeout=8)
+        enabled = (out_enabled.splitlines() or ["enabled" if ok_enabled else "disabled"])[0].strip() or ("enabled" if ok_enabled else "disabled")
+        ok_active, out_active, _rc_active = _systemctl(["is-active", SYSTEMD_SERVICE_NAME], timeout=8)
+        active = (out_active.splitlines() or ["active" if ok_active else "inactive"])[0].strip() or ("active" if ok_active else "inactive")
+    security = _runtime_security_payload(unit_text=unit_text)
+    return {
+        "ok": True,
+        "supported": bool(supported),
+        "reason": reason,
+        "running_as_root": _is_root_user(),
+        "current_user": security.get("current_user"),
+        "current_uid": security.get("current_uid"),
+        "registered": bool(registered),
+        "enabled": enabled,
+        "active": active,
+        "unit_matches": bool(unit_matches),
+        "last_error": last_error,
+        "dedicated_user": RUNTIME_SERVICE_USER,
+        "dedicated_user_exists": bool(security.get("dedicated_user_exists")),
+        "actual_service_user": security.get("service_user"),
+        "service_uses_dedicated_user": bool(security.get("service_uses_dedicated_user")),
+        "sudo_available": bool(security.get("sudo_available")),
+        "can_elevate": bool(security.get("can_elevate")),
+        "security": security,
+        "manual_hint": "需要 root 或临时 sudo 提权写入 /etc/systemd/system 并执行 systemctl daemon-reload、systemctl enable。",
+        "iw": _iw_status_payload(refresh=True),
+        **spec,
+    }
+
+def register_systemd_service(sudo_password: str | None = None, require_dedicated_user: bool = True, _steps: list[dict] | None = None) -> dict:
+    supported, reason = _systemd_supported()
+    steps = _steps if isinstance(_steps, list) else []
+    if not supported:
+        return {"ok": False, "error": reason, "status": _systemd_service_status_payload(), "steps": steps}
+    if require_dedicated_user and not _local_user_exists(RUNTIME_SERVICE_USER):
+        return {
+            "ok": False,
+            "error": f"专用运行账号 {RUNTIME_SERVICE_USER} 不存在，请先执行一键修复。",
+            "status": _systemd_service_status_payload(),
+            "steps": steps,
+        }
+    if not (_is_root_user() or _sudo_available()):
+        return {"ok": False, "error": "注册 systemd 服务需要 root 或临时 sudo 提权。", "status": _systemd_service_status_payload(), "steps": steps}
+    spec = _systemd_service_spec()
+    unit_text = str(spec.get("unit_text") or "")
+    ok_write, backup_path = _write_systemd_unit_privileged(unit_text, sudo_password, steps)
+    if not ok_write:
+        return {"ok": False, "error": "写入服务文件失败。", "status": _systemd_service_status_payload(), "steps": steps}
+
+    ok_reload, out_reload, rc_reload = _systemctl_privileged(["daemon-reload"], timeout=20, sudo_password=sudo_password)
+    steps.append({"label": "systemctl daemon-reload", "ok": bool(ok_reload), "returncode": rc_reload, "output": out_reload})
+    if not ok_reload:
+        return {
+            "ok": False,
+            "error": "systemctl daemon-reload 失败",
+            "returncode": rc_reload,
+            "output": out_reload,
+            "backup_path": backup_path,
+            "status": _systemd_service_status_payload(),
+            "steps": steps,
+        }
+    ok_enable, out_enable, rc_enable = _systemctl_privileged(["enable", SYSTEMD_SERVICE_NAME], timeout=20, sudo_password=sudo_password)
+    steps.append({"label": "systemctl enable", "ok": bool(ok_enable), "returncode": rc_enable, "output": out_enable})
+    status = _systemd_service_status_payload()
+    if not ok_enable:
+        return {
+            "ok": False,
+            "error": "systemctl enable 失败",
+            "returncode": rc_enable,
+            "output": out_enable,
+            "backup_path": backup_path,
+            "status": status,
+            "steps": steps,
+        }
+    return {
+        "ok": True,
+        "message": f"systemd 服务已注册并设为开机自启；服务文件将以 {RUNTIME_SERVICE_USER} 账号运行，当前进程不会被自动重启。",
+        "backup_path": backup_path,
+        "output": out_enable,
+        "status": status,
+        "steps": steps,
+    }
 
 def _sniff_note_packet() -> None:
     global sniff_last_pkt_mono, sniff_last_pkt_wall, sniff_last_error, sniff_last_error_wall
@@ -3727,6 +5104,13 @@ def _ssid_to_sn(ssid: str) -> str | None:
 
 def interface_detect(prefer: str | None = None) -> str | None:
     iw      = run_cmd("iw dev")
+    if not iw and not _command_path(IW_PACKAGE_NAME):
+        snap = _iw_status_payload(refresh=True)
+        msg = f"{snap.get('message') or _iw_missing_message()} {snap.get('manual_hint') or _iw_manual_install_hint()}"
+        _log(f"[WARN] {msg}")
+        _sniff_note_error(msg)
+        _set_oobe_required(msg, True)
+        return None
     iftypes: dict[str, str] = {}
     cur     = None
     for line in iw.splitlines():
@@ -3844,6 +5228,33 @@ def decode_basic_id(msg25: bytes) -> dict | None:
     except Exception:
         return None
 
+def _coord_raw_invalid(raw: int) -> bool:
+    try:
+        v = int(raw)
+    except Exception:
+        return True
+    return v in (-1, 0x7FFFFFFF, -0x80000000)
+
+def _coord_raw_bytes_invalid(raw: bytes) -> bool:
+    b = bytes(raw or b"")
+    if len(b) != 4:
+        return True
+    return b == b"\xff" * 4 or b.count(0xff) >= 3
+
+def _coord_pair_valid(lat: float, lon: float) -> bool:
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except Exception:
+        return False
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        return False
+    # DJI invalid/sentinel coordinates can decode as non-zero values near 0,0;
+    # treat that area as unavailable data for this scanner.
+    if abs(lat_f) < 5.0 and abs(lon_f) < 5.0:
+        return False
+    return True
+
 def decode_location(msg25: bytes) -> dict | None:
     if len(msg25) < ODID_MSG_SIZE: return None
     try:
@@ -3875,9 +5286,11 @@ def decode_location(msg25: bytes) -> dict | None:
 
         lat_raw = struct.unpack_from("<i", msg25, 5)[0]
         lon_raw = struct.unpack_from("<i", msg25, 9)[0]
+        if _coord_raw_invalid(lat_raw) or _coord_raw_invalid(lon_raw):
+            return None
         lat = float(lat_raw) * 1e-7
         lon = float(lon_raw) * 1e-7
-        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        if not _coord_pair_valid(lat, lon):
             return None
 
         alt_baro_raw = struct.unpack_from("<H", msg25, 13)[0]
@@ -3922,11 +5335,11 @@ def decode_system(msg25: bytes) -> dict | None:
         # byte1: [reserved:3][classification:3][operator_location_type:2]
         lat_raw = struct.unpack_from("<i", msg25, 2)[0]
         lon_raw = struct.unpack_from("<i", msg25, 6)[0]
+        if _coord_raw_invalid(lat_raw) or _coord_raw_invalid(lon_raw):
+            return None
         lat = float(lat_raw) * 1e-7
         lon = float(lon_raw) * 1e-7
-        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-            return None
-        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+        if not _coord_pair_valid(lat, lon):
             return None
         b1 = int(msg25[1])
         loc_type = int(b1 & 0x03)
@@ -4051,6 +5464,166 @@ def _pick_payload_candidate(buf: bytes) -> bytes | None:
     cands.sort(reverse=True)
     return cands[0][2]
 
+def _new_fw_ascii_printable(raw: bytes) -> str:
+    try:
+        return "".join(chr(b) for b in bytes(raw or b"") if 32 <= int(b) <= 126).strip()
+    except Exception:
+        return ""
+
+def _new_fw_ssid_rid(ssid_sn: str | None) -> str:
+    s = str(ssid_sn or "").strip()
+    if len(s) != RID_NEW_FW_SN_LEN:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9]{20}", s):
+        return ""
+    return s
+
+def _new_fw_read_rid_at(buf: bytes, off: int) -> str:
+    if off < 0 or off + RID_NEW_FW_SN_LEN > len(buf):
+        return ""
+    s = _new_fw_ascii_printable(buf[off:off + RID_NEW_FW_SN_LEN])
+    if len(s) != RID_NEW_FW_SN_LEN:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9]{20}", s):
+        return ""
+    return s
+
+def _new_fw_read_uas_id(buf: bytes, off: int) -> str:
+    if off < 0 or off + RID_NEW_FW_UAS_LEN > len(buf):
+        return ""
+    raw = bytes(buf[off:off + RID_NEW_FW_UAS_LEN])
+    if raw == b"\xff" * RID_NEW_FW_UAS_LEN:
+        return ""
+    s = _new_fw_ascii_printable(raw)
+    return s[:RID_NEW_FW_UAS_LEN]
+
+def _new_fw_decode_coord_pair(buf: bytes, off: int) -> dict | None:
+    if off < 0 or off + 8 > len(buf):
+        return None
+    chunk = bytes(buf[off:off + 8])
+    if chunk == b"\xff" * 8 or chunk[:4] == b"\xff" * 4 or chunk[4:] == b"\xff" * 4:
+        return None
+    if _coord_raw_bytes_invalid(chunk[:4]) or _coord_raw_bytes_invalid(chunk[4:]):
+        return None
+    try:
+        lon_raw = struct.unpack_from("<i", buf, off)[0]
+        lat_raw = struct.unpack_from("<i", buf, off + 4)[0]
+    except Exception:
+        return None
+    if _coord_raw_invalid(lon_raw) or _coord_raw_invalid(lat_raw):
+        return None
+    lon = float(lon_raw) * 1e-7
+    lat = float(lat_raw) * 1e-7
+    if not _coord_pair_valid(lat, lon):
+        return None
+    return {
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "_coord_off": off,
+    }
+
+def _new_fw_coord_rank(coord: dict) -> tuple[int, int]:
+    try:
+        lat = float(coord.get("lat"))
+        lon = float(coord.get("lon"))
+        off = int(coord.get("_coord_off") or 0)
+    except Exception:
+        return (9, 999999)
+    # When only one group exists, byte-by-byte fallback can otherwise treat
+    # status bytes as a coordinate. Prefer the operating region before offset.
+    in_cn_region = 3.0 <= lat <= 55.0 and 70.0 <= lon <= 140.0
+    return (0 if in_cn_region else 1, off)
+
+def _new_fw_find_coord_groups(buf: bytes, start: int) -> tuple[dict | None, dict | None]:
+    if start < 0 or start + 8 > len(buf):
+        return None, None
+    max_off = min(len(buf) - 8, start + RID_NEW_FW_COORD_SEARCH_MAX)
+    singles: list[dict] = []
+    paired: list[tuple[float, int, dict, dict]] = []
+    for off in range(start, max_off + 1):
+        first = _new_fw_decode_coord_pair(buf, off)
+        if not first:
+            continue
+        second = _new_fw_decode_coord_pair(buf, off + 8)
+        if second:
+            try:
+                dist = _haversine(first["lat"], first["lon"], second["lat"], second["lon"])
+            except Exception:
+                dist = 1_000_000_000.0
+            paired.append((float(dist), off, first, second))
+        singles.append(first)
+    if paired:
+        paired.sort(key=lambda item: (item[0], item[1]))
+        return paired[0][2], paired[0][3]
+    if singles:
+        singles.sort(key=_new_fw_coord_rank)
+        return singles[0], None
+    return None, None
+
+def _new_fw_payload_sig(body: bytes) -> int:
+    head = bytes(body or b"")[:RID_NEW_FW_SIG_BYTES]
+    return zlib.crc32(head) & 0xFFFFFFFF
+
+def decode_new_firmware_payload(buf: bytes, ssid_sn: str | None = None) -> dict | None:
+    """Decode DJI's newer Beacon Vendor IE body after FA:0B:BC:0D.
+
+    This path is intentionally separate from the standard ODID decoder. The new
+    layout is keyed by the 20-byte RID copied from the SSID, followed by an
+    8-byte ASCII UAS ID and little-endian int32 coordinate groups.
+    """
+    if not buf or len(buf) < RID_NEW_FW_BODY_MIN:
+        return None
+    ssid_rid = _new_fw_ssid_rid(ssid_sn)
+    if not ssid_rid:
+        return None
+    rid_bytes = ssid_rid.encode("ascii", errors="ignore")
+    pos = bytes(buf).find(rid_bytes)
+    while pos >= 0:
+        rid = _new_fw_read_rid_at(buf, pos)
+        if rid == ssid_rid:
+            uas_off = pos + RID_NEW_FW_SN_LEN
+            if uas_off + RID_NEW_FW_UAS_LEN > len(buf):
+                return None
+            uas_id = _new_fw_read_uas_id(buf, uas_off)
+            coord_start = uas_off + RID_NEW_FW_UAS_LEN
+            drone_coord, second_coord = _new_fw_find_coord_groups(buf, coord_start)
+            loc = None
+            if drone_coord:
+                loc = {
+                    "lat": drone_coord["lat"],
+                    "lon": drone_coord["lon"],
+                    "alt_geodetic": None,
+                    "speed_ms": None,
+                    "vspeed_ms": None,
+                    "direction_deg": None,
+                }
+            system = None
+            if second_coord:
+                system = {
+                    "pilot_lat": second_coord["lat"],
+                    "pilot_lon": second_coord["lon"],
+                    "pilot_loc_type": None,
+                    "pilot_loc_type_text": "new_fw_coord_2",
+                }
+            return {
+                "basic_id": {"uas_id": rid, "id_type": "Serial"},
+                "uas_id": uas_id,
+                "location": loc,
+                "system": system,
+            }
+        pos = bytes(buf).find(rid_bytes, pos + 1)
+    return None
+
+def _append_new_firmware_result(results: list[tuple[bytes, dict]], dedup: set[int], body: bytes, ssid_sn: str | None) -> None:
+    decoded = decode_new_firmware_payload(body, ssid_sn=ssid_sn)
+    if not decoded:
+        return
+    sig = _new_fw_payload_sig(body)
+    if sig in dedup:
+        return
+    dedup.add(sig)
+    results.append((body, decoded))
+
 # -----------------------------------------------------------------------------
 # IE / NAN extraction (more robust)
 # -----------------------------------------------------------------------------
@@ -4109,6 +5682,48 @@ def extract_from_raw(pkt) -> list[bytes]:
         idx = pos + 1
     return results
 
+def extract_new_firmware_from_ies(pkt, ssid_sn: str | None = None) -> list[tuple[bytes, dict]]:
+    results: list[tuple[bytes, dict]] = []
+    dedup: set[int] = set()
+    elt = pkt.getlayer(Dot11Elt)
+    while elt and isinstance(elt, Dot11Elt):
+        if elt.ID == 221:
+            info = bytes(elt.info) if elt.info else b""
+            idx = 0
+            while True:
+                pos = info.find(DJI_RID_VENDOR_PREFIX, idx)
+                if pos < 0:
+                    break
+                if pos + 4 < len(info):
+                    _append_new_firmware_result(results, dedup, info[pos + 4:], ssid_sn)
+                idx = pos + 1
+        try:
+            nxt = elt.payload
+            if not isinstance(nxt, Dot11Elt):
+                break
+            elt = nxt
+        except Exception:
+            break
+    return results
+
+def extract_new_firmware_from_raw(pkt, ssid_sn: str | None = None) -> list[tuple[bytes, dict]]:
+    """Search the newer DJI RID vendor-IE body in raw frame bytes."""
+    try:
+        raw = bytes(pkt)
+    except Exception:
+        return []
+    results: list[tuple[bytes, dict]] = []
+    dedup: set[int] = set()
+    idx = 0
+    while True:
+        pos = raw.find(DJI_RID_VENDOR_PREFIX, idx)
+        if pos < 0:
+            break
+        if pos + 4 < len(raw):
+            _append_new_firmware_result(results, dedup, raw[pos + 4:pos + 4 + RID_NEW_FW_SIG_BYTES], ssid_sn)
+        idx = pos + 1
+    return results
+
 # -----------------------------------------------------------------------------
 # State update
 # -----------------------------------------------------------------------------
@@ -4117,7 +5732,7 @@ mac_to_ssid_sn: dict[str, dict] = {}
 
 def _snap(e: dict) -> dict:
     s = {k: e.get(k) for k in
-         ("sn","src_mac","id_type","model","lat","lon","alt","speed","vspeed","last_ch","move_dir")}
+         ("sn","src_mac","id_type","uas_id","model","lat","lon","alt","speed","vspeed","last_ch","move_dir")}
     if CHANGE_ON_RSSI: s["rssi"]  = e.get("rssi")
     if CHANGE_ON_PL:   s["pl_sig"] = e.get("pl_sig")
     return s
@@ -4153,6 +5768,13 @@ def _history_merge(dst: dict, src: dict) -> None:
         dst["ssid"] = src.get("ssid")
     if src.get("capture_type"):
         dst["capture_type"] = src.get("capture_type")
+    src_uas = _uas_id_clean(src.get("uas_id"))
+    if src_uas:
+        dst["uas_id"] = src_uas
+    src_fw = _firmware_type_key(src.get("firmware_type"))
+    dst_fw = _firmware_type_key(dst.get("firmware_type"))
+    if src_fw == "new" or not dst_fw:
+        dst["firmware_type"] = src_fw
     if src.get("pilot_lat") is not None and src.get("pilot_lon") is not None:
         dst["pilot_lat"] = src.get("pilot_lat")
         dst["pilot_lon"] = src.get("pilot_lon")
@@ -4197,6 +5819,8 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
             "last_online_duration_sec": e.get("last_online_duration_sec"),
             "ssid": e.get("ssid"),
             "capture_type": e.get("capture_type"),
+            "uas_id": _uas_id_clean(e.get("uas_id")),
+            "firmware_type": _firmware_type_key(e.get("firmware_type")),
             "pilot_lat": e.get("pilot_lat"),
             "pilot_lon": e.get("pilot_lon"),
             "pilot_loc_type": e.get("pilot_loc_type"),
@@ -4227,6 +5851,8 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h["move_dir"] = e.get("move_dir")
     h["ssid"] = e.get("ssid")
     h["capture_type"] = e.get("capture_type")
+    h["uas_id"] = _uas_id_clean(e.get("uas_id"))
+    h["firmware_type"] = _firmware_type_key(e.get("firmware_type"))
     h["last_capture_wall_ts"] = e.get("last_capture_wall_ts")
     h["raw_packets"] = list(e.get("raw_packets") or [])[-3:]
     h["scan_type"] = _scan_type_key(e.get("scan_type"))
@@ -4245,6 +5871,8 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h.setdefault("pilot_loc_type_text", e.get("pilot_loc_type_text"))
     h.setdefault("raw_packets", list(e.get("raw_packets") or [])[-3:])
     h.setdefault("scan_type", _scan_type_key(e.get("scan_type")))
+    h.setdefault("uas_id", _uas_id_clean(e.get("uas_id")))
+    h.setdefault("firmware_type", _firmware_type_key(e.get("firmware_type")))
     h.setdefault("track", _sanitize_track(e.get("track") or []))
     h.setdefault("track_updated_wall_ts", e.get("track_updated_wall_ts"))
     _history_mark_dirty()
@@ -4252,10 +5880,12 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
 def state_update(src_mac: str, decoded: dict, rssi: int | None,
                  ch: int, ch_assumed: bool, pl_sig: int,
                  *, scan_type: str = "rid", ssid: str | None = None,
-                 capture_type: str | None = None, raw_pkt_hex: str | None = None) -> None:
+                 capture_type: str | None = None, raw_pkt_hex: str | None = None,
+                 firmware_type: str | None = "old") -> None:
     basic = decoded.get("basic_id")
     loc   = decoded.get("location")
     sys_loc = decoded.get("system")
+    uas_id_value = _uas_id_clean(decoded.get("uas_id"))
 
     if basic and basic.get("uas_id"):
         mac_to_basic[src_mac] = {"basic": basic, "ts": time.monotonic()}
@@ -4278,6 +5908,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         sn, it = mac_key, "unknown"
 
     scan_type_key = _scan_type_key(scan_type)
+    firmware_type_key = _firmware_type_key(firmware_type)
     model = _resolve_model_name(sn, scan_type_key, None)
     now   = time.monotonic()
     now_wall = time.time()
@@ -4309,6 +5940,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 "pilot_lat":None, "pilot_lon":None,
                 "pilot_loc_type":None, "pilot_loc_type_text":"",
                 "scan_type":scan_type_key,
+                "firmware_type":firmware_type_key,
+                "uas_id":uas_id_value,
                 "ssid":(ssid or ""),
                 "capture_type":(capture_type or ""),
                 "last_capture_wall_ts":now_wall,
@@ -4340,6 +5973,10 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         e["id_type"] = it or e.get("id_type")
         e["model"]   = _resolve_model_name(sn, scan_type_key, e.get("model"))
         e["scan_type"] = scan_type_key
+        if firmware_type_key == "new" or _firmware_type_key(e.get("firmware_type")) != "new":
+            e["firmware_type"] = firmware_type_key
+        if uas_id_value:
+            e["uas_id"] = uas_id_value
         if ssid is not None:
             e["ssid"] = str(ssid)
         e["capture_type"] = str(capture_type or e.get("capture_type") or "")
@@ -4350,6 +5987,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 rp.append({
                     "ts": _fmt_wall_ts(now_wall),
                     "capture_type": str(capture_type or ""),
+                    "firmware_type": firmware_type_key,
+                    "uas_id": uas_id_value,
                     "hex": str(raw_pkt_hex),
                 })
                 if len(rp) > 6:
@@ -4455,7 +6094,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
 
         _SNAP_TO_COL = {"lat":"lat_s","lon":"lon_s","alt":"alt_s","speed":"spd_s",
                         "vspeed":"vsp_s","last_ch":"ch_s","move_dir":"dir_s",
-                        "rssi":"rssi_s","model":"model","sn":"sn_s"}
+                        "rssi":"rssi_s","model":"model","sn":"sn_s","uas_id":"uas_id"}
         cur     = _snap(e)
         changed = {k for k,v in cur.items() if (e.get("_last_shown") or {}).get(k)!=v}
         if changed:
@@ -4497,6 +6136,7 @@ def _emit_log(e: dict, changed_keys: set, reason: str) -> None:
     model = str(e.get("model","N/A"))
     it    = str(e.get("id_type",""))
     mac   = str(e.get("src_mac",""))
+    uas   = _uas_id_clean(e.get("uas_id"))
     lat   = _fmt(e.get("lat"),".6f")
     lon   = _fmt(e.get("lon"),".6f")
     alt   = _fmt(e.get("alt"),".1f","m")
@@ -4511,8 +6151,9 @@ def _emit_log(e: dict, changed_keys: set, reason: str) -> None:
     mv    = e.get("move_dir")
     md    = e.get("move_dist")
     mv_s  = f" dir={mv} d={md:.1f}m" if mv and md else ""
+    uas_s = f" uas={uas}" if uas else ""
     pfx   = "★" if reason=="first" else "→"
-    _log(f"{pfx} SN={sn} model={model} id={it} MAC={mac} "
+    _log(f"{pfx} SN={sn}{uas_s} model={model} id={it} MAC={mac} "
          f"loc={lat},{lon} alt={alt} spd={spd} vspd={vsp} rssi={rssi} {ch_s} "
          f"pkts={pkts} avg={avg_s}{mv_s}")
 
@@ -4617,6 +6258,7 @@ def _state_snapshot() -> dict:
             cur = live_by_sn.get(sn) or {}
             hist = history_table.get(sn) or cur
             scan_type_key = _scan_type_key(cur.get("scan_type", hist.get("scan_type", "rid")))
+            firmware_type_key = _firmware_type_key(cur.get("firmware_type", hist.get("firmware_type", "old")))
             if scan_type_key != "phone" and (len(sn) != 20 or (not sn.isalnum())):
                 continue
             model_name = _resolve_model_name(sn, scan_type_key, cur.get("model", hist.get("model")))
@@ -4638,6 +6280,7 @@ def _state_snapshot() -> dict:
             id_src = str(cur.get("id_type", hist.get("id_type","")) or "")
             sn_src = _sn_source_display(id_src)
             scan_type = _scan_type_display(scan_type_key)
+            firmware_type = _firmware_type_display(firmware_type_key)
             online_dur = None
             if cur:
                 if lost:
@@ -4668,7 +6311,10 @@ def _state_snapshot() -> dict:
             drones.append({
                 "sn": sn,
                 "sn_src": sn_src,
+                "uas_id": _uas_id_clean(cur.get("uas_id") or hist.get("uas_id","")),
                 "scan_type": scan_type,
+                "firmware_type": firmware_type,
+                "firmware_type_key": firmware_type_key,
                 "model": model_name,
                 "lost": lost,
                 "archived": sn not in live_by_sn,
@@ -4745,6 +6391,7 @@ def _state_snapshot() -> dict:
             "sniff_last_pkt": sniff_meta.get("last_pkt"),
             "sniff_last_err_at": sniff_meta.get("last_err_at"),
             "oobe": _oobe_state(),
+            "runtime_security": _runtime_security_payload(unit_text=""),
             "alert_zone": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zone"),
             "alert_zones": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zones"),
             "settings_path": "/settings",
@@ -4853,7 +6500,7 @@ def _check_app_update_once(manual: bool = False) -> dict:
             local_commit = _fallback_private_commit()
         req = urllib.request.Request(
             commit_url,
-            headers={"User-Agent": "LightRIDScanner/1.0 (+version check)"},
+            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+version check)"},
         )
         with urllib.request.urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read(256 * 1024).decode("utf-8", errors="replace"))
@@ -4891,6 +6538,7 @@ def _api_meta() -> dict:
     auth_configured = _auth_hashes_present(AUTH_CFG)
     api_configured = _api_tokens_have_secret(API_CFG)
     public_enabled = bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and auth_configured and api_configured
+    login_methods = _auth_login_methods()
     return {
         "name": API_NAME,
         "version": API_VERSION,
@@ -4902,6 +6550,7 @@ def _api_meta() -> dict:
             "configured": bool(auth_configured),
             "realm": str(AUTH_CFG.get("realm") or "Light RID Scanner"),
             "session_ttl_min": int(AUTH_CFG.get("session_ttl_min") or 30),
+            "login_methods": login_methods,
         },
         "public_api": {
             "enabled": bool(public_enabled),
@@ -5467,6 +7116,666 @@ def _auth_check_userpass_hash(username_sha256: str, password_sha256: str) -> boo
         return False
     return bool(hmac.compare_digest(u_in, u_hash) and hmac.compare_digest(p_in, p_hash))
 
+def _webauthn_b64u_encode(data: bytes | None) -> str:
+    raw = bytes(data or b"")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+def _webauthn_b64u_decode(text: str | None) -> bytes:
+    raw = str(text or "").strip()
+    if not raw:
+        return b""
+    raw += "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode(raw.encode("ascii"))
+
+def _webauthn_host_from_header(host_header: str | None) -> str:
+    host = str(host_header or "").strip().lower()
+    if not host:
+        return "localhost"
+    if host.startswith("[") and "]" in host:
+        host = host[1:host.index("]")]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host or "localhost"
+
+def _webauthn_origin_from_headers(headers) -> str:
+    host = _webauthn_host_from_header(headers.get("Host") if headers is not None else None)
+    if headers is not None:
+        proto = str(headers.get("X-Forwarded-Proto") or "").strip().lower()
+        if proto not in ("http", "https"):
+            origin = str(headers.get("Origin") or "").strip()
+            m = re.match(r"^(https?)://([^/]+)", origin)
+            if m:
+                proto = m.group(1).lower()
+        if proto not in ("http", "https"):
+            proto = "https" if str(headers.get("Upgrade-Insecure-Requests") or "") == "1" else "http"
+    else:
+        proto = "http"
+    return f"{proto}://{host}"
+
+def _webauthn_rp_id_from_headers(headers) -> str:
+    return _webauthn_host_from_header(headers.get("Host") if headers is not None else None)
+
+def _webauthn_user_handle() -> bytes:
+    seed = str(AUTH_CFG.get("username_sha256") or AUTH_CFG.get("realm") or "Light RID Scanner").strip()
+    if not seed:
+        seed = "Light RID Scanner"
+    return hashlib.sha256((seed + "|passkey").encode("utf-8", errors="ignore")).digest()
+
+_CBOR_BREAK = object()
+
+def _cbor_read_length(data: bytes, offset: int, ai: int) -> tuple[int | None, int]:
+    if ai < 24:
+        return ai, offset
+    if ai == 24:
+        return data[offset], offset + 1
+    if ai == 25:
+        return int.from_bytes(data[offset:offset + 2], "big"), offset + 2
+    if ai == 26:
+        return int.from_bytes(data[offset:offset + 4], "big"), offset + 4
+    if ai == 27:
+        return int.from_bytes(data[offset:offset + 8], "big"), offset + 8
+    if ai == 31:
+        return None, offset
+    raise ValueError("unsupported cbor length")
+
+def _cbor_decode_one(data: bytes, offset: int = 0):
+    if offset >= len(data):
+        raise ValueError("cbor truncated")
+    initial = data[offset]
+    offset += 1
+    major = initial >> 5
+    ai = initial & 31
+    if major in (0, 1):
+        n, offset = _cbor_read_length(data, offset, ai)
+        if n is None:
+            raise ValueError("indefinite integer")
+        return (n if major == 0 else -1 - n), offset
+    if major in (2, 3):
+        length, offset = _cbor_read_length(data, offset, ai)
+        if length is None:
+            chunks: list[bytes] = []
+            while True:
+                if offset >= len(data):
+                    raise ValueError("cbor truncated")
+                if data[offset] == 0xFF:
+                    offset += 1
+                    break
+                part, offset = _cbor_decode_one(data, offset)
+                if major == 2:
+                    if not isinstance(part, (bytes, bytearray)):
+                        raise ValueError("invalid cbor chunk")
+                    chunks.append(bytes(part))
+                else:
+                    if not isinstance(part, str):
+                        raise ValueError("invalid cbor chunk")
+                    chunks.append(part.encode("utf-8"))
+            raw = b"".join(chunks)
+            return (raw if major == 2 else raw.decode("utf-8", errors="replace")), offset
+        raw = data[offset:offset + length]
+        offset += length
+        return (bytes(raw) if major == 2 else raw.decode("utf-8", errors="replace")), offset
+    if major == 4:
+        length, offset = _cbor_read_length(data, offset, ai)
+        items = []
+        if length is None:
+            while True:
+                if offset >= len(data):
+                    raise ValueError("cbor truncated")
+                if data[offset] == 0xFF:
+                    offset += 1
+                    break
+                item, offset = _cbor_decode_one(data, offset)
+                items.append(item)
+        else:
+            for _ in range(length):
+                item, offset = _cbor_decode_one(data, offset)
+                items.append(item)
+        return items, offset
+    if major == 5:
+        length, offset = _cbor_read_length(data, offset, ai)
+        items = {}
+        if length is None:
+            while True:
+                if offset >= len(data):
+                    raise ValueError("cbor truncated")
+                if data[offset] == 0xFF:
+                    offset += 1
+                    break
+                key, offset = _cbor_decode_one(data, offset)
+                val, offset = _cbor_decode_one(data, offset)
+                items[key] = val
+        else:
+            for _ in range(length):
+                key, offset = _cbor_decode_one(data, offset)
+                val, offset = _cbor_decode_one(data, offset)
+                items[key] = val
+        return items, offset
+    if major == 6:
+        _tag, offset = _cbor_read_length(data, offset, ai)
+        return _cbor_decode_one(data, offset)
+    if major == 7:
+        if ai == 20:
+            return False, offset
+        if ai == 21:
+            return True, offset
+        if ai in (22, 23):
+            return None, offset
+        if ai == 24:
+            return data[offset], offset + 1
+        if ai == 25:
+            raw = int.from_bytes(data[offset:offset + 2], "big")
+            offset += 2
+            sign = (raw >> 15) & 1
+            exp = (raw >> 10) & 0x1F
+            frac = raw & 0x3FF
+            val = (1 if sign == 0 else -1) * (2 ** (exp - 15)) * (1 + frac / 1024.0)
+            return val, offset
+        if ai == 26:
+            return struct.unpack(">f", data[offset:offset + 4])[0], offset + 4
+        if ai == 27:
+            return struct.unpack(">d", data[offset:offset + 8])[0], offset + 8
+        if ai == 31:
+            return _CBOR_BREAK, offset
+    raise ValueError("unsupported cbor type")
+
+def _cbor_loads(data: bytes):
+    value, offset = _cbor_decode_one(bytes(data or b""))
+    if offset != len(data):
+        raise ValueError("cbor trailing data")
+    return value
+
+def _webauthn_decode_json(data: bytes | str | None) -> dict:
+    raw = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data or "")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("client data must be object")
+    return parsed
+
+def _webauthn_public_key_coords(public_key) -> tuple[int, int]:
+    if not isinstance(public_key, dict):
+        raise ValueError("public key missing")
+    x_raw = public_key.get("x")
+    y_raw = public_key.get("y")
+    if not x_raw or not y_raw:
+        raise ValueError("public key missing coordinates")
+    def _decode_coord(raw):
+        text = str(raw or "").strip()
+        if not text:
+            raise ValueError("empty coordinate")
+        if re.fullmatch(r"[0-9a-fA-F]{64}", text):
+            return int.from_bytes(bytes.fromhex(text), "big")
+        buf = _webauthn_b64u_decode(text)
+        if len(buf) != 32:
+            raise ValueError("invalid coordinate length")
+        return int.from_bytes(buf, "big")
+    return _decode_coord(x_raw), _decode_coord(y_raw)
+
+_P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+_P256_A = (_P256_P - 3) % _P256_P
+_P256_B = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+_P256_GX = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
+_P256_GY = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
+_P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+_P256_G = (_P256_GX, _P256_GY)
+
+def _p256_on_curve(point: tuple[int, int] | None) -> bool:
+    if point is None:
+        return True
+    x, y = point
+    if not (0 <= x < _P256_P and 0 <= y < _P256_P):
+        return False
+    return (y * y - (x * x * x + _P256_A * x + _P256_B)) % _P256_P == 0
+
+def _p256_point_add(p: tuple[int, int] | None, q: tuple[int, int] | None) -> tuple[int, int] | None:
+    if p is None:
+        return q
+    if q is None:
+        return p
+    x1, y1 = p
+    x2, y2 = q
+    if x1 == x2:
+        if (y1 + y2) % _P256_P == 0:
+            return None
+        slope = ((3 * x1 * x1 + _P256_A) * pow(2 * y1, -1, _P256_P)) % _P256_P
+    else:
+        slope = ((y2 - y1) * pow((x2 - x1) % _P256_P, -1, _P256_P)) % _P256_P
+    x3 = (slope * slope - x1 - x2) % _P256_P
+    y3 = (slope * (x1 - x3) - y1) % _P256_P
+    return x3, y3
+
+def _p256_point_mul(k: int, point: tuple[int, int] | None) -> tuple[int, int] | None:
+    if point is None:
+        return None
+    if k % _P256_N == 0:
+        return None
+    result = None
+    addend = point
+    n = k % _P256_N
+    while n:
+        if n & 1:
+            result = _p256_point_add(result, addend)
+        addend = _p256_point_add(addend, addend)
+        n >>= 1
+    return result
+
+def _ecdsa_parse_der_signature(sig: bytes) -> tuple[int, int]:
+    raw = bytes(sig or b"")
+    if len(raw) < 8 or raw[0] != 0x30:
+        raise ValueError("invalid signature")
+    total_len = raw[1]
+    idx = 2
+    if total_len & 0x80:
+        n_len = total_len & 0x7F
+        total_len = int.from_bytes(raw[idx:idx + n_len], "big")
+        idx += n_len
+    if idx + total_len > len(raw):
+        raise ValueError("invalid signature length")
+    def read_int() -> int:
+        nonlocal idx
+        if idx >= len(raw) or raw[idx] != 0x02:
+            raise ValueError("invalid signature integer")
+        idx += 1
+        if idx >= len(raw):
+            raise ValueError("invalid signature integer length")
+        ln = raw[idx]
+        idx += 1
+        if ln & 0x80:
+            n_len = ln & 0x7F
+            ln = int.from_bytes(raw[idx:idx + n_len], "big")
+            idx += n_len
+        val = int.from_bytes(raw[idx:idx + ln], "big")
+        idx += ln
+        return val
+    r = read_int()
+    s = read_int()
+    return r, s
+
+def _ecdsa_verify_p256(public_key: dict, message_hash: bytes, signature: bytes) -> bool:
+    try:
+        x, y = _webauthn_public_key_coords(public_key)
+    except Exception:
+        return False
+    if not _p256_on_curve((x, y)):
+        return False
+    try:
+        r, s = _ecdsa_parse_der_signature(signature)
+    except Exception:
+        return False
+    if not (1 <= r < _P256_N and 1 <= s < _P256_N):
+        return False
+    e = int.from_bytes(bytes(message_hash or b""), "big")
+    w = pow(s, -1, _P256_N)
+    u1 = (e * w) % _P256_N
+    u2 = (r * w) % _P256_N
+    p = _p256_point_add(_p256_point_mul(u1, _P256_G), _p256_point_mul(u2, (x, y)))
+    if p is None:
+        return False
+    return (p[0] % _P256_N) == r
+
+def _webauthn_parse_attestation_object(raw: bytes) -> dict:
+    obj = _cbor_loads(bytes(raw or b""))
+    if not isinstance(obj, dict):
+        raise ValueError("attestation object must be map")
+    fmt = str(obj.get("fmt") or "").strip().lower()
+    auth_data = obj.get("authData")
+    if fmt != "none":
+        raise ValueError("only none attestation is supported")
+    if not isinstance(auth_data, (bytes, bytearray)) or len(auth_data) < 37:
+        raise ValueError("authData missing")
+    auth = bytes(auth_data)
+    rp_id_hash = auth[:32]
+    flags = auth[32]
+    sign_count = int.from_bytes(auth[33:37], "big")
+    offset = 37
+    if not (flags & 0x40):
+        raise ValueError("credential data missing")
+    if offset + 16 + 2 > len(auth):
+        raise ValueError("credential data truncated")
+    aaguid = auth[offset:offset + 16]
+    offset += 16
+    cred_len = int.from_bytes(auth[offset:offset + 2], "big")
+    offset += 2
+    if offset + cred_len > len(auth):
+        raise ValueError("credential id truncated")
+    cred_id = auth[offset:offset + cred_len]
+    offset += cred_len
+    public_key, offset = _cbor_decode_one(auth, offset)
+    if offset > len(auth):
+        raise ValueError("public key truncated")
+    if not isinstance(public_key, dict):
+        raise ValueError("public key missing")
+    cose_kty = public_key.get(1)
+    cose_alg = public_key.get(3)
+    cose_crv = public_key.get(-1)
+    x = public_key.get(-2)
+    y = public_key.get(-3)
+    if cose_kty != 2 or cose_alg != -7 or cose_crv != 1 or not x or not y:
+        raise ValueError("unsupported credential public key")
+    return {
+        "auth_data": auth,
+        "rp_id_hash": rp_id_hash,
+        "flags": flags,
+        "credential_id": bytes(cred_id),
+        "sign_count": sign_count,
+        "public_key": {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": _webauthn_b64u_encode(bytes(x) if isinstance(x, (bytes, bytearray)) else b""),
+            "y": _webauthn_b64u_encode(bytes(y) if isinstance(y, (bytes, bytearray)) else b""),
+        },
+        "aaguid": _webauthn_b64u_encode(aaguid),
+    }
+
+# -----------------------------------------------------------------------------
+# WebAuthn / passkey helpers
+# -----------------------------------------------------------------------------
+def _auth_passkeys_public(auth_cfg: dict | None = None) -> list[dict]:
+    source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
+    out: list[dict] = []
+    for item in _normalize_passkeys(source.get("passkeys")):
+        out.append({
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or ""),
+            "enabled": bool(item.get("enabled", True)),
+            "created_ts": float(item.get("created_ts") or 0.0),
+            "last_used_ts": float(item.get("last_used_ts") or 0.0),
+            "sign_count": int(item.get("sign_count") or 0),
+        })
+    return out
+
+def _passkey_timeout_ms() -> int:
+    return int(PASSKEY_CHALLENGE_TTL_SEC * 1000)
+
+def _auth_mutate_passkeys(mutator, *, tag: str = "passkey") -> tuple[bool, str, list[dict]]:
+    if not APP_CONFIG_PATH:
+        return False, "config path missing", _auth_passkeys_public()
+    try:
+        with auth_passkey_lock:
+            cfg = load_app_config(APP_CONFIG_PATH)
+            auth = cfg.setdefault("auth", {})
+            if not isinstance(auth, dict):
+                auth = {}
+                cfg["auth"] = auth
+            items = _normalize_passkeys(auth.get("passkeys"))
+            auth["passkeys"] = _normalize_passkeys(mutator(list(items)))
+            # Passkey changes must stay aligned with the saved config and the
+            # in-memory auth runtime, so save + reload are handled as one flow.
+            cfg, guard_err = _prepare_security_cfg_for_save(cfg)
+            if guard_err:
+                return False, guard_err, _auth_passkeys_public()
+            b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag=tag)
+            if not b_ok:
+                return False, f"backup failed: {backup_path}", _auth_passkeys_public()
+            ok, msg = save_app_config(APP_CONFIG_PATH, cfg)
+            if not ok:
+                return False, msg, _auth_passkeys_public()
+            cfg_loaded = load_app_config(APP_CONFIG_PATH)
+            r_ok, r_msg = reload_runtime_config(cfg_loaded)
+            if not r_ok:
+                return False, f"reload failed: {r_msg}", _auth_passkeys_public()
+            auth_loaded = cfg_loaded.get("auth") if isinstance(cfg_loaded, dict) else None
+            return True, "ok", _auth_passkeys_public(auth_loaded if isinstance(auth_loaded, dict) else None)
+    except Exception as e:
+        return False, str(e), _auth_passkeys_public()
+
+def _passkey_cleanup(now_wall: float | None = None) -> None:
+    now_wall = float(now_wall or time.time())
+    with passkey_challenge_lock:
+        stale = [k for k, v in passkey_challenges.items() if float((v or {}).get("expires_at") or 0.0) <= now_wall]
+        for key in stale:
+            passkey_challenges.pop(key, None)
+
+def _passkey_challenge_new(kind: str, data: dict | None = None, *, ttl_sec: int = PASSKEY_CHALLENGE_TTL_SEC) -> dict:
+    now_wall = time.time()
+    token = secrets.token_urlsafe(24)
+    row = dict(data or {})
+    row.update({
+        "kind": kind,
+        "challenge": token,
+        "created_ts": now_wall,
+        "expires_at": now_wall + max(60, int(ttl_sec or PASSKEY_CHALLENGE_TTL_SEC)),
+    })
+    with passkey_challenge_lock:
+        passkey_challenges[token] = row
+        if len(passkey_challenges) > 1024:
+            _passkey_cleanup(now_wall=now_wall)
+    return row
+
+def _passkey_challenge_take(token: str | None, kind: str | None = None) -> dict | None:
+    raw = str(token or "").strip()
+    if not raw:
+        return None
+    now_wall = time.time()
+    with passkey_challenge_lock:
+        row = passkey_challenges.pop(raw, None)
+    if not isinstance(row, dict):
+        return None
+    if float(row.get("expires_at") or 0.0) <= now_wall:
+        return None
+    if kind and str(row.get("kind") or "") != kind:
+        return None
+    return row
+
+def _passkey_options_public(passkeys: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for item in passkeys:
+        cred_id = str(item.get("id") or "").strip()
+        if not cred_id or not bool(item.get("enabled", True)):
+            continue
+        out.append({
+            "type": "public-key",
+            "id": cred_id,
+            "transports": ["internal", "hybrid", "usb", "nfc", "ble"],
+        })
+    return out
+
+def _passkey_record_payload(passkey_name: str | None = None) -> str:
+    name = str(passkey_name or "").strip()
+    if name:
+        return name[:80]
+    return "通行密钥 " + time.strftime("%Y-%m-%d %H:%M:%S")
+
+def _passkey_login_begin(headers) -> dict:
+    if not _auth_enabled() or not _auth_hashes_present(AUTH_CFG):
+        return {"ok": False, "error": "网页登录账号密码未配置完整"}
+    if not _auth_login_method_enabled("passkey"):
+        return {"ok": False, "error": "PassKey 登录已关闭"}
+    items = [item for item in _normalize_passkeys(AUTH_CFG.get("passkeys")) if bool(item.get("enabled", True))]
+    if not items:
+        return {"ok": False, "error": "暂无可用的通行密钥"}
+    rp_id = _webauthn_rp_id_from_headers(headers)
+    origin = _webauthn_origin_from_headers(headers)
+    row = _passkey_challenge_new("login", {
+        "rp_id": rp_id,
+        "origin": origin,
+        "allow_credentials": [str(item.get("id") or "") for item in items],
+    })
+    return {
+        "ok": True,
+        "challenge": row["challenge"],
+        "challenge_token": row["challenge"],
+        "rp_id": rp_id,
+        "origin": origin,
+        "timeout_ms": _passkey_timeout_ms(),
+        "allow_credentials": _passkey_options_public(items),
+        "passkeys": _auth_passkeys_public(),
+        "realm": str(AUTH_CFG.get("realm") or "Light RID Scanner"),
+    }
+
+def _passkey_register_begin(body: dict | None, headers, *, client_ip: str | None = None) -> dict:
+    if not _auth_enabled() or not _auth_hashes_present(AUTH_CFG):
+        return {"ok": False, "error": "网页登录账号密码未配置完整"}, 400
+    if not _auth_login_method_enabled("passkey"):
+        return {"ok": False, "error": "PassKey 登录已关闭"}, 403
+    src = body if isinstance(body, dict) else {}
+    user = str(src.get("username") or "").strip()
+    pwd = str(src.get("password") or "")
+    if not user or not pwd:
+        return {"ok": False, "error": "请同时提供账号和密码"}, 400
+    if not _auth_check_userpass(user, pwd):
+        _op_log("passkey-register", "start auth failed", actor=user or "-", ip=str(client_ip or "-"), ok=False)
+        return {"ok": False, "error": "账号或密码错误"}, 401
+    rp_id = _webauthn_rp_id_from_headers(headers)
+    origin = _webauthn_origin_from_headers(headers)
+    realm = str(AUTH_CFG.get("realm") or "Light RID Scanner")
+    passkey_name = _passkey_record_payload(src.get("name") or src.get("label"))
+    row = _passkey_challenge_new("register", {
+        "rp_id": rp_id,
+        "origin": origin,
+        "passkey_name": passkey_name,
+        "user_handle": _webauthn_b64u_encode(_webauthn_user_handle()),
+    })
+    return {
+        "ok": True,
+        "challenge": row["challenge"],
+        "challenge_token": row["challenge"],
+        "rp_id": rp_id,
+        "origin": origin,
+        "timeout_ms": _passkey_timeout_ms(),
+        "publicKey": {
+            "challenge": row["challenge"],
+            "rp": {"name": realm, "id": rp_id},
+            "user": {
+                "id": _webauthn_b64u_encode(_webauthn_user_handle()),
+                "name": user,
+                "displayName": passkey_name,
+            },
+            "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+            "timeout": _passkey_timeout_ms(),
+            "attestation": "none",
+            "authenticatorSelection": {
+                "userVerification": "preferred",
+                "residentKey": "preferred",
+            },
+            "excludeCredentials": _passkey_options_public(_normalize_passkeys(AUTH_CFG.get("passkeys"))),
+        },
+        "passkey_name": passkey_name,
+        "realm": realm,
+    }
+
+def _passkey_finish_register(body: dict | None, headers, *, client_ip: str | None = None) -> dict:
+    if not _auth_login_method_enabled("sso"):
+        return {"ok": False, "error": "SSO URL 登录已关闭"}, 403
+    src = body if isinstance(body, dict) else {}
+    token = str(src.get("challenge") or src.get("challenge_token") or "").strip()
+    row = _passkey_challenge_take(token, "register")
+    if not row:
+        return {"ok": False, "error": "challenge expired"}, 400
+    expected_origin = str(row.get("origin") or "")
+    expected_rp_id = str(row.get("rp_id") or "")
+    response = src.get("response") if isinstance(src.get("response"), dict) else {}
+    try:
+        # Registration accepts a new credential only after challenge, origin,
+        # and rpId validation succeed against the stored single-use challenge.
+        client_data_raw = _webauthn_b64u_decode(str(response.get("clientDataJSON") or ""))
+        client_data = _webauthn_decode_json(client_data_raw)
+        if str(client_data.get("type") or "") != "webauthn.create":
+            raise ValueError("invalid client data type")
+        if str(client_data.get("challenge") or "") != token:
+            raise ValueError("challenge mismatch")
+        if str(client_data.get("origin") or "") != expected_origin:
+            raise ValueError("origin mismatch")
+        att_obj = _webauthn_parse_attestation_object(_webauthn_b64u_decode(str(response.get("attestationObject") or "")))
+        cred_id = bytes(att_obj.get("credential_id") or b"")
+        if not cred_id:
+            raise ValueError("credential id missing")
+        if str(expected_rp_id) and hashlib.sha256(expected_rp_id.encode("utf-8", errors="ignore")).digest() != bytes(att_obj.get("rp_id_hash") or b""):
+            raise ValueError("rpId mismatch")
+        passkey_name = str(src.get("name") or row.get("passkey_name") or "通行密钥").strip() or "通行密钥"
+        cred_id_text = _webauthn_b64u_encode(cred_id)
+        public_key = att_obj.get("public_key") if isinstance(att_obj.get("public_key"), dict) else {}
+        sign_count = int(att_obj.get("sign_count") or 0)
+    except Exception as e:
+        _op_log("passkey-register", f"finish error={e}", actor=str(src.get("username") or "-"), ip=str(client_ip or "-"), ok=False)
+        return {"ok": False, "error": str(e)}, 400
+    def _add_passkey(items):
+        items = [dict(item or {}) for item in items]
+        items = [item for item in items if str(item.get("id") or "") != cred_id_text]
+        items.append({
+            "id": cred_id_text,
+            "name": passkey_name,
+            "user_handle": str(row.get("user_handle") or ""),
+            "public_key": public_key,
+            "sign_count": sign_count,
+            "created_ts": time.time(),
+            "last_used_ts": 0.0,
+            "enabled": True,
+        })
+        return items[-32:]
+    ok, msg, passkeys = _auth_mutate_passkeys(_add_passkey, tag="passkey_create")
+    if not ok:
+        return {"ok": False, "error": msg, "passkeys": passkeys}, 500
+    _op_log("passkey-register", f"ok name={passkey_name}", actor=str(src.get("username") or "-"), ip=str(client_ip or "-"), ok=True)
+    return {"ok": True, "passkeys": passkeys, "passkey_name": passkey_name}, 200
+
+def _passkey_finish_login(body: dict | None, headers, *, client_ip: str | None = None) -> dict:
+    if not _auth_enabled() or not _auth_hashes_present(AUTH_CFG):
+        return {"ok": False, "error": "网页登录账号密码未配置完整"}, 400
+    if not _auth_login_method_enabled("passkey"):
+        return {"ok": False, "error": "PassKey 登录已关闭"}, 403
+    src = body if isinstance(body, dict) else {}
+    token = str(src.get("challenge") or src.get("challenge_token") or "").strip()
+    row = _passkey_challenge_take(token, "login")
+    if not row:
+        return {"ok": False, "error": "challenge expired"}, 400
+    expected_origin = str(row.get("origin") or "")
+    expected_rp_id = str(row.get("rp_id") or "")
+    response = src.get("response") if isinstance(src.get("response"), dict) else {}
+    cred_id = str(src.get("id") or src.get("rawId") or "").strip()
+    if not cred_id:
+        return {"ok": False, "error": "credential id required"}, 400
+    passkey_row = None
+    for item in _normalize_passkeys(AUTH_CFG.get("passkeys")):
+        if str(item.get("id") or "") == cred_id and bool(item.get("enabled", True)):
+            passkey_row = dict(item)
+            break
+    if not passkey_row:
+        return {"ok": False, "error": "unknown passkey"}, 401
+    try:
+        # Login verification stays fully local: validate challenge/origin/rpId,
+        # then verify the signature against the stored credential public key.
+        client_data_raw = _webauthn_b64u_decode(str(response.get("clientDataJSON") or ""))
+        client_data = _webauthn_decode_json(client_data_raw)
+        if str(client_data.get("type") or "") != "webauthn.get":
+            raise ValueError("invalid client data type")
+        if str(client_data.get("challenge") or "") != token:
+            raise ValueError("challenge mismatch")
+        if str(client_data.get("origin") or "") != expected_origin:
+            raise ValueError("origin mismatch")
+        auth_data = _webauthn_b64u_decode(str(response.get("authenticatorData") or ""))
+        signature = _webauthn_b64u_decode(str(response.get("signature") or ""))
+        if len(auth_data) < 37 or not signature:
+            raise ValueError("invalid assertion response")
+        if expected_rp_id and hashlib.sha256(expected_rp_id.encode("utf-8", errors="ignore")).digest() != auth_data[:32]:
+            raise ValueError("rpId mismatch")
+        flags = auth_data[32]
+        if not (flags & 0x01):
+            raise ValueError("user presence required")
+        message_hash = hashlib.sha256(auth_data + hashlib.sha256(client_data_raw).digest()).digest()
+        if not _ecdsa_verify_p256(passkey_row.get("public_key") or {}, message_hash, signature):
+            raise ValueError("signature mismatch")
+        sign_count = int.from_bytes(auth_data[33:37], "big")
+    except Exception as e:
+        _op_log("passkey-login", f"finish error={e}", actor=str(passkey_row.get("name") or "-"), ip=str(client_ip or "-"), ok=False)
+        return {"ok": False, "error": str(e)}, 401
+    def _touch_passkey(items):
+        now_wall = time.time()
+        out = []
+        for item in items:
+            row_item = dict(item or {})
+            if str(row_item.get("id") or "") == cred_id:
+                row_item["last_used_ts"] = now_wall
+                if sign_count > int(row_item.get("sign_count") or 0):
+                    row_item["sign_count"] = sign_count
+            out.append(row_item)
+        return out
+    ok, _msg, _ = _auth_mutate_passkeys(_touch_passkey, tag="passkey_use")
+    if not ok:
+        _log("[WARN] passkey usage update failed: " + str(_msg))
+    self_tok = _auth_issue_session()
+    _op_log("passkey-login", "login ok", actor=str(passkey_row.get("name") or "-"), ip=str(client_ip or "-"), ok=True)
+    return {"ok": True, "next": str(src.get("next") or "/") or "/", "session": self_tok}, 200
+
 def _auth_sso_path(check: str, next_path: str = "/") -> str:
     from urllib.parse import quote
     target = str(next_path or "/").strip() or "/"
@@ -5521,6 +7830,8 @@ def _auth_check_sso_link(username_sha256: str, password_sha256: str, check: str 
     raw_check = str(check or "").strip()
     if not raw_check:
         return None
+    if not _auth_login_method_enabled("sso"):
+        return None
     if not _auth_check_userpass_hash(username_sha256, password_sha256):
         return None
     for item in _normalize_sso_links(AUTH_CFG.get("sso_links")):
@@ -5551,6 +7862,8 @@ def _auth_mark_sso_used(check: str | None) -> bool:
 def _build_sso_link_payload(body: dict | None, *, require_reauth: bool = True, headers=None, client_ip: str | None = None) -> tuple[dict, int]:
     if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
         return {"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400
+    if not _auth_login_method_enabled("sso"):
+        return {"ok": False, "error": "SSO URL 登录已关闭"}, 403
     src = body if isinstance(body, dict) else {}
     subject = str(src.get("username") or "-")
     if require_reauth:
@@ -5870,37 +8183,118 @@ def _host_mem_stats() -> dict:
         return {"percent": None, "used_mb": None, "total_mb": None}
 
 
-def _host_temperature_c() -> float | None:
-    paths: list[str] = []
-    for root in ("/sys/class/thermal", "/sys/class/hwmon"):
-        try:
-            for dirpath, _dirs, files in os.walk(root):
-                for name in files:
-                    if name == "temp" or (name.startswith("temp") and name.endswith("_input")):
-                        paths.append(os.path.join(dirpath, name))
-        except Exception:
-            continue
-    for path in paths[:24]:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                raw = f.read().strip()
-            if not raw:
-                continue
-            value = float(raw)
-            if abs(value) > 250:
-                value = value / 1000.0
-            if -40.0 <= value <= 140.0:
-                return round(value, 1)
-        except Exception:
-            continue
+def _host_temperature_from_vcgencmd() -> float | None:
     try:
-        out = subprocess.run("vcgencmd measure_temp", shell=True, capture_output=True, text=True, timeout=3)
+        out = subprocess.run(["vcgencmd", "measure_temp"], capture_output=True, text=True, timeout=3)
         m = re.search(r"(-?\d+(?:\.\d+)?)", (out.stdout or "") + (out.stderr or ""))
         if m:
-            return round(float(m.group(1)), 1)
+            value = float(m.group(1))
+            if -40.0 <= value <= 125.0:
+                return round(value, 1)
     except Exception:
         pass
     return None
+
+
+def _host_temperature_from_sysfs(*roots: str) -> float | None:
+    candidates: list[tuple[int, float, str]] = []
+    for root in roots:
+        try:
+            for dirpath, _dirs, files in os.walk(root):
+                label = ""
+                base = os.path.basename(dirpath).lower()
+                try:
+                    if base.startswith("thermal_zone") and "type" in files:
+                        with open(os.path.join(dirpath, "type"), "r", encoding="utf-8", errors="ignore") as f:
+                            label = f.read().strip().lower()
+                except Exception:
+                    label = ""
+                for name in files:
+                    if not (name == "temp" or (name.startswith("temp") and name.endswith("_input"))):
+                        continue
+                    path = os.path.join(dirpath, name)
+                    sensor_label = label
+                    if not sensor_label and base.startswith("hwmon") and "_input" in name:
+                        label_name = name[:-6] + "_label"
+                        try:
+                            with open(os.path.join(dirpath, label_name), "r", encoding="utf-8", errors="ignore") as f:
+                                sensor_label = f.read().strip().lower()
+                        except Exception:
+                            sensor_label = label
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                            raw = f.read().strip()
+                        if not raw:
+                            continue
+                        value = float(raw)
+                        if abs(value) > 250:
+                            value = value / 1000.0
+                        if not (-40.0 <= value <= 140.0):
+                            continue
+                    except Exception:
+                        continue
+                    score = 20
+                    if base.startswith("thermal_zone"):
+                        score -= 8
+                    if any(k in sensor_label for k in ("cpu", "package", "soc", "board", "thermal", "system")):
+                        score -= 10
+                    if any(k in sensor_label for k in ("max", "crit", "limit", "trip", "hot")):
+                        score += 12
+                    if value >= 95.0 and not any(k in sensor_label for k in ("cpu", "package", "soc", "board")):
+                        score += 8
+                    candidates.append((score, float(value), path))
+        except Exception:
+            continue
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], abs(item[1] - 55.0), item[1]))
+        best = candidates[0]
+        if best[1] >= 95.0:
+            for item in candidates[1:]:
+                if item[1] < 95.0 and item[0] <= best[0] + 8:
+                    best = item
+                    break
+        return round(best[1], 1)
+    return None
+
+
+def _host_temperature_read() -> tuple[float | None, str]:
+    source = str(METRICS_CFG.get("temperature_source") or "auto")
+    if source == "off":
+        return None, "off"
+    probes = []
+    if source == "vcgencmd":
+        probes = [("vcgencmd", _host_temperature_from_vcgencmd)]
+    elif source == "thermal_zone":
+        probes = [("thermal_zone", lambda: _host_temperature_from_sysfs("/sys/class/thermal"))]
+    elif source == "hwmon":
+        probes = [("hwmon", lambda: _host_temperature_from_sysfs("/sys/class/hwmon"))]
+    else:
+        probes = [
+            ("vcgencmd", _host_temperature_from_vcgencmd),
+            ("thermal_zone", lambda: _host_temperature_from_sysfs("/sys/class/thermal")),
+            ("hwmon", lambda: _host_temperature_from_sysfs("/sys/class/hwmon")),
+        ]
+    for key, probe in probes:
+        value = probe()
+        if value is not None:
+            return value, key
+    return None, source
+
+
+def _host_temperature_c() -> float | None:
+    value, _source = _host_temperature_read()
+    return value
+
+
+def _host_temperature_source_label(source: str | None) -> str:
+    key = str(source or "").strip().lower().replace("-", "_")
+    return {
+        "auto": "自动",
+        "vcgencmd": "vcgencmd",
+        "thermal_zone": "/sys/class/thermal",
+        "hwmon": "/sys/class/hwmon",
+        "off": "关闭",
+    }.get(key, "自动")
 
 
 def _host_local_ips() -> list[str]:
@@ -5926,6 +8320,7 @@ def _host_local_ips() -> list[str]:
 
 
 def _host_resource_snapshot() -> dict:
+    temperature_c, temperature_source = _host_temperature_read()
     mem = _host_mem_stats()
     uptime_sec = None
     try:
@@ -5945,7 +8340,9 @@ def _host_resource_snapshot() -> dict:
         "mem_percent": mem.get("percent"),
         "mem_used_mb": mem.get("used_mb"),
         "mem_total_mb": mem.get("total_mb"),
-        "temperature_c": _host_temperature_c(),
+        "temperature_c": temperature_c,
+        "temperature_source": temperature_source,
+        "temperature_source_label": _host_temperature_source_label(temperature_source),
         "local_ips": _host_local_ips(),
         "load1": (None if load1 is None else round(float(load1), 2)),
         "load5": (None if load5 is None else round(float(load5), 2)),
@@ -6052,6 +8449,8 @@ def _host_metrics_payload(window_sec: int = 24 * 3600) -> dict:
         "ok": True,
         "window_sec": int(window_sec),
         "retention_days": int(METRICS_CFG.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT),
+        "temperature_source": str(METRICS_CFG.get("temperature_source") or "auto"),
+        "temperature_source_label": _host_temperature_source_label(METRICS_CFG.get("temperature_source")),
         "sample_interval_sec": int(HOST_METRICS_SAMPLE_SEC),
         "store_path": HOST_METRICS_PATH,
         "count": len(rows),
@@ -6309,6 +8708,12 @@ header h1{font-size:20px;font-weight:600;color:var(--txt);letter-spacing:.01em;t
   background:color-mix(in srgb, var(--yellow) 11%, var(--panel));
   color:#f5e2a8;
 }
+.security-banner{
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.security-banner .btn-mini{flex:0 0 auto}
 .banner-stack{
   position:fixed;top:10px;left:50%;transform:translateX(-50%);
   display:flex;flex-direction:column;gap:8px;z-index:9998;
@@ -6384,13 +8789,14 @@ td{padding:8px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;fo
 .empty{text-align:center;padding:40px;color:var(--dim);font-size:15px}
 th:nth-child(1),td:nth-child(1){width:46px}
 th:nth-child(2),td:nth-child(2){width:46px}
-th:nth-child(3),td:nth-child(3){width:360px}
+th:nth-child(3),td:nth-child(3){width:330px}
 th:nth-child(4),td:nth-child(4){width:132px}
 th:nth-child(5),td:nth-child(5){width:96px}
 th:nth-child(6),td:nth-child(6){width:62px}
 th:nth-child(7),td:nth-child(7){width:68px}
 th:nth-child(8),td:nth-child(8){width:92px}
-th:nth-child(9),td:nth-child(9),th:nth-child(10),td:nth-child(10){width:176px}
+th:nth-child(9),td:nth-child(9){width:176px}
+th:nth-child(10),td:nth-child(10){width:112px}
 .sel-wrap{display:flex;align-items:center;justify-content:center}
 .sel-sn{width:16px;height:16px;accent-color:var(--blue);cursor:pointer}
 .idx-cell{color:var(--dim);text-align:center}
@@ -6611,11 +9017,16 @@ body.bottom-all-collapsed{
 }
 body.bottom-all-collapsed #bottom-restore{display:inline-flex}
 .sn-cell{display:flex;align-items:center;gap:6px;min-width:0}
+.sn-text-stack{display:flex;flex-direction:column;gap:2px;min-width:0}
 .sn-cell .mono{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.uas-line{font:700 11px/1.2 var(--font-mono);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.uas-line.empty{opacity:.6}
 .sn-badge{
   display:inline-block;padding:1px 6px;border-radius:999px;font-size:11px;
   border:1px solid color-mix(in srgb, var(--yellow) 38%, var(--border));background:color-mix(in srgb, var(--yellow) 12%, var(--panel2));color:#ffd85f;line-height:1.3;flex:0 0 auto;
 }
+.sn-badge.firmware-new{border-color:rgba(46,204,113,.55);background:rgba(46,204,113,.14);color:#98f5be}
+.sn-badge.firmware-old{border-color:color-mix(in srgb, var(--blue) 34%, var(--border));background:color-mix(in srgb, var(--blue) 9%, var(--panel2));color:#9fd0ff}
 .sn-badge.alarm{border-color:rgba(255,79,79,.72);background:rgba(255,79,79,.16);color:#ffb3ae}
 .icon-btn{
   border:1px solid var(--border);background:var(--panel2);color:var(--dim);
@@ -6755,6 +9166,8 @@ body.theme-light .icon-btn{
 body.theme-light .icon-btn:hover{background:color-mix(in srgb, var(--blue) 8%, var(--panel2));color:var(--txt)}
 body.theme-light .icon-btn.done{border-color:color-mix(in srgb, var(--green) 38%, var(--border));color:#0f7a3b}
 body.theme-light .sn-badge{border-color:color-mix(in srgb, var(--yellow) 35%, var(--border));background:color-mix(in srgb, var(--yellow) 12%, var(--panel2));color:#7b5b00}
+body.theme-light .sn-badge.firmware-new{border-color:rgba(21,128,61,.38);background:rgba(21,128,61,.09);color:#166534}
+body.theme-light .sn-badge.firmware-old{border-color:color-mix(in srgb, var(--blue) 30%, var(--border));background:color-mix(in srgb, var(--blue) 8%, var(--panel2));color:#1f4e79}
 body.theme-light .sn-badge.alarm{border-color:rgba(209,52,56,.55);background:rgba(209,52,56,.10);color:#a4262c}
 body.theme-light tbody td.hl{
   background-color:rgba(250,213,97,calc(var(--hl-alpha,.0) * .52));
@@ -6817,7 +9230,7 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 <div class="tbl-wrap">
 <table id="dtable">
 <thead><tr>
-  <th><div class="sel-wrap"><input id="sel-all" class="sel-sn" type="checkbox" title="全选"></div></th><th>#</th><th>SN</th><th>机型</th><th>信号</th><th>包</th><th>方向</th><th>数据更新</th><th>末次发现</th><th>最后数据包</th>
+  <th><div class="sel-wrap"><input id="sel-all" class="sel-sn" type="checkbox" title="全选"></div></th><th>#</th><th>SN</th><th>机型</th><th>信号</th><th>包</th><th>方向</th><th>数据更新</th><th>末次发现</th><th>UAS ID</th>
 </tr></thead>
 <tbody id="tbody"></tbody>
 </table>
@@ -6848,6 +9261,7 @@ var ws, reconnTimer;
 var lastLogsSeq = -1;
 var lastApsSeq = -1;
 var clearHistoryBusy = false;
+var deleteHistorySnBusy = {};
 var restartBusy = false;
 var metaState = {};
 var uiFrozen = false;
@@ -6872,15 +9286,20 @@ var autoTrackSnSet = {};
 var rowClickTimer = null;
 var trackCache = {};
 var trackLoading = {};
+var trackFetchMeta = {};
 var prefRealtimeTrack = true;
 var prefTrack2hOnly = false;
 var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
 var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
 var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
+var NEW_FIRMWARE_PARSE_KEY = 'rid_new_firmware_parse_enabled';
 var LIVE_TRACK_WINDOW_SEC = 300;
 var LIVE_LOST_WINDOW_SEC = 120;
 var AUTO_TRACK_OFFLINE_HIDE_SEC = LIVE_TRACK_WINDOW_SEC;
 var TRACK_FILTER_WINDOW_SEC = 7200;
+var TRACK_LIVE_FETCH_LIMIT = 600;
+var TRACK_HISTORY_FETCH_LIMIT = 4000;
+var TRACK_FORCE_RELOAD_MS = 8000;
 var notificationItems = [];
 var notificationSeq = 0;
 var notificationSyncBusy = false;
@@ -7079,6 +9498,17 @@ function filterTrackForDisplay(track, page){
   }
   return arr;
 }
+function trackLatLngSignature(latlngs){
+  if(!Array.isArray(latlngs) || !latlngs.length) return '0';
+  var first = latlngs[0] || {};
+  var last = latlngs[latlngs.length - 1] || {};
+  function key(p){
+    var lat = Array.isArray(p) ? p[0] : p.lat;
+    var lng = Array.isArray(p) ? p[1] : p.lng;
+    return Number(lat || 0).toFixed(6) + ',' + Number(lng || 0).toFixed(6);
+  }
+  return String(latlngs.length) + '|' + key(first) + '|' + key(last);
+}
 function baseFromMeta(meta){
   meta = (meta && typeof meta === 'object') ? meta : {};
   var lat = numOrNull(meta.base_lat);
@@ -7112,10 +9542,35 @@ function scanTypeText(e){
   if(k === 'phone') return '手机快传';
   return 'RID报送';
 }
+function newFirmwareParseEnabled(){
+  try{ return localStorage.getItem(NEW_FIRMWARE_PARSE_KEY) !== '0'; }catch(_e){ return true; }
+}
+function firmwareTypeKey(e){
+  var k = String((e && e.firmware_type_key) || '').toLowerCase();
+  if(k === 'new') return 'new';
+  if(String((e && e.firmware_type) || '').indexOf('新') >= 0) return 'new';
+  return 'old';
+}
+function firmwareTypeText(e){
+  return firmwareTypeKey(e) === 'new' ? '新版固件' : '旧版固件';
+}
+function uasIdText(e){
+  var s = String((e && e.uas_id) || '').trim();
+  return s ? s : '-';
+}
+function includeDroneByFirmware(e){
+  if(newFirmwareParseEnabled()) return true;
+  return String((e && e.scan_type_key) || '').toLowerCase() === 'phone';
+}
 function buildInfoHtml(e){
   e = e || {};
-  var html = '<div class="info-grid">';
+  var detailSn = String(e.sn || '');
+  var html = '<div class="info-actions">'+
+    '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(detailSn)+'">导出轨迹</button>'+
+    '<button class="btn-mini warn delete-history-btn" type="button" data-sn="'+escAttr(detailSn)+'">删除历史</button>'+
+    '</div><div class="info-grid">';
   html += infoRowHtml('SN', String(e.sn || '-'));
+  html += infoRowHtml('UAS ID', uasIdText(e));
   html += infoRowHtml('机型', String(e.model || 'N/A'));
   html += infoRowHtml('在线状态', e.lost ? '离线' : '在线');
   html += infoRowHtml('归档', e.archived ? '是' : '否');
@@ -7123,6 +9578,7 @@ function buildInfoHtml(e){
   html += infoRowHtml('SSID', String(e.ssid || '(hidden)'));
   html += infoRowHtml('来源', snSourceText(e));
   html += infoRowHtml('扫描类型', scanTypeText(e));
+  html += infoRowHtml('固件', firmwareTypeText(e));
   html += infoRowHtml('扫描类型Key', String(e.scan_type_key || '-'));
   html += infoRowHtml('捕获类型', String(e.capture_type || '-'));
   html += infoRowHtml('捕获时间', String(e.capture_time || '-'));
@@ -7185,16 +9641,34 @@ function isSnSelected(sn){
 function selectedSnList(){
   return Object.keys(selectedSnSet).filter(function(sn){ return !!selectedSnSet[sn]; });
 }
+function trackFetchUrl(sn){
+  var page = currentAppPage();
+  var url = '/api/tracks/get?sn=' + encodeURIComponent(sn);
+  if(page === 'live'){
+    url += '&window=' + encodeURIComponent(String(LIVE_TRACK_WINDOW_SEC));
+    url += '&limit=' + encodeURIComponent(String(TRACK_LIVE_FETCH_LIMIT));
+  }else{
+    if(prefTrack2hOnly){
+      url += '&window=' + encodeURIComponent(String(TRACK_FILTER_WINDOW_SEC));
+    }
+    url += '&limit=' + encodeURIComponent(String(TRACK_HISTORY_FETCH_LIMIT));
+  }
+  return url;
+}
 async function ensureTrackLoaded(sn, force){
   sn = String(sn || '');
   if(!sn) return;
   if(trackLoading[sn]) return;
   if(trackCache[sn] && !force) return;
+  var nowMs = Date.now();
+  var meta = trackFetchMeta[sn] || {};
+  if(force && trackCache[sn] && currentAppPage() === 'live' && (nowMs - Number(meta.ts || 0)) < TRACK_FORCE_RELOAD_MS) return;
   trackLoading[sn] = true;
   try{
-    var data = await getJson('/api/tracks/get?sn=' + encodeURIComponent(sn));
+    var data = await getJson(trackFetchUrl(sn));
     var tr = Array.isArray(data.track) ? data.track : [];
     trackCache[sn] = tr;
+    trackFetchMeta[sn] = {ts: Date.now(), count:Number(data.count || tr.length || 0), shown:Number(tr.length || 0)};
     if(isSnSelected(sn) || (prefRealtimeTrack && autoTrackSnSet[sn])){
       updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
@@ -7433,11 +9907,11 @@ function syncFieldHighlights(list){
     seen[sn] = true;
     var cur = {
       model: String(e.model || ''),
+      uas_id: String(e.uas_id || ''),
       rssi: String(e.rssi == null ? '' : e.rssi),
       pkts: String(e.pkts == null ? '' : e.pkts),
       dir: String(e.dir || ''),
       last_seen: String(e.last_seen || ''),
-      last_pkt_time: String(e.last_pkt_time || e.capture_time || ''),
       age_text: String(e.age_text || fmtAge(e.age)),
       lat: String(e.lat == null ? '' : e.lat),
       lon: String(e.lon == null ? '' : e.lon),
@@ -7919,6 +10393,8 @@ async function toolsImportSingleTrackFromFile(file){
     }
     var data = await postJson('/api/tools/import/track', {payload: payload});
     trackCache[payload.sn] = payload.track.slice();
+    delete trackFetchMeta[payload.sn];
+    delete trackLineSig[payload.sn];
     ensureTrackLoaded(payload.sn, true);
     setToolsStatus('导入完成: ' + payload.sn + ' (' + Number(data.count || 0) + ' 点)');
     showBanner('轨迹导入完成: ' + payload.sn, 'ok', 2400);
@@ -8266,6 +10742,12 @@ function buildExtraUi(){
         exportTrackForSn(btn.getAttribute('data-sn') || '');
         return;
       }
+      var delBtn = ev.target && ev.target.closest ? ev.target.closest('.delete-history-btn[data-sn]') : null;
+      if(delBtn){
+        ev.preventDefault();
+        deleteHistoryForSn(delBtn.getAttribute('data-sn') || '', {button: delBtn, hideCard: true});
+        return;
+      }
       if(ev.target === modal) hideInfoCard();
     });
   }
@@ -8337,6 +10819,21 @@ function buildExtraUi(){
   }
 
   var header = document.querySelector('header');
+  if(header && !qs('security-banner')){
+    var secBanner = document.createElement('div');
+    secBanner.id = 'security-banner';
+    secBanner.className = 'sniff-banner warn security-banner';
+    secBanner.style.display = 'none';
+    secBanner.innerHTML = '<span id="security-banner-text">当前处于 root 权限，存在安全风险。</span><button class="btn-mini warn" id="btn-security-settings" type="button">去设置修复</button>';
+    header.appendChild(secBanner);
+  }
+  if(qs('btn-security-settings') && qs('btn-security-settings').getAttribute('data-bound') !== '1'){
+    qs('btn-security-settings').setAttribute('data-bound', '1');
+    qs('btn-security-settings').addEventListener('click', function(ev){
+      ev.preventDefault();
+      location.href = '/settings';
+    });
+  }
   if(header && !qs('sniff-banner')){
     var banner = document.createElement('div');
     banner.id = 'sniff-banner';
@@ -8783,8 +11280,29 @@ function applyMeta(meta){
       applyMeta.__fastWarn = warnMsg;
     }
   }
+  applyRuntimeSecurity(metaState);
   updateNotifyButton();
   applySniffStatus(metaState);
+}
+
+function applyRuntimeSecurity(meta){
+  var sec = (meta && meta.runtime_security) || {};
+  var banner = qs('security-banner');
+  if(!banner) return;
+  if(sec.running_as_root){
+    if(qs('security-banner-text')){
+      qs('security-banner-text').textContent = '当前处于 root 权限，存在安全风险。请在设置中一键修复为 rid 专用账号运行。';
+    }
+    banner.className = 'sniff-banner warn security-banner';
+    banner.style.display = 'flex';
+    if(applyRuntimeSecurity.__last !== 'root'){
+      showBanner('当前处于 root 权限，存在安全风险。', 'warn', 5200);
+    }
+    applyRuntimeSecurity.__last = 'root';
+  }else{
+    banner.style.display = 'none';
+    applyRuntimeSecurity.__last = 'ok';
+  }
 }
 
 function applySniffStatus(meta){
@@ -8909,6 +11427,8 @@ async function clearHistory(){
     selectedSnSet = {};
     selectedMacSet = {};
     trackCache = {};
+    trackFetchMeta = {};
+    trackLineSig = {};
     showBanner('历史已清空' + (typeof data.cleared==='number' ? ('（'+data.cleared+'架）') : ''), 'ok', 2600);
   }catch(e){
     showBanner('清空失败: ' + ((e && e.message) ? e.message : e), 'warn', 4200);
@@ -8918,29 +11438,74 @@ async function clearHistory(){
   }
 }
 
+function removeHistorySnClientState(sn){
+  sn = String(sn || '').trim();
+  if(!sn) return;
+  var e = latestDroneMap[sn] || null;
+  var mac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
+  delete selectedSnSet[sn];
+  if(mac) delete selectedMacSet[mac];
+  delete historyHiddenSnSet[sn];
+  delete trackCache[sn];
+  delete trackLoading[sn];
+  delete trackFetchMeta[sn];
+  delete trackLineSig[sn];
+  if(latestDroneMap) delete latestDroneMap[sn];
+  function keepOther(row){
+    return String((row && row.sn) || '') !== sn;
+  }
+  latestDroneRows = (Array.isArray(latestDroneRows) ? latestDroneRows : []).filter(keepOther);
+  latestMapRows = (Array.isArray(latestMapRows) ? latestMapRows : []).filter(keepOther);
+  syncTableSelectionUi();
+  renderLiveCards(latestDroneRows);
+  renderMapMiniList(latestDroneRows);
+  refreshTrackMgrOptions(latestDroneRows);
+  refreshReplayBounds(false);
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
+
+async function deleteHistoryForSn(sn, opts){
+  opts = opts || {};
+  sn = String(sn || '').trim();
+  if(!sn){
+    if(opts.statusEl) opts.statusEl.textContent = '请先选择飞机';
+    return false;
+  }
+  if(deleteHistorySnBusy[sn]) return false;
+  if(opts.confirm !== false && !confirm('删除该飞机历史记录？\\n' + sn)) return false;
+  var btn = opts.button || null;
+  var oldText = btn ? btn.textContent : '';
+  deleteHistorySnBusy[sn] = true;
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '删除中...';
+  }
+  if(opts.statusEl) opts.statusEl.textContent = '删除中...';
+  try{
+    var data = await postJson('/api/history/delete', {sn: sn});
+    removeHistorySnClientState(sn);
+    if(opts.hideCard !== false) hideInfoCard();
+    if(opts.statusEl) opts.statusEl.textContent = data.removed ? ('已删除: ' + sn) : ('未找到: ' + sn);
+    showBanner(data.removed ? ('已删除历史: ' + sn) : ('未找到历史: ' + sn), data.removed ? 'ok' : 'info', 2600);
+    return !!data.removed;
+  }catch(e){
+    if(opts.statusEl) opts.statusEl.textContent = '删除失败: ' + ((e && e.message) ? e.message : e);
+    showBanner('删除历史失败: ' + ((e && e.message) ? e.message : e), 'warn', 4200);
+    return false;
+  }finally{
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = oldText || '删除历史';
+    }
+    delete deleteHistorySnBusy[sn];
+  }
+}
+
 async function deleteHistoryBySelect(){
   var sel = qs('track-sn-select');
   var st = qs('track-mgr-status');
   var sn = sel ? String(sel.value || '').trim() : '';
-  if(!sn){
-    if(st) st.textContent = '请先选择飞机';
-    return;
-  }
-  if(!confirm('删除该飞机历史记录？\\n' + sn)) return;
-  if(st) st.textContent = '删除中...';
-  try{
-    var data = await postJson('/api/history/delete', {sn: sn});
-    var e = latestDroneMap[sn] || null;
-    var mac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
-    delete selectedSnSet[sn];
-    if(mac) delete selectedMacSet[mac];
-    delete trackCache[sn];
-    if(st) st.textContent = data.removed ? ('已删除: ' + sn) : ('未找到: ' + sn);
-    showBanner('已删除历史: ' + sn, 'ok', 2400);
-  }catch(e){
-    if(st) st.textContent = '删除失败: ' + ((e && e.message) ? e.message : e);
-    showBanner('删除失败', 'warn', 3200);
-  }
+  await deleteHistoryForSn(sn, {statusEl: st, hideCard: false});
 }
 
 async function clearTrackBySelect(){
@@ -8956,6 +11521,8 @@ async function clearTrackBySelect(){
   try{
     var data = await postJson('/api/tracks/clear', {sn: sn});
     trackCache[sn] = [];
+    delete trackFetchMeta[sn];
+    delete trackLineSig[sn];
     if(st) st.textContent = '已清空轨迹: ' + sn + '（影响' + Number(data.affected || 0) + '架）';
     showBanner('轨迹已清空: ' + sn, 'ok', 2400);
   }catch(e){
@@ -8971,6 +11538,8 @@ async function clearTrackAll(){
   try{
     var data = await postJson('/api/tracks/clear', {});
     trackCache = {};
+    trackFetchMeta = {};
+    trackLineSig = {};
     if(st) st.textContent = '已清空全部轨迹（影响' + Number(data.affected || 0) + '架）';
     showBanner('全部轨迹已清空', 'ok', 2600);
   }catch(e){
@@ -9236,16 +11805,20 @@ function renderLiveCards(list){
     var heading = String(e.dir || '-');
     var stateCls = e.lost ? 'lost' : 'live';
     var stateTxt = e.lost ? '2分钟内离线' : '在线';
+    var firmwareTxt = firmwareTypeText(e);
+    var uas = uasIdText(e);
     html += '<article class="'+cls+'" data-sn="'+escAttr(sn)+'">'
       + '<div class="live-card-top">'
       +   '<div class="live-card-title" title="'+esc(model)+'">'+esc(model)+'</div>'
       +   '<div class="live-card-actions">'
       +     '<label class="live-card-pick"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+(selected?' checked':'')+'><span>选中</span></label>'
       +     (inAlarmZone ? '<span class="live-card-state alarm">区域告警</span>' : '')
+      +     '<span class="live-card-state firmware">'+esc(firmwareTxt)+'</span>'
       +     '<span class="live-card-state '+stateCls+'">'+esc(stateTxt)+'</span>'
       +   '</div>'
       + '</div>'
       + '<div class="live-card-snrow"><span class="label">SN</span><span class="live-card-sntext" title="'+esc(sn)+'">'+esc(sn || '-')+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制 SN">⧉</button></div>'
+      + '<div class="live-card-snrow live-card-uasrow"><span class="label">UAS ID</span><span class="live-card-sntext" title="'+esc(uas)+'">'+esc(uas)+'</span><span></span></div>'
       + '<div class="live-card-grid">'
       +   '<div class="live-card-item"><div class="k">经纬度</div><div class="v">'+esc(latlon)+'</div></div>'
       +   '<div class="live-card-item"><div class="k">高度</div><div class="v">'+esc(alt)+'</div></div>'
@@ -9285,7 +11858,7 @@ function onData(d){
   applyMeta((d && d.meta) || {});
   qs('cur-ts').textContent = d.ts;
   qs('cur-ch').textContent = d.ch;
-  var list = Array.isArray(d.drones) ? d.drones : [];
+  var list = (Array.isArray(d.drones) ? d.drones : []).filter(includeDroneByFirmware);
   var live = list.filter(function(x){ return x && !x.lost; }).length;
   qs('n-live').textContent = live;
   qs('n-lost').textContent = list.length - live;
@@ -9309,30 +11882,33 @@ function onData(d){
       var selected = (page === 'history') ? isHistoryTrackVisible(sn) : isSnSelected(sn);
       var snSrc = snSourceText(e);
       var scanType = scanTypeText(e);
+      var firmwareType = firmwareTypeText(e);
+      var firmwareKey = firmwareTypeKey(e);
+      var uas = uasIdText(e);
       var cls = e.lost ? 'lost' : (sn.indexOf('MAC:')===0 ? 'mac' : 'live');
       if(selected) cls += ' selected';
       if(zoneAlarmSnSet[sn]) cls += ' alarm-zone';
-      var snMeta = '<span class="sn-badge">'+esc(snSrc)+'</span><span class="sn-badge">'+esc(scanType)+'</span>'+(zoneAlarmSnSet[sn] ? '<span class="sn-badge alarm">报警</span>' : '');
+      var snMeta = '<span class="sn-badge">'+esc(snSrc)+'</span><span class="sn-badge">'+esc(scanType)+'</span><span class="sn-badge firmware-'+escAttr(firmwareKey)+'">'+esc(firmwareType)+'</span>'+(zoneAlarmSnSet[sn] ? '<span class="sn-badge alarm">报警</span>' : '');
       var modelCls = fieldCellAttrs(sn, 'model', '');
       var rssiCls = fieldCellAttrs(sn, 'rssi', '');
       var pktCls = fieldCellAttrs(sn, 'pkts', '');
       var dirCls = fieldCellAttrs(sn, 'dir', '');
       var ageCls = fieldCellAttrs(sn, 'age_text', 'mono');
       var lastSeenCls = fieldCellAttrs(sn, 'last_seen', 'mono');
-      var lastPktCls = fieldCellAttrs(sn, 'last_pkt_time', 'mono');
+      var uasCls = fieldCellAttrs(sn, 'uas_id', 'mono');
       var checked = selected ? ' checked' : '';
       var chip = '<span class="track-color-chip" style="--track-color:'+escAttr(trackColorForSn(sn))+';'+(selected ? '' : 'display:none')+'" title="轨迹颜色"></span>';
       rows += '<tr class="'+cls+' data-row" data-sn="'+escAttr(sn)+'">'+
         '<td><div class="sel-wrap track-sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+chip+'</div></td>'+
         '<td class="idx-cell">'+(idx+1)+'</td>'+
-        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+esc(sn)+'" title="复制SN">⧉</button></div></td>'+
+        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制SN">⧉</button></div></td>'+
         '<td'+modelCls+'>'+esc(e.model || 'N/A')+'</td>'+
         '<td'+rssiCls+'>'+fmt(e.rssi,0,'dBm')+'</td>'+
         '<td'+pktCls+'>'+esc(e.pkts==null?'0':e.pkts)+'</td>'+
         '<td'+dirCls+'>'+esc(e.dir || '-')+'</td>'+
         '<td'+ageCls+'>'+esc(e.age_text || fmtAge(e.age))+'</td>'+
         '<td'+lastSeenCls+'>'+esc(e.last_seen || '-')+'</td>'+
-        '<td'+lastPktCls+'>'+esc(e.last_pkt_time || e.capture_time || '-')+'</td>'+
+        '<td'+uasCls+'>'+esc(uas)+'</td>'+
         '</tr>';
     });
   }
@@ -9372,7 +11948,10 @@ function onData(d){
   displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){
     var e = latestDroneMap[sn];
     if(e && Number(e.track_count || 0) !== Number((trackCache[sn] || []).length)){
-      ensureTrackLoaded(sn, true);
+      var tm = trackFetchMeta[sn] || {};
+      if(currentAppPage() === 'history' || (Date.now() - Number(tm.ts || 0)) >= TRACK_FORCE_RELOAD_MS){
+        ensureTrackLoaded(sn, true);
+      }
     }
   });
   initMap();
@@ -9385,7 +11964,7 @@ applyTheme(loadThemePref());
 buildExtraUi();
 connect();
 
-var map = null, markers = {}, pilotMarkers = {}, trackLines = {}, twsLines = {}, baseMarker = null;
+var map = null, markers = {}, pilotMarkers = {}, trackLines = {}, trackLineSig = {}, twsLines = {}, baseMarker = null;
 var motionState = {};
 var COLORS = ['#58a6ff','#3fb950','#d29922','#d2a8ff','#79c0ff','#ff7b72'];
 var TRACK_COLORS = ['#1f9dff','#12b886','#ff8f1f','#ff4d6d','#8b5cf6','#06b6d4','#84cc16','#eab308'];
@@ -10211,6 +12790,7 @@ function updateMap(drones){
       if(trackLines[sn]){
         map.removeLayer(trackLines[sn]);
         delete trackLines[sn];
+        delete trackLineSig[sn];
       }
       return;
     }
@@ -10228,16 +12808,22 @@ function updateMap(drones){
       if(trackLines[sn]){
         map.removeLayer(trackLines[sn]);
         delete trackLines[sn];
+        delete trackLineSig[sn];
       }
       return;
     }
     activeTrack[sn] = true;
     var tColor = trackColorForSn(sn);
+    var sig = trackLatLngSignature(latlngs);
+    if(trackLines[sn] && trackLineSig[sn] === sig){
+      return;
+    }
     if(trackLines[sn]){
       map.removeLayer(trackLines[sn]);
       delete trackLines[sn];
     }
     trackLines[sn] = makeTrackLayer(latlngs, tColor).addTo(map);
+    trackLineSig[sn] = sig;
   });
 
   // remove stale aircraft markers
@@ -10260,7 +12846,7 @@ function updateMap(drones){
   // remove stale or unselected tracks
   Object.keys(trackLines).forEach(function(sn){
     if(!activeTrack[sn]){
-      map.removeLayer(trackLines[sn]); delete trackLines[sn];
+      map.removeLayer(trackLines[sn]); delete trackLines[sn]; delete trackLineSig[sn];
     }
   });
   Object.keys(motionState).forEach(function(sn){
@@ -10722,6 +13308,7 @@ body[data-page="history"] .app-page[data-page="history"]{display:block}
 .live-card-state{display:inline-flex;align-items:center;padding:3px 8px;border:1px solid var(--border);border-radius:999px;font:600 11px/1 var(--font-ui);color:var(--dim)}
 .live-card-state.live{color:var(--green);border-color:color-mix(in srgb, var(--green) 40%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--panel2))}
 .live-card-state.lost{color:var(--warn);border-color:color-mix(in srgb, var(--warn) 38%, var(--border));background:color-mix(in srgb, var(--warn) 8%, var(--panel2))}
+.live-card-state.firmware{color:#9fd0ff;border-color:color-mix(in srgb, var(--blue) 34%, var(--border));background:color-mix(in srgb, var(--blue) 9%, var(--panel2))}
 .live-card-state.alarm{color:#ffb3ae;border-color:rgba(255,79,79,.68);background:rgba(255,79,79,.14)}
 .live-card-snrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center}
 .live-card-snrow .label{font-size:11px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}
@@ -11263,10 +13850,12 @@ _MAIN_PAGE_PATCH_JS = r"""
       e = e || {};
       var base = [
         ['SN', String(e.sn || '-')],
+        ['UAS ID', uasIdText(e)],
         ['机型', modelActionCell(e), 'html'],
         ['在线状态', e.lost ? '离线' : '在线'],
         ['来源', snSourceText(e)],
         ['扫描类型', scanTypeText(e)],
+        ['固件', firmwareTypeText(e)],
         ['MAC', String(e.mac || '-')],
         ['SSID', String(e.ssid || '(hidden)')],
         ['捕获类型', String(e.capture_type || '-')],
@@ -11294,8 +13883,10 @@ _MAIN_PAGE_PATCH_JS = r"""
         ['飞手经度', fmt(e.pilot_lon,6,'')],
         ['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]
       ];
+      var actionSn = String(e.sn || '');
       var html = '<div class="info-actions">'+
-        '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(String(e.sn||''))+'">导出轨迹</button>'+
+        '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(actionSn)+'">导出轨迹</button>'+
+        '<button class="btn-mini warn delete-history-btn" type="button" data-sn="'+escAttr(actionSn)+'">删除历史</button>'+
         '</div><div class="info-sections">';
       html += buildInfoSection('飞机位置信息', dronePos);
       html += buildInfoSection('飞手位置信息', pilotPos);
@@ -11490,10 +14081,48 @@ def _build_html() -> str:
     html_src = _inject_html_once(html_src, "</body>", "<script>\n" + _MAIN_PAGE_PATCH_JS + "\n</script>\n")
     return html_src
 
-def _build_login_html(next_path: str = "/") -> str:
+def _build_login_html(next_path: str = "/", status_message: str = "", status_error: bool = False) -> str:
     safe_next = str(next_path or "/")
     if not safe_next.startswith("/") or safe_next.startswith("//"):
         safe_next = "/"
+    password_enabled = _auth_login_method_enabled("password")
+    sso_enabled = _auth_login_method_enabled("sso")
+    passkey_enabled = _auth_login_method_enabled("passkey")
+    has_passkey = passkey_enabled and any(bool(item.get("enabled", True)) for item in _normalize_passkeys(AUTH_CFG.get("passkeys")))
+    password_login_html = (
+        '  <form id="login-form">\n'
+        '    <div class="field"><label for="user">账号</label><input id="user" autocomplete="username" autofocus></div>\n'
+        '    <div class="field"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>\n'
+        '    <div class="row"><button id="submit" type="submit">登录</button></div>\n'
+        '  </form>\n'
+        if password_enabled else ""
+    )
+    passkey_login_html = (
+        '  <div class="row" style="margin-top:12px">\n'
+        '    <button id="btn-passkey-login" type="button">使用通行密钥登录</button>\n'
+        '  </div>'
+        if has_passkey else ""
+    )
+    if not status_message:
+        if passkey_enabled and (not has_passkey) and (not password_enabled) and (not sso_enabled):
+            status_message = "当前已启用 PassKey 登录，但尚未登记可用密钥。"
+        elif (not password_enabled) and (not has_passkey):
+            if sso_enabled:
+                status_message = "当前仅允许通过 SSO URL 登录，请使用已生成的登录链接进入。"
+            else:
+                status_message = "当前没有可用的网页登录方式，请返回设置检查登录方式配置。"
+    status_class = "status err" if status_error else "status"
+    status_html = '<div class="' + status_class + '" id="status">' + _html_escape(status_message, quote=False) + "</div>"
+    method_labels: list[str] = []
+    if password_enabled:
+        method_labels.append("账号密码")
+    if has_passkey:
+        method_labels.append("PassKey")
+    elif passkey_enabled:
+        method_labels.append("PassKey(待登记)")
+    if sso_enabled:
+        method_labels.append("SSO URL")
+    login_method_copy = ("可用方式: " + " / ".join(method_labels)) if method_labels else "当前没有可用的网页登录方式。"
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -11525,38 +14154,120 @@ button:hover{{transform:translateY(-1px);filter:brightness(1.05)}}
 </style></head><body>
 <main class="card">
   <h1 class="brand">Light RID Scanner</h1>
-  <p class="desc">登录到在线监控平台</p>
-  <form id="login-form">
-    <div class="field"><label for="user">账号</label><input id="user" autocomplete="username" autofocus></div>
-    <div class="field"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>
-    <div class="row"><span class="status" id="status"></span><button id="submit" type="submit">登录</button></div>
-  </form>
+  <p class="desc">登录到在线监控平台。{_html_escape(login_method_copy, quote=False)}</p>
+{password_login_html}{passkey_login_html}
+  {status_html}
 </main>
 <script>
 const nextPath = {json.dumps(safe_next, ensure_ascii=False)};
 const form = document.getElementById('login-form');
 const statusEl = document.getElementById('status');
-function setStatus(text, err){{ statusEl.textContent = text || ''; statusEl.classList.toggle('err', !!err); }}
-form.addEventListener('submit', async function(ev){{
-  ev.preventDefault();
-  const btn = document.getElementById('submit');
-  btn.disabled = true;
-  setStatus('正在验证...', false);
-  try{{
-    const r = await fetch('/login', {{
-      method:'POST',
-      headers:{{'Content-Type':'application/json'}},
-      body:JSON.stringify({{username:document.getElementById('user').value || '', password:document.getElementById('password').value || ''}})
-    }});
-    const d = await r.json().catch(() => ({{}}));
-    if(!r.ok || d.ok === false) throw new Error(d.error || '登录失败');
-    location.href = nextPath || d.next || '/';
-  }}catch(e){{
-    setStatus(e.message || String(e), true);
-  }}finally{{
-    btn.disabled = false;
+const passkeyBtn = document.getElementById('btn-passkey-login');
+function pageHeaders(extra){{
+  var h = {{'X-LightRID-Page':'1'}};
+  if(extra) Object.keys(extra).forEach(function(k){{ h[k] = extra[k]; }});
+  return h;
+}}
+function setStatus(text, err){{
+  if(!statusEl) return;
+  statusEl.textContent = text || '';
+  statusEl.classList.toggle('err', !!err);
+}}
+function b64uToBytes(text){{
+  var raw = String(text || '').replace(/-/g,'+').replace(/_/g,'/');
+  while(raw.length % 4) raw += '=';
+  if(!raw) return new Uint8Array(0);
+  var bin = atob(raw);
+  var out = new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out;
+}}
+function bytesToB64u(bytes){{
+  var view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  var bin = '';
+  for(var i=0;i<view.length;i++) bin += String.fromCharCode(view[i]);
+  return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+}}
+async function loginWithPasskey(){{
+  if(!window.PublicKeyCredential || !navigator.credentials || !navigator.credentials.get){{
+      throw new Error('当前浏览器不支持通行密钥登录');
   }}
-}});
+  setStatus('正在准备通行密钥登录...', false);
+  const startR = await fetch('/api/passkey/login/start', {{
+    method:'POST',
+    headers:pageHeaders({{'Content-Type':'application/json'}}),
+    body:'{{}}'
+  }});
+  const start = await startR.json().catch(() => ({{}}));
+  if(!startR.ok || start.ok === false) throw new Error(start.error || ('HTTP ' + startR.status));
+  const pk = start.publicKey || {{}};
+  const allowCredentials = Array.isArray(pk.allowCredentials) ? pk.allowCredentials : [];
+  const cred = await navigator.credentials.get({{
+    publicKey: {{
+      challenge: b64uToBytes(pk.challenge || start.challenge || ''),
+      rpId: pk.rpId || pk.rp_id || location.hostname,
+      timeout: pk.timeout || start.timeout_ms || 300000,
+      userVerification: pk.userVerification || 'preferred',
+      allowCredentials: allowCredentials.map(function(item){{ return {{type:'public-key', id:b64uToBytes(item.id || '')}}; }})
+    }}
+  }});
+  if(!cred) throw new Error('未获取到通行密钥凭据');
+  const response = cred.response || {{}};
+  const finishR = await fetch('/api/passkey/login/finish', {{
+    method:'POST',
+    headers:pageHeaders({{'Content-Type':'application/json'}}),
+    body:JSON.stringify({{
+      challenge: start.challenge || start.challenge_token || '',
+      id: cred.id || '',
+      rawId: bytesToB64u(cred.rawId || new Uint8Array(0)),
+      type: cred.type || 'public-key',
+      response: {{
+        clientDataJSON: bytesToB64u(response.clientDataJSON || new Uint8Array(0)),
+        authenticatorData: bytesToB64u(response.authenticatorData || new Uint8Array(0)),
+        signature: bytesToB64u(response.signature || new Uint8Array(0)),
+        userHandle: response.userHandle ? bytesToB64u(response.userHandle) : ''
+      }},
+      next: nextPath || '/'
+    }})
+  }});
+  const finish = await finishR.json().catch(() => ({{}}));
+  if(!finishR.ok || finish.ok === false) throw new Error(finish.error || ('HTTP ' + finishR.status));
+  location.href = nextPath || finish.next || '/';
+}}
+if(form){{
+  form.addEventListener('submit', async function(ev){{
+    ev.preventDefault();
+    const btn = document.getElementById('submit');
+    btn.disabled = true;
+    setStatus('正在验证...', false);
+    try{{
+      const r = await fetch('/login', {{
+        method:'POST',
+        headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{username:document.getElementById('user').value || '', password:document.getElementById('password').value || ''}})
+      }});
+      const d = await r.json().catch(() => ({{}}));
+      if(!r.ok || d.ok === false) throw new Error(d.error || '登录失败');
+      location.href = nextPath || d.next || '/';
+    }}catch(e){{
+      setStatus(e.message || String(e), true);
+    }}finally{{
+      btn.disabled = false;
+    }}
+  }});
+}}
+if(passkeyBtn){{
+  passkeyBtn.addEventListener('click', async function(){{
+    passkeyBtn.disabled = true;
+    try{{
+      await loginWithPasskey();
+    }}catch(e){{
+      setStatus(e.message || String(e), true);
+    }}finally{{
+      passkeyBtn.disabled = false;
+    }}
+  }});
+}}
 </script>
 </body></html>"""
 
@@ -11844,7 +14555,7 @@ body.theme-light{
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
 body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
 .wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
-.settings-sticky-head{position:sticky;top:0;z-index:40;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 94%,transparent));padding-top:clamp(8px,1.2vw,14px);backdrop-filter:blur(10px)}
+.settings-sticky-head{position:relative;z-index:1;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 94%,transparent));padding-top:clamp(8px,1.2vw,14px)}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
 .title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
 .sub{color:var(--muted);margin-top:5px;max-width:780px;line-height:1.45}
@@ -11867,6 +14578,35 @@ body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--
 body.theme-light .tabs{background:var(--card2)}
 body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(--card2));border-color:var(--blue)}
 .panel{display:none}.panel.active{display:block}
+.raw-layout{display:grid;grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr);gap:12px;min-width:0}
+.raw-pane{min-width:0;display:grid;gap:10px;align-content:start}
+.raw-tree{border:1px solid var(--border);background:var(--card2);border-radius:4px;min-height:460px;max-height:min(72dvh,840px);overflow:auto;padding:10px}
+.raw-tree .empty-state{margin:0}
+.raw-tree details{margin:0 0 4px 0;padding-left:0}
+.raw-tree summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:4px}
+.raw-tree summary::-webkit-details-marker{display:none}
+.raw-tree summary:hover{background:color-mix(in srgb, var(--blue) 10%, var(--card2))}
+.raw-tree .raw-file-btn{display:flex;align-items:center;justify-content:space-between;width:100%;border:1px solid transparent;background:transparent;color:var(--txt);padding:6px 8px;border-radius:4px;cursor:pointer;font:600 13px/1.3 var(--font-ui);text-align:left}
+.raw-tree .raw-file-btn:hover{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 8%, var(--card2))}
+.raw-tree .raw-file-btn.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 14%, var(--card2))}
+.raw-tree .raw-dir-child{padding-left:14px;border-left:1px solid var(--border);margin:2px 0 6px 10px}
+.raw-main{display:grid;gap:10px;min-width:0}
+.raw-meta{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;padding:10px 12px;border:1px solid var(--border);border-radius:4px;background:var(--card2)}
+.raw-meta .meta-copy{display:grid;gap:4px;min-width:0}
+.raw-meta .meta-title{font:600 15px/1.2 var(--font-ui)}
+.raw-meta .meta-sub{font-size:12px;color:var(--muted);line-height:1.5;word-break:break-word}
+.raw-editor{min-height:54dvh;height:calc(100dvh - 390px);max-height:min(78dvh,920px)}
+.raw-lock{padding:14px;border:1px dashed var(--border);border-radius:4px;background:color-mix(in srgb, var(--warn) 6%, var(--card2));display:grid;gap:10px}
+.raw-lock strong{font-size:15px}
+.raw-toolbar{display:flex;gap:10px;flex-wrap:wrap;justify-content:space-between;align-items:center}
+.raw-toolbar .row-actions{justify-content:flex-end}
+.passkey-list{display:grid;gap:8px}
+.passkey-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:4px;background:var(--card2)}
+.passkey-meta{display:grid;gap:4px;min-width:0}
+.passkey-title{font:600 14px/1.2 var(--font-ui)}
+.passkey-sub{font-size:12px;color:var(--muted);line-height:1.4;word-break:break-word}
+.passkey-badges{display:flex;gap:6px;flex-wrap:wrap}
+.passkey-badge{font-size:11px;line-height:1;padding:4px 7px;border:1px solid var(--border);border-radius:999px;background:var(--card)}
 .visual-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(360px,.88fr);gap:12px}
 .stack{display:grid;gap:12px;min-width:0;align-content:start}
 .stack-label{font:700 12px/1 var(--font-ui);letter-spacing:0;color:var(--muted);padding:2px 2px 0}
@@ -11963,6 +14703,13 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .zone-layout{display:grid;grid-template-columns:minmax(120px,1.2fr) 86px repeat(4,minmax(0,1fr)) auto;gap:10px;align-items:end;min-width:0}
 .hook-layout>.field,.zone-layout>.field{min-width:0}
 .empty-state{padding:14px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);background:var(--card2)}
+.security-alert{display:none;gap:8px;margin-top:14px;padding:12px;border:1px solid color-mix(in srgb,var(--warn) 46%,var(--border));border-radius:4px;background:color-mix(in srgb,var(--warn) 10%,var(--card2));color:var(--txt)}
+.security-alert.show{display:grid}
+.security-alert.ok{border-color:color-mix(in srgb,var(--green) 38%,var(--border));background:color-mix(in srgb,var(--green) 9%,var(--card2))}
+.security-alert-title{font:700 14px/1.2 var(--font-ui);color:var(--txt)}
+.security-alert-copy{font-size:13px;line-height:1.55;color:var(--muted)}
+.security-alert.warn .security-alert-copy{color:color-mix(in srgb,var(--warn) 58%,white)}
+.security-alert-actions{display:flex;gap:10px;flex-wrap:wrap}
 .stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .stat{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
 .stat .k{font:600 12px/1 var(--font-ui);color:var(--muted);letter-spacing:.01em}
@@ -12019,6 +14766,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
       <button class="btn" id="btn-logs" type="button">日志</button>
+      <button class="btn ghost" id="btn-logout" type="button">登出</button>
       <button class="btn" id="btn-theme" type="button">浅色</button>
       <button class="btn" id="btn-reload-view" type="button">刷新</button>
     </div>
@@ -12031,6 +14779,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     <div class="draft-actions">
       <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
       <button class="btn warn" id="btn-save-visual" type="button" disabled>测试并保存</button>
+      <button class="btn ghost" id="btn-save-visual-direct" type="button">直接保存</button>
     </div>
   </div>
   <div class="tabs">
@@ -12146,7 +14895,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             </div>
           </div>
           <div class="access-subgrid">
-            <div class="access-subcard">
+            <div class="access-subcard full">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">通知通道</div>
@@ -12164,7 +14913,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <label><input id="cfg-notify-reonline" type="checkbox"> 允许重上线通知</label>
               </div>
             </div>
-            <div class="access-subcard">
+            <div class="access-subcard full">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">网页登录</div>
@@ -12180,6 +14929,28 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <div class="checks">
                 <label><input id="cfg-auth-enabled" type="checkbox"> 启用网页登录鉴权</label>
               </div>
+              <div class="checks">
+                <label><input id="cfg-auth-method-password" type="checkbox"> 账号密码登录</label>
+                <label><input id="cfg-auth-method-passkey" type="checkbox"> PassKey 登录</label>
+                <label><input id="cfg-auth-method-sso" type="checkbox"> SSO URL 登录</label>
+              </div>
+              <div class="micro" id="auth-method-state">至少保留一种网页登录方式；关闭账号密码直接登录后，账号密码仍用于设置页二次确认。</div>
+            </div>
+            <div class="access-subcard full">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">通行密钥登录</div>
+                  <div class="access-subcopy">为网页登录账号绑定浏览器通行密钥，支持一键登录。</div>
+                </div>
+              </div>
+              <div class="grid">
+                <div class="field full"><label>通行密钥名称</label><input id="cfg-passkey-name" type="text" placeholder="留空即自动命名"><div class="micro">用于区分不同设备或浏览器。</div></div>
+              </div>
+              <div class="row-actions">
+                <button class="btn" id="btn-passkey-add" type="button">验证并添加</button>
+              </div>
+              <div class="micro" id="passkey-state">完成网页登录账号和密码配置后，可在这里添加通行密钥。</div>
+              <div id="passkey-list" class="passkey-list"></div>
             </div>
             <div class="access-subcard full">
               <div class="access-subhead">
@@ -12281,6 +15052,28 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
           </div>
         </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>权限与 systemd 服务</h2>
+              <div class="section-copy">检查当前运行身份，使用 rid 专用账号运行服务，并保留采集所需的网络能力。</div>
+            </div>
+          </div>
+          <div id="runtime-security-alert" class="security-alert">
+            <div class="security-alert-title" id="runtime-security-title">权限检测</div>
+            <div class="security-alert-copy" id="runtime-security-copy">正在读取运行权限...</div>
+            <div class="security-alert-actions">
+              <button class="btn warn" id="btn-security-repair" type="button">一键修复</button>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn ghost" id="btn-service-refresh" type="button">刷新服务状态</button>
+            <button class="btn" id="btn-service-register" type="button">注册/更新服务</button>
+            <button class="btn" id="btn-iw-install" type="button">安装 iw</button>
+          </div>
+          <div class="micro" style="margin-top:10px">修复会创建/确认 rid 账号、授予配置与缓存写权限，并把服务注册为 rid + CAP_NET_ADMIN/CAP_NET_RAW；网页输入的 sudo 密码只用于本次请求，不会保存。</div>
+          <div id="status-system-service" class="status">正在读取服务状态...</div>
+        </div>
         <div class="card" data-card-key="metrics">
           <div class="section-head">
             <div>
@@ -12293,6 +15086,19 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             <button class="btn ghost metric-window" data-window="24h" type="button">24小时</button>
             <button class="btn ghost metric-window" data-window="7d" type="button">7天</button>
             <label class="metric-retention"><span>保留</span><input id="cfg-metrics-retention" type="number" min="1" max="90" step="1"><span>天</span></label>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <div class="field">
+              <label>温度数据来源</label>
+              <select id="cfg-metrics-temp-source">
+                <option value="auto">自动（优先 vcgencmd）</option>
+                <option value="vcgencmd">仅 vcgencmd</option>
+                <option value="thermal_zone">仅 /sys/class/thermal</option>
+                <option value="hwmon">仅 /sys/class/hwmon</option>
+                <option value="off">关闭温度采集</option>
+              </select>
+              <div class="micro">节点温度会写入主机状态和温度曲线；关闭后显示为空值。</div>
+            </div>
           </div>
           <div class="metric-list" id="metrics-list">
             <div class="metric-item" data-metric="cpu"><div class="metric-label"><i style="background:#2899f5"></i>CPU</div><div class="metric-spark-wrap"><canvas class="metric-spark" data-metric="cpu"></canvas></div><div class="metric-value" id="metric-value-cpu">—</div></div>
@@ -12343,8 +15149,9 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="checks pref-checks" style="margin-top:14px">
             <label><input id="pref-realtime-track" type="checkbox"> 实时轨迹</label>
             <label><input id="pref-track-2h" type="checkbox"> 只显示近 2 小时轨迹</label>
+            <label><input id="pref-new-firmware-parser" type="checkbox"> 显示 RID 包解析结果</label>
           </div>
-          <div class="micro">实时轨迹关闭时，地图轨迹来自手动勾选目标。</div>
+          <div class="micro">只控制当前浏览器显示；后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
         </div>
         <div class="card">
           <div class="section-head">
@@ -12363,21 +15170,52 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   </div>
   <div class="panel" data-tab="raw">
     <div class="card">
-      <div class="split-actions">
+      <div class="raw-toolbar">
         <div>
-          <h2>原始配置文件</h2>
-          <div class="section-copy">rid_config.json 原文内容，适合批量调整或排查配置问题。</div>
+          <h2>原始配置</h2>
+          <div class="section-copy">浏览配置目录树、切换文件、编辑保存和删除配置文件。进入前需要先验证网页登录密码。</div>
         </div>
         <div class="row-actions">
-          <button class="btn" id="btn-load-raw" type="button">读取原始文件</button>
-        <button class="btn warn" id="btn-save-raw" type="button">检查并应用</button>
+          <button class="btn" id="btn-load-raw" type="button">刷新目录</button>
+          <button class="btn warn" id="btn-save-raw" type="button">保存当前文件</button>
+          <button class="btn warn" id="btn-delete-raw" type="button">删除当前文件</button>
+          <button class="btn ghost" id="btn-raw-unlock" type="button">验证密码</button>
         </div>
       </div>
-      <div class="field full" style="margin-top:14px"><label>rid_config.json</label><textarea id="raw-editor" spellcheck="false"></textarea></div>
-      <div id="status-raw" class="status">-</div>
+      <div class="raw-lock" id="raw-lock-card">
+        <strong id="raw-lock-title">原始配置已锁定</strong>
+        <div class="micro" id="raw-lock-copy">需要先验证网页登录密码，才能查看和编辑配置文件。</div>
+        <div class="row-actions">
+          <button class="btn" id="btn-raw-unlock-inline" type="button">验证密码</button>
+        </div>
+      </div>
+      <div class="raw-layout" id="raw-layout">
+        <aside class="raw-pane">
+          <div class="raw-meta">
+            <div class="meta-copy">
+              <div class="meta-title" id="raw-tree-title">配置目录</div>
+              <div class="meta-sub" id="raw-tree-path">-</div>
+            </div>
+          </div>
+          <div id="raw-tree" class="raw-tree"></div>
+        </aside>
+        <section class="raw-main">
+          <div class="raw-meta">
+            <div class="meta-copy">
+              <div class="meta-title" id="raw-file-title">未选择文件</div>
+              <div class="meta-sub" id="raw-file-path">-</div>
+            </div>
+            <div class="meta-copy" style="text-align:right">
+              <div class="meta-title" id="raw-file-size">-</div>
+              <div class="meta-sub" id="raw-file-mtime">-</div>
+            </div>
+          </div>
+          <textarea id="raw-editor" class="raw-editor" spellcheck="false"></textarea>
+          <div id="status-raw" class="status">-</div>
+        </section>
+      </div>
     </div>
   </div>
-</div>
 <div id="settings-toast-stack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
@@ -12392,6 +15230,20 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
       <button class="btn" id="btn-reauth-confirm" type="button">确认</button>
     </div>
     <div id="reauth-status" class="status">-</div>
+  </div>
+</div>
+<div class="modal-mask" id="elevate-modal">
+  <div class="modal-card">
+    <h3>临时提权</h3>
+    <div class="section-copy" id="elevate-copy">此操作需要 root 权限；sudo 密码只用于本次请求，不会保存。</div>
+    <div class="grid" style="margin-top:14px">
+      <div class="field full"><label>sudo 密码</label><input id="elevate-pass" type="password" autocomplete="off"></div>
+    </div>
+    <div class="row-actions" style="margin-top:14px">
+      <button class="btn ghost" id="btn-elevate-cancel" type="button">取消</button>
+      <button class="btn" id="btn-elevate-confirm" type="button">确认</button>
+    </div>
+    <div id="elevate-status" class="status">-</div>
   </div>
 </div>
 <div class="modal-mask" id="one-time-modal">
@@ -12437,10 +15289,12 @@ function isLocalHostName(host){
 var apiTokenRows = [];
 var oneTimeSecretValue = '';
 var reauthAction = null;
+var elevateResolve = null;
+var lastSystemServiceStatus = null;
 var loginLinks = [];
 var modelMapRows = [];
 var modelMapPath = '';
-var settingsState = {visualLoaded:false, rawLoaded:false, channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}};
+var settingsState = {visualLoaded:false, rawLoaded:false, rawUnlocked:false, rawRoot:'', rawTree:null, rawSelectedPath:'', rawSelectedRel:'', channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}, authConfigured:false};
 var metricsState = {window:'12h', zoom:1, panSec:0, hover:null, drag:null, chartMeta:{}, items:[]};
 var SETTINGS_DRAFT_SECTIONS = [
   {key:'capture', label:'采集'},
@@ -12452,6 +15306,7 @@ var SETTINGS_DRAFT_SECTIONS = [
 var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
 var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
 var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
+var NEW_FIRMWARE_PARSE_KEY = 'rid_new_firmware_parse_enabled';
 function on(id, type, handler){
   var el = qs(id);
   if(el) el.addEventListener(type, handler);
@@ -12625,6 +15480,33 @@ async function postJson(url, body){
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
 }
+function closeElevate(value){
+  var modal = qs('elevate-modal');
+  var pass = qs('elevate-pass');
+  var resolver = elevateResolve;
+  elevateResolve = null;
+  if(pass) pass.value = '';
+  if(modal) modal.classList.remove('show');
+  if(resolver) resolver(value);
+}
+function requestElevationPassword(message){
+  if(lastSystemServiceStatus && lastSystemServiceStatus.running_as_root) return Promise.resolve('');
+  return new Promise(function(resolve){
+    elevateResolve = resolve;
+    if(qs('elevate-copy')) qs('elevate-copy').textContent = String(message || '此操作需要 root 权限；sudo 密码只用于本次请求，不会保存。');
+    if(qs('elevate-status')) setStatus('elevate-status', '密码不会写入配置文件或浏览器存储。', false);
+    if(qs('elevate-modal')) qs('elevate-modal').classList.add('show');
+    window.setTimeout(function(){ if(qs('elevate-pass')) qs('elevate-pass').focus(); }, 40);
+  });
+}
+async function privilegedBody(base, message){
+  var body = Object.assign({}, base || {});
+  if(lastSystemServiceStatus && lastSystemServiceStatus.running_as_root) return body;
+  var pwd = await requestElevationPassword(message);
+  if(pwd == null) throw new Error('已取消提权');
+  body.sudo_password = String(pwd || '');
+  return body;
+}
 function v(id){ return String((qs(id) && qs(id).value) || '').trim(); }
 function n(id){ var x = v(id); if(!x) return null; var f = Number(x); return isFinite(f) ? f : null; }
 function check(id){ return !!(qs(id) && qs(id).checked); }
@@ -12645,14 +15527,23 @@ function applyTheme(theme){
 function loadBrowserPrefs(){
   var rt = qs('pref-realtime-track');
   var f2h = qs('pref-track-2h');
+  var newFw = qs('pref-new-firmware-parser');
   if(rt) rt.checked = cookieBool(COOKIE_TRACK_REALTIME, true);
   if(f2h) f2h.checked = cookieBool(COOKIE_TRACK_2H_ONLY, false);
+  if(newFw){
+    try{ newFw.checked = localStorage.getItem(NEW_FIRMWARE_PARSE_KEY) !== '0'; }
+    catch(_e){ newFw.checked = true; }
+  }
 }
 function saveBrowserPrefs(){
   var rt = qs('pref-realtime-track');
   var f2h = qs('pref-track-2h');
+  var newFw = qs('pref-new-firmware-parser');
   cookieSet(COOKIE_TRACK_REALTIME, (rt && rt.checked) ? '1' : '0', 365);
   cookieSet(COOKIE_TRACK_2H_ONLY, (f2h && f2h.checked) ? '1' : '0', 365);
+  if(newFw){
+    try{ localStorage.setItem(NEW_FIRMWARE_PARSE_KEY, newFw.checked ? '1' : '0'); }catch(_e){}
+  }
   showNotice('页面偏好已保存到当前浏览器。', 'ok', 2200);
 }
 function notifySettingsButtonText(){
@@ -12775,6 +15666,60 @@ function fmtSecShort(sec){
   if(sec < 86400) return Math.round(sec / 3600) + 'h';
   return Math.round(sec / 86400) + 'd';
 }
+function checkedAuthLoginMethods(){
+  var out = [];
+  if(check('cfg-auth-method-password')) out.push('password');
+  if(check('cfg-auth-method-passkey')) out.push('passkey');
+  if(check('cfg-auth-method-sso')) out.push('sso');
+  return out;
+}
+function ensureAuthLoginMethodSelection(preferredId, noisy){
+  var methods = checkedAuthLoginMethods();
+  if(methods.length) return methods;
+  var fallbackId = preferredId || 'cfg-auth-method-password';
+  if(qs(fallbackId)) qs(fallbackId).checked = true;
+  methods = checkedAuthLoginMethods();
+  if(noisy){
+    if(qs('auth-method-state')) qs('auth-method-state').textContent = '至少保留一种网页登录方式；账号密码仍用于设置页二次确认。';
+    showNotice('至少保留一种网页登录方式。', 'warn', 2400);
+  }
+  return methods;
+}
+function syncAuthMethodUi(){
+  var methods = ensureAuthLoginMethodSelection('', false);
+  var authEnabled = check('cfg-auth-enabled');
+  var authConfigured = !!settingsState.authConfigured;
+  var allowPassword = methods.indexOf('password') >= 0;
+  var allowPasskey = methods.indexOf('passkey') >= 0;
+  var allowSso = methods.indexOf('sso') >= 0;
+  if(qs('auth-method-state')){
+    var labels = [];
+    if(allowPassword) labels.push('账号密码');
+    if(allowPasskey) labels.push('PassKey');
+    if(allowSso) labels.push('SSO URL');
+    qs('auth-method-state').textContent = '当前允许: ' + (labels.join(' / ') || '未选择') + '。至少保留一种网页登录方式；账号密码仍用于设置页二次确认和 PassKey 注册。';
+  }
+  if(qs('login-link-state')){
+    if(!authEnabled || !authConfigured){
+      qs('login-link-state').textContent = '网页登录账号密码完整时，SSO URL 登录可用。';
+    }else if(!allowSso){
+      qs('login-link-state').textContent = '当前已关闭 SSO URL 登录；已生成的链接会保留，但不会生效。';
+    }else{
+      qs('login-link-state').textContent = '生成的链接可在下面管理；链接受有效期和单次登录状态控制。';
+    }
+  }
+  if(qs('passkey-state')){
+    if(!authEnabled || !authConfigured){
+      qs('passkey-state').textContent = '完成网页登录账号和密码配置后，可在这里登记通行密钥。';
+    }else if(!allowPasskey){
+      qs('passkey-state').textContent = '当前已关闭 PassKey 登录；已登记密钥会保留，但不会生效。';
+    }else{
+      qs('passkey-state').textContent = '通行密钥可以直接用于网页登录。';
+    }
+  }
+  if(qs('btn-login-link-create')) qs('btn-login-link-create').disabled = !(authEnabled && authConfigured && allowSso);
+  if(qs('btn-passkey-add')) qs('btn-passkey-add').disabled = !(authEnabled && authConfigured && allowPasskey);
+}
 function renderHostStats(host, basic){
   var root = qs('host-stats');
   if(!root) return;
@@ -12806,9 +15751,161 @@ function renderHostStats(host, basic){
   if(Array.isArray(host.ifaces) && host.ifaces.length) meta.push('网卡 ' + host.ifaces.map(function(x){ return String(x.name || ''); }).filter(Boolean).join(', '));
   if(host.load1 != null) meta.push('负载 ' + String(host.load1) + '/' + String(host.load5) + '/' + String(host.load15));
   if(host.uptime_sec != null) meta.push('运行 ' + fmtSecShort(host.uptime_sec));
+  if(host.temperature_source_label) meta.push('温度源 ' + String(host.temperature_source_label));
   if(sniff.state) meta.push('采集 ' + sniffLabel);
   if(sniff.msg) meta.push(String(sniff.msg));
   qs('host-meta').textContent = meta.length ? meta.join(' | ') : '-';
+}
+function renderSystemServiceStatus(data){
+  data = data || {};
+  lastSystemServiceStatus = data;
+  var iw = data.iw || {};
+  var sec = data.security || {};
+  var lines = [];
+  if(data.supported){
+    lines.push('服务: ' + String(data.service_name || 'light-rid-scanner.service'));
+    lines.push('注册: ' + (data.registered ? '已注册' : '未注册')
+      + ' | 开机自启: ' + String(data.enabled || 'unknown')
+      + ' | 运行状态: ' + String(data.active || 'unknown'));
+    lines.push('当前进程: ' + String(data.current_user || '-') + ' / uid=' + String(data.current_uid == null ? '-' : data.current_uid)
+      + (data.running_as_root ? ' | root 高权限运行' : ' | 非 root'));
+    lines.push('专用账号: ' + String(data.dedicated_user || 'rid') + (data.dedicated_user_exists ? ' 已存在' : ' 未创建')
+      + ' | 服务账号: ' + String(data.actual_service_user || '未声明'));
+    if(Array.isArray(data.service_capabilities) && data.service_capabilities.length) lines.push('采集能力: ' + data.service_capabilities.join(', '));
+    if(data.service_path) lines.push('服务文件: ' + String(data.service_path));
+    if(data.exec_start) lines.push('启动命令: ' + String(data.exec_start));
+    if(data.registered && data.unit_matches === false) lines.push('当前服务文件与本页生成的启动参数不一致，可点击注册/更新服务。');
+    if(data.running_as_root) lines.push('安全告警: 当前网页服务处于 root 权限，建议一键修复为 rid 专用账号运行。');
+    if(data.registered && !data.service_uses_dedicated_user) lines.push('安全告警: 当前服务文件未声明 rid 专用账号。');
+  }else{
+    lines.push('systemd: 不可用' + (data.reason ? ('，' + String(data.reason)) : ''));
+    if(data.manual_hint) lines.push(String(data.manual_hint));
+  }
+  lines.push('iw: ' + (iw.available ? ('可用 ' + String(iw.path || '')) : '未安装'));
+  if(iw.message && !iw.available) lines.push(String(iw.message));
+  if(iw.manual_hint && !iw.available) lines.push(String(iw.manual_hint));
+  if(data.last_error) lines.push('状态读取错误: ' + String(data.last_error));
+  var securityWarn = !!(data.running_as_root || (data.registered && !data.service_uses_dedicated_user) || !data.dedicated_user_exists);
+  setStatus('status-system-service', lines.join('\\n'), !iw.available || (!!data.supported && securityWarn));
+  renderRuntimeSecurityAlert(data, sec);
+  var regBtn = qs('btn-service-register');
+  if(regBtn) regBtn.disabled = !data.supported || !data.can_elevate || !data.dedicated_user_exists;
+  var iwBtn = qs('btn-iw-install');
+  if(iwBtn) iwBtn.disabled = !!iw.available || !iw.can_install;
+  var repairBtn = qs('btn-security-repair');
+  if(repairBtn) repairBtn.disabled = !data.supported || !data.can_elevate;
+}
+function renderRuntimeSecurityAlert(data, sec){
+  var box = qs('runtime-security-alert');
+  if(!box) return;
+  data = data || {};
+  sec = sec || data.security || {};
+  var runningRoot = !!(data.running_as_root || sec.running_as_root);
+  var serviceOk = !!data.service_uses_dedicated_user && !!data.dedicated_user_exists;
+  box.classList.add('show');
+  box.classList.toggle('warn', runningRoot || !serviceOk);
+  box.classList.toggle('ok', !runningRoot && serviceOk);
+  if(qs('runtime-security-title')){
+    qs('runtime-security-title').textContent = runningRoot ? '当前处于 root 权限' : (serviceOk ? '运行权限正常' : '专用账号未完成');
+  }
+    if(qs('runtime-security-copy')){
+    if(runningRoot){
+      qs('runtime-security-copy').textContent = '当前网页服务和采集进程以 root 运行，存在安全风险。点击一键修复会创建/确认 rid 账号，并把 systemd 服务改为 rid 账号加网络能力运行。';
+    }else if(sec && sec.risk === 'missing-capabilities'){
+      qs('runtime-security-copy').textContent = '当前进程不是 root，但没有检测到采集所需网络能力。请执行一键修复，让 systemd 以 rid 账号和网络能力启动服务。';
+    }else if(!serviceOk){
+      qs('runtime-security-copy').textContent = '当前进程不是 root，但 systemd 服务还没有确认使用 rid 专用账号。需要 root 或临时 sudo 提权完成修复。';
+    }else{
+      qs('runtime-security-copy').textContent = '当前服务目标为 rid 专用账号，采集所需网络能力通过 systemd capability 提供。';
+    }
+  }
+}
+async function loadSystemServiceStatus(){
+  const data = await getJson('/api/settings/systemd/status');
+  renderSystemServiceStatus(data);
+  return data;
+}
+async function registerSystemdServiceFromSettings(){
+  if(!confirm('将写入 /etc/systemd/system/light-rid-scanner.service 并启用开机自启。继续？')) return;
+  var btn = qs('btn-service-register');
+  try{
+    if(btn) btn.disabled = true;
+    setStatus('status-system-service', '正在注册 systemd 服务...', false);
+    const body = await privilegedBody({confirm:true}, '注册/更新 systemd 服务需要 root 权限。请输入 sudo 密码；密码只用于本次请求，不会保存。');
+    const data = await postJson('/api/settings/systemd/register', body);
+    renderSystemServiceStatus((data && data.status) || {});
+    showNotice(data.message || 'systemd 服务已注册。', 'ok', 3600);
+  }catch(e){
+    setStatus('status-system-service', '注册失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 4200);
+  }finally{
+    await loadSystemServiceStatus().catch(function(){});
+  }
+}
+async function installIwFromSettings(){
+  if(!confirm('将执行 apt-get update 和 apt-get install -y iw。继续？')) return;
+  var btn = qs('btn-iw-install');
+  try{
+    if(btn) btn.disabled = true;
+    setStatus('status-system-service', '正在安装 iw...', false);
+    const body = await privilegedBody({confirm:true}, '安装 iw 需要 root 权限。请输入 sudo 密码；密码只用于本次请求，不会保存。');
+    const data = await postJson('/api/settings/iw/install', body);
+    if(data.status) renderSystemServiceStatus(data.status);
+    showNotice(data.message || 'iw 安装完成。', 'ok', 3600);
+  }catch(e){
+    setStatus('status-system-service', 'iw 安装失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 4600);
+  }finally{
+    await loadSystemServiceStatus().catch(function(){});
+  }
+}
+function refreshSystemServiceAfterRestart(delaySec){
+  var delayMs = Math.max(5000, Number(delaySec || 3) * 1000 + 4000);
+  var attempts = 0;
+  function tick(){
+    attempts += 1;
+    loadSystemServiceStatus().then(function(){
+      setStatus('status-system-service', '服务已自动重启，运行状态已刷新。', false);
+      showNotice('服务已自动重启，当前状态已刷新。', 'ok', 3600);
+    }).catch(function(){
+      if(attempts < 8){
+        setTimeout(tick, 2000);
+      }else{
+        setStatus('status-system-service', '服务正在重启。如果状态没有恢复，请稍后手动刷新页面。', true);
+        showNotice('服务正在重启。如果页面未恢复，请稍后手动刷新。', 'warn', 5200);
+      }
+    });
+  }
+  setTimeout(tick, delayMs);
+}
+async function repairRuntimeSecurityFromSettings(){
+  if(!confirm('将创建/确认 rid 专用账号、授予配置与缓存写权限，把 systemd 服务改为 rid 账号运行，并在完成后自动重启服务。继续？')) return;
+  var btn = qs('btn-security-repair');
+  var restartScheduled = false;
+  var restartDelay = 3;
+  try{
+    if(btn) btn.disabled = true;
+    setStatus('status-system-service', '正在修复运行权限...', false);
+    const body = await privilegedBody({confirm:true}, '一键修复需要 root 权限。请输入 sudo 密码；密码只用于创建账号、授权文件和写入 systemd 服务，本系统不会保存。');
+    const data = await postJson('/api/settings/security/repair', body);
+    restartScheduled = !!(data && data.restart_scheduled);
+    restartDelay = Number((data && data.restart_delay_sec) || restartDelay);
+    renderSystemServiceStatus((data && data.status) || {});
+    if(restartScheduled){
+      setStatus('status-system-service', '修复完成，服务将在几秒后自动重启；页面可能短暂断开。', false);
+      showNotice(data.message || '运行权限已修复，服务即将自动重启。', 'ok', 8200);
+      refreshSystemServiceAfterRestart(restartDelay);
+    }else{
+      showNotice(data.message || '运行权限已修复。', 'ok', 5200);
+    }
+  }catch(e){
+    setStatus('status-system-service', '修复失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 5200);
+  }finally{
+    if(!restartScheduled){
+      await loadSystemServiceStatus().catch(function(){});
+    }
+  }
 }
 function renderSettingsRuntime(data){
   data = data || {};
@@ -13397,6 +16494,7 @@ function collectVisualPayload(){
       enabled: check('cfg-auth-enabled'),
       realm: v('cfg-auth-realm'),
       session_ttl_min: n('cfg-auth-ttl'),
+      login_methods: ensureAuthLoginMethodSelection('', false),
       username: v('cfg-auth-user') || '__KEEP__',
       password: String((qs('cfg-auth-pass') && qs('cfg-auth-pass').value) || '').trim() || '__KEEP__'
     },
@@ -13408,7 +16506,8 @@ function collectVisualPayload(){
       enabled: check('cfg-app-update-enabled')
     },
     metrics: {
-      retention_days: n('cfg-metrics-retention')
+      retention_days: n('cfg-metrics-retention'),
+      temperature_source: v('cfg-metrics-temp-source') || 'auto'
     }
   };
 }
@@ -13427,6 +16526,11 @@ function visualPayloadSections(payload){
     },
     zones: {alarm_zones: ((payload.web || {}).alarm_zones || [])},
     access: {
+      web_access: {
+        access_list_enabled: ((payload.web || {}).access_list_enabled),
+        access_list_mode: ((payload.web || {}).access_list_mode),
+        access_list: ((payload.web || {}).access_list || [])
+      },
       notify: payload.notify || {},
       api: payload.api || {},
       auth: payload.auth || {}
@@ -13444,6 +16548,7 @@ function setDraftUi(dirtyMap){
   });
   if(qs('btn-test-visual')) qs('btn-test-visual').disabled = !settingsState.visualDirty;
   if(qs('btn-save-visual')) qs('btn-save-visual').disabled = !settingsState.visualDirty;
+  if(qs('btn-save-visual-direct')) qs('btn-save-visual-direct').disabled = false;
   if(qs('draft-title')) qs('draft-title').textContent = settingsState.visualDirty ? '有未保存修改' : '当前没有未保存修改';
   if(qs('draft-meta')){
     var names = SETTINGS_DRAFT_SECTIONS
@@ -13483,11 +16588,13 @@ function bindVisualDraftTracking(){
   });
 }
 function setVisualActionBusy(busy){
-  ['btn-test-visual','btn-save-visual','btn-reload-view'].forEach(function(id){
+  ['btn-test-visual','btn-save-visual','btn-save-visual-direct','btn-reload-view'].forEach(function(id){
     var el = qs(id);
     if(!el) return;
     if(id === 'btn-test-visual' || id === 'btn-save-visual'){
       el.disabled = !!busy || (!settingsState.visualDirty);
+    }else if(id === 'btn-save-visual-direct'){
+      el.disabled = !!busy;
     }else{
       el.disabled = !!busy;
     }
@@ -13530,6 +16637,269 @@ function closeOneTimeSecret(){
   oneTimeSecretValue = '';
   qs('one-time-secret').textContent = '';
   qs('one-time-modal').classList.remove('show');
+}
+function b64uToBytes(text){
+  var raw = String(text || '').replace(/-/g,'+').replace(/_/g,'/');
+  while(raw.length % 4) raw += '=';
+  if(!raw) return new Uint8Array(0);
+  var bin = atob(raw);
+  var out = new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64u(bytes){
+  var view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  var bin = '';
+  for(var i=0;i<view.length;i++) bin += String.fromCharCode(view[i]);
+  return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+}
+function formatBytes(size){
+  var n = Number(size);
+  if(!isFinite(n) || n < 0) return '-';
+  if(n < 1024) return String(n) + ' B';
+  if(n < 1024 * 1024) return (n / 1024).toFixed(1).replace(/\\.0$/, '') + ' KB';
+  if(n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1).replace(/\\.0$/, '') + ' MB';
+  return (n / (1024 * 1024 * 1024)).toFixed(1).replace(/\\.0$/, '') + ' GB';
+}
+function formatMtime(ts){
+  var d = new Date(Number(ts || 0) * 1000);
+  return isFinite(d.getTime()) ? d.toLocaleString() : '-';
+}
+function rawPathLabel(path){
+  var raw = String(path || '');
+  if(!raw) return '-';
+  return raw;
+}
+function rawActivePath(){
+  return String(settingsState.rawSelectedPath || '');
+}
+function rawSetMeta(data){
+  data = data || {};
+  if(qs('raw-tree-path')) qs('raw-tree-path').textContent = String(data.root || settingsState.rawRoot || '-');
+  if(qs('raw-file-title')) qs('raw-file-title').textContent = String(data.name || ((data.rel_path && String(data.rel_path) !== '-') ? data.rel_path : '') || ((data.path && String(data.path) !== '-') ? data.path : '') || '未选择文件');
+  if(qs('raw-file-path')) qs('raw-file-path').textContent = String(data.rel_path || data.path || '-');
+  if(qs('raw-file-size')) qs('raw-file-size').textContent = data.size == null ? '-' : formatBytes(data.size);
+  if(qs('raw-file-mtime')) qs('raw-file-mtime').textContent = data.mtime ? formatMtime(data.mtime) : '-';
+}
+function rawSetLocked(isLocked, message){
+  var card = qs('raw-lock-card');
+  var layout = qs('raw-layout');
+  if(card) card.style.display = isLocked ? 'grid' : 'none';
+  if(layout) layout.style.opacity = isLocked ? '0.55' : '1';
+  var editor = qs('raw-editor');
+  if(editor) editor.disabled = !!isLocked;
+  ['btn-save-raw','btn-delete-raw','btn-load-raw'].forEach(function(id){
+    var el = qs(id);
+    if(el) el.disabled = !!isLocked && id !== 'btn-load-raw';
+  });
+  if(qs('raw-lock-copy') && message) qs('raw-lock-copy').textContent = String(message);
+}
+function rawRenderTreeNodes(nodes, selectedPath){
+  var list = Array.isArray(nodes) ? nodes : [];
+  if(!list.length) return '<div class="empty-state">暂无配置文件</div>';
+  return list.map(function(node){
+    node = node || {};
+    var type = String(node.type || 'file');
+    var name = enc(node.name || (type === 'dir' ? '目录' : '文件'));
+    var rel = enc(node.rel_path || '');
+    var path = enc(node.path || '');
+    if(type === 'dir'){
+      return '<details class="raw-dir" open><summary title="'+rel+'">'+name+'</summary><div class="raw-dir-child">'+rawRenderTreeNodes(node.children || [], selectedPath)+'</div></details>';
+    }
+    var active = String(node.path || '') === String(selectedPath || '');
+    return '<button class="raw-file-btn'+(active ? ' active' : '')+'" type="button" data-path="'+path+'" data-rel="'+rel+'"><span class="clip" title="'+path+'">'+name+'</span><span class="micro">'+enc(formatBytes(node.size))+'</span></button>';
+  }).join('');
+}
+function rawRenderTree(data){
+  data = data || {};
+  settingsState.rawTree = data;
+  settingsState.rawRoot = String(data.root || settingsState.rawRoot || '');
+  if(qs('raw-tree')) qs('raw-tree').innerHTML = rawRenderTreeNodes(data.tree || [], rawActivePath());
+  rawSetMeta({root:data.root || settingsState.rawRoot || '-', name:'未选择文件', rel_path:'', path:'', size:null, mtime:null});
+}
+function rawFirstFile(nodes){
+  var list = Array.isArray(nodes) ? nodes : [];
+  for(var i=0;i<list.length;i++){
+    var item = list[i] || {};
+    if(item.type === 'file' && item.path) return String(item.path);
+    var child = rawFirstFile(item.children || []);
+    if(child) return child;
+  }
+  return '';
+}
+function rawRefreshButtons(){
+  var unlocked = !!settingsState.rawUnlocked;
+  var hasPath = !!settingsState.rawSelectedPath;
+  var treeReady = !!settingsState.rawTree;
+  ['btn-save-raw','btn-delete-raw','btn-load-raw'].forEach(function(id){
+    var el = qs(id);
+    if(!el) return;
+    if(id === 'btn-load-raw'){
+      el.disabled = !unlocked;
+    }else{
+      el.disabled = !unlocked || !hasPath || !treeReady;
+    }
+  });
+}
+async function rawLoadFile(path){
+  var filePath = String(path || settingsState.rawSelectedPath || '').trim();
+  if(!filePath) throw new Error('请选择一个配置文件');
+  const data = await getJson('/api/config/file?path=' + encodeURIComponent(filePath));
+  settingsState.rawUnlocked = true;
+  settingsState.rawLoaded = true;
+  settingsState.rawSelectedPath = String(data.path || filePath);
+  settingsState.rawSelectedRel = String(data.rel_path || '');
+  rawRenderTree(settingsState.rawTree || data.tree || {});
+  rawSetMeta(data);
+  if(qs('raw-editor')) qs('raw-editor').value = String(data.text || '');
+  rawSetLocked(false, '');
+  rawRefreshButtons();
+  setStatus('status-raw', '已读取: ' + String(data.rel_path || data.path || '-'), false);
+  return data;
+}
+async function rawLoadTree(){
+  const data = await getJson('/api/config/tree');
+  settingsState.rawUnlocked = true;
+  settingsState.rawRoot = String(data.root || '');
+  settingsState.rawTree = data;
+  rawRenderTree(data);
+  rawSetLocked(false, '');
+  rawRefreshButtons();
+  return data;
+}
+async function loadRaw(){
+  try{
+    const treeData = await rawLoadTree();
+    var target = String(settingsState.rawSelectedPath || '');
+    if(!target){
+      target = rawFirstFile(treeData.tree || []);
+      settingsState.rawSelectedPath = target;
+    }
+    if(target){
+      await rawLoadFile(target);
+    }else{
+      settingsState.rawLoaded = true;
+      rawSetMeta({root: treeData.root || settingsState.rawRoot || '-', name:'未选择文件', rel_path:'-', path:'-', size:null, mtime:null});
+      if(qs('raw-editor')) qs('raw-editor').value = '';
+      rawRefreshButtons();
+    }
+  }catch(e){
+    var msg = e && e.message ? e.message : String(e);
+    if(msg.indexOf('unlock required') >= 0 || msg.indexOf('raw config unlock required') >= 0){
+      settingsState.rawUnlocked = false;
+      settingsState.rawLoaded = false;
+      rawSetLocked(true, '需要先验证网页登录密码，才能查看和编辑配置文件。');
+      rawRefreshButtons();
+      openReauth('raw-unlock');
+      setStatus('status-raw', msg, true);
+      return;
+    }
+    throw e;
+  }
+}
+async function saveRaw(){
+  var selected = String(settingsState.rawSelectedPath || '').trim();
+  if(!selected) throw new Error('请选择一个配置文件');
+  const data = await postJson('/api/settings/raw/save', {path:selected, text:String(qs('raw-editor').value || '')});
+  settingsState.rawTree = null;
+  settingsState.rawLoaded = false;
+  setStatus('status-raw', '保存成功: ' + String(data.saved_to || '-') + '\\n' + String(data.reload_msg || ''), false);
+  showNotice('原始配置已保存', 'ok', 3200);
+  await loadRaw().catch(function(){});
+}
+async function deleteRawFile(){
+  var selected = String(settingsState.rawSelectedPath || '').trim();
+  if(!selected) throw new Error('请选择一个配置文件');
+  if(!confirm('确认删除以下文件？\\n' + selected)) return;
+  const data = await postJson('/api/config/file/delete', {path:selected});
+  settingsState.rawSelectedPath = '';
+  settingsState.rawSelectedRel = '';
+  settingsState.rawTree = null;
+  setStatus('status-raw', '已删除: ' + String(data.deleted_path || '-') + '\\n' + String(data.backup_path || ''), false);
+  showNotice('原始配置文件已删除', 'ok', 2600);
+  await loadRaw().catch(function(){});
+}
+function renderPasskeyRows(items){
+  var root = qs('passkey-list');
+  if(!root) return;
+  var arr = Array.isArray(items) ? items.slice() : [];
+  if(!arr.length){
+    root.innerHTML = '<div class="empty-state">暂无通行密钥</div>';
+    return;
+  }
+  root.innerHTML = arr.map(function(item, idx){
+    item = item || {};
+    var id = String(item.id || '');
+    var name = enc(item.name || ('通行密钥 ' + (idx + 1)));
+    var created = item.created_ts ? formatMtime(item.created_ts) : '-';
+    var used = item.last_used_ts ? formatMtime(item.last_used_ts) : '未使用';
+    return '<div class="passkey-row" data-id="'+enc(id)+'">'
+      + '<div class="passkey-meta"><div class="passkey-title">'+name+'</div>'
+      + '<div class="passkey-sub">创建时间: '+enc(created)+' | 上次使用: '+enc(used)+'</div>'
+      + '<div class="passkey-badges"><span class="passkey-badge">签名计数 '+enc(String(item.sign_count || 0))+'</span><span class="passkey-badge">'+(item.enabled === false ? '已停用' : '已启用')+'</span></div>'
+      + '</div><button class="btn ghost warn passkey-delete" type="button">删除</button></div>';
+  }).join('');
+}
+async function createPasskeyWithCreds(){
+  if(!window.PublicKeyCredential || !navigator.credentials || !navigator.credentials.create){
+    throw new Error('当前浏览器不支持通行密钥创建');
+  }
+  var user = String(qs('reauth-user').value || '').trim();
+  var pass = String(qs('reauth-pass').value || '');
+  if(!user || !pass) throw new Error('请输入网页登录账号和密码');
+  var name = String((qs('cfg-passkey-name') && qs('cfg-passkey-name').value) || '').trim();
+  const start = await postJson('/api/settings/passkey/start', {username:user, password:pass, name:name});
+  if(!start.ok) throw new Error(start.error || '通行密钥创建失败');
+  var pk = start.publicKey || {};
+  var challenge = b64uToBytes(pk.challenge || start.challenge || start.challenge_token || '');
+  var userId = b64uToBytes((pk.user && pk.user.id) || '');
+  var createOptions = {
+    publicKey: {
+      challenge: challenge,
+      rp: pk.rp || {name:start.realm || 'Light RID Scanner', id:start.rp_id || location.hostname},
+      user: {
+        id: userId,
+        name: (pk.user && pk.user.name) || user,
+        displayName: (pk.user && pk.user.displayName) || (name || user),
+      },
+      pubKeyCredParams: pk.pubKeyCredParams || [{type:'public-key', alg:-7}],
+      timeout: pk.timeout || start.timeout_ms || 300000,
+      attestation: pk.attestation || 'none',
+      authenticatorSelection: pk.authenticatorSelection || {userVerification:'preferred', residentKey:'preferred'},
+      excludeCredentials: (pk.excludeCredentials || []).map(function(item){
+        return {type:'public-key', id:b64uToBytes(item.id || '')};
+      }),
+    }
+  };
+  var cred = await navigator.credentials.create(createOptions);
+  if(!cred) throw new Error('未获取到通行密钥凭据');
+  var response = cred.response || {};
+  const finish = await postJson('/api/settings/passkey/finish', {
+    challenge: start.challenge || start.challenge_token,
+    id: cred.id || '',
+    rawId: bytesToB64u(cred.rawId || new Uint8Array(0)),
+    type: cred.type || 'public-key',
+    response: {
+      clientDataJSON: bytesToB64u(response.clientDataJSON || new Uint8Array(0)),
+      attestationObject: bytesToB64u(response.attestationObject || new Uint8Array(0)),
+      authenticatorData: bytesToB64u(response.authenticatorData || new Uint8Array(0)),
+      signature: bytesToB64u(response.signature || new Uint8Array(0)),
+      userHandle: response.userHandle ? bytesToB64u(response.userHandle) : '',
+    },
+    name: name,
+    username: user,
+    next: '/',
+  });
+  renderPasskeyRows(finish.passkeys || []);
+  showNotice('通行密钥已添加', 'ok', 3200);
+  if(qs('cfg-passkey-name')) qs('cfg-passkey-name').value = '';
+  return finish;
+}
+async function deletePasskey(id){
+  const data = await postJson('/api/settings/passkey/delete', {id:String(id || '')});
+  renderPasskeyRows(data.passkeys || []);
+  showNotice('通行密钥已删除', 'ok', 2600);
+  return data;
 }
 function fmtSsoExpiry(item){
   item = item || {};
@@ -13883,6 +17253,7 @@ async function loadVisual(){
   renderZoneRows(Array.isArray(w.alarm_zones) ? w.alarm_zones : []);
   renderHostStats(data.host || {}, b);
   renderEulaState(data.eula || {});
+  loadSystemServiceStatus().catch(function(e){ setStatus('status-system-service', e.message || e, true); });
   loadRuntimePanel().catch(function(){});
   loadMetrics().catch(function(){});
   qs('cfg-notify-enabled').checked = !!nt.enabled;
@@ -13896,7 +17267,15 @@ async function loadVisual(){
   qs('cfg-api-whitelist-mode').value = String(api.whitelist_mode || 'allow');
   qs('cfg-api-whitelist').value = Array.isArray(api.whitelist) ? api.whitelist.join('\\n') : '';
   updateApiWhitelistUi(!!api.whitelist_effective);
+  settingsState.authConfigured = !!auth.configured;
   qs('cfg-auth-enabled').checked = !!auth.enabled;
+  qs('cfg-auth-method-password').checked = false;
+  qs('cfg-auth-method-passkey').checked = false;
+  qs('cfg-auth-method-sso').checked = false;
+  (Array.isArray(auth.login_methods) && auth.login_methods.length ? auth.login_methods : ['password','passkey','sso']).forEach(function(method){
+    var id = method === 'password' ? 'cfg-auth-method-password' : (method === 'passkey' ? 'cfg-auth-method-passkey' : (method === 'sso' ? 'cfg-auth-method-sso' : ''));
+    if(id && qs(id)) qs(id).checked = true;
+  });
   qs('cfg-auth-user').value = '';
   qs('cfg-auth-user').placeholder = '留空即不修改';
   qs('cfg-auth-pass').value = '';
@@ -13912,13 +17291,19 @@ async function loadVisual(){
   if(qs('api-token-new-single-use')) qs('api-token-new-single-use').checked = false;
   setLoginLinkExpiryUi();
   setApiTokenCreateExpiryUi();
-  qs('login-link-state').textContent = auth.enabled && auth.configured
-    ? '生成的链接可在下面管理'
-    : '网页登录账号密码完整时，SSO 登录链接可用。';
-  qs('btn-login-link-create').disabled = !(auth.enabled && auth.configured);
   qs('btn-api-token-add').disabled = !(auth.enabled && auth.configured);
   renderLoginLinks(auth.sso_links || []);
+  renderPasskeyRows(Array.isArray(auth.passkeys) ? auth.passkeys : []);
+  if(qs('cfg-passkey-name')) qs('cfg-passkey-name').value = '';
+  syncAuthMethodUi();
+  var rawAccess = data.raw_access || {};
+  settingsState.rawUnlocked = !rawAccess.required || !!rawAccess.unlocked;
+  settingsState.rawRoot = String(rawAccess.root || settingsState.rawRoot || '');
+  settingsState.rawSelectedPath = String(data.path || settingsState.rawSelectedPath || '');
+  rawSetLocked(!settingsState.rawUnlocked, settingsState.rawUnlocked ? '' : '需要先验证网页登录密码，才能查看和编辑配置文件。');
+  rawRefreshButtons();
   qs('cfg-metrics-retention').value = String(mc.retention_days || 7);
+  qs('cfg-metrics-temp-source').value = String(mc.temperature_source || 'auto');
   var apiTokenCount = Array.isArray(api.tokens) ? api.tokens.length : 0;
   qs('secret-state').textContent = '通知通道 ' + String((nt.wecom_webhooks || []).length || 0)
     + ' | API Token ' + String(apiTokenCount) + ' 个'
@@ -13927,11 +17312,8 @@ async function loadVisual(){
   resetVisualDraftState();
   if(data.path) setStatus('status-visual', '配置文件: ' + data.path, false);
 }
-async function loadRaw(){
-  const data = await getJson('/api/config');
-  settingsState.rawLoaded = true;
-  qs('raw-editor').value = String(data.text || '');
-  setStatus('status-raw', '已读取: ' + String(data.path || '-'), false);
+async function loadRawLegacyUnused(){
+  return loadRaw();
 }
 async function saveVisual(){
   const payload = collectVisualPayload();
@@ -13951,13 +17333,13 @@ async function testVisual(){
   setStatus('status-visual', msg, false);
   showNotice('测试通过，当前运行配置已回滚。', 'ok', 3000);
 }
-async function saveRaw(){
-  const data = await postJson('/api/settings/raw/save', {text: String(qs('raw-editor').value || '')});
-  setStatus('status-raw', '保存成功: ' + String(data.saved_to || '-') + '\\n' + String(data.reload_msg || ''), false);
+async function saveRawLegacyUnused(){
+  return saveRaw();
 }
 function bindShellActions(){
   on('btn-back', 'click', function(){ location.href='/'; });
   on('btn-logs', 'click', function(){ location.href='/logs'; });
+  on('btn-logout', 'click', function(){ location.href='/logout'; });
   on('btn-theme', 'click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
   on('btn-open-hw', 'click', function(){ location.href='/hardware-assistant'; });
   on('btn-diagnostic-export', 'click', async function(){
@@ -14073,6 +17455,20 @@ async function confirmReauthAction(){
       await createApiTokenWithCreds();
       setStatus('status-visual', 'API Token 已生成，只在弹窗中显示一次。', false);
       showNotice('API Token 已生成。', 'ok', 2600);
+    }else if(action === 'raw-unlock'){
+      var user = String(qs('reauth-user').value || '').trim();
+      var pass = String(qs('reauth-pass').value || '');
+      if(!user || !pass) throw new Error('请输入网页登录账号和密码');
+      const data = await postJson('/api/settings/raw/unlock', {username:user, password:pass});
+      if(!data.ok) throw new Error(data.error || '原始配置解锁失败');
+      settingsState.rawUnlocked = true;
+      rawSetLocked(false, '');
+      rawRefreshButtons();
+      showNotice('原始配置已解锁', 'ok', 2600);
+      await loadRaw().catch(function(){});
+    }else if(action === 'passkey-create'){
+      await createPasskeyWithCreds();
+      if(qs('passkey-state')) qs('passkey-state').textContent = '通行密钥已添加，可直接用于网页登录。';
     }else{
       throw new Error('不支持的二次验证操作');
     }
@@ -14087,9 +17483,25 @@ function bindAccessActions(){
   on('api-token-list', 'click', handleApiTokenListClick);
   on('api-token-list', 'change', handleApiTokenListChange);
   on('btn-login-link-create', 'click', function(){ openReauth('login-link'); });
+  on('btn-passkey-add', 'click', function(){ openReauth('passkey-create'); });
+  on('cfg-auth-enabled', 'change', syncAuthMethodUi);
+  ['cfg-auth-method-password','cfg-auth-method-passkey','cfg-auth-method-sso'].forEach(function(id){
+    on(id, 'change', function(){
+      ensureAuthLoginMethodSelection(id, true);
+      syncAuthMethodUi();
+    });
+  });
   on('login-link-expire-mode', 'change', setLoginLinkExpiryUi);
   on('api-token-new-expire-mode', 'change', setApiTokenCreateExpiryUi);
   on('login-link-list', 'click', handleLoginLinkListClick);
+  on('passkey-list', 'click', function(ev){
+    var row = ev.target && ev.target.closest ? ev.target.closest('.passkey-row') : null;
+    if(!row) return;
+    var id = row.getAttribute('data-id') || '';
+    var del = ev.target && ev.target.closest ? ev.target.closest('.passkey-delete') : null;
+    if(!del) return;
+    deletePasskey(id).catch(function(e){ showNotice(e.message || e, 'warn', 3600); });
+  });
   on('btn-one-time-copy', 'click', function(){ copyTextPlain(oneTimeSecretValue).then(function(){ showNotice('已复制。', 'ok', 1800); }).catch(function(e){ showNotice(e.message || e, 'warn', 2600); }); });
   on('btn-one-time-close', 'click', closeOneTimeSecret);
   on('one-time-modal', 'click', function(ev){ if(ev.target === qs('one-time-modal')) closeOneTimeSecret(); });
@@ -14104,12 +17516,44 @@ function bindAccessActions(){
     updateVisualDraftState();
   });
 }
+function bindSystemServiceActions(){
+  on('btn-service-refresh', 'click', function(){
+    guarded(loadSystemServiceStatus, 'status-system-service', '服务状态已刷新。', 1800, 3600);
+  });
+  on('btn-service-register', 'click', registerSystemdServiceFromSettings);
+  on('btn-iw-install', 'click', installIwFromSettings);
+  on('btn-security-repair', 'click', repairRuntimeSecurityFromSettings);
+  on('btn-elevate-cancel', 'click', function(){ closeElevate(null); });
+  on('btn-elevate-confirm', 'click', function(){ closeElevate(qs('elevate-pass') ? qs('elevate-pass').value : ''); });
+  on('elevate-pass', 'keydown', function(ev){
+    if(ev.key === 'Enter'){
+      ev.preventDefault();
+      closeElevate(qs('elevate-pass') ? qs('elevate-pass').value : '');
+    }
+  });
+  on('elevate-modal', 'click', function(ev){ if(ev.target === qs('elevate-modal')) closeElevate(null); });
+}
 function bindRawActions(){
   on('btn-load-raw', 'click', function(){
     guarded(loadRaw, 'status-raw', '原始配置已读取。', 2200);
   });
   on('btn-save-raw', 'click', function(){
-    guarded(saveRaw, 'status-raw', '原始配置已检查并应用。', 2600);
+    guarded(saveRaw, 'status-raw', '原始配置已保存。', 2600);
+  });
+  on('btn-delete-raw', 'click', function(){
+    guarded(deleteRawFile, 'status-raw', '原始配置文件已删除。', 2600);
+  });
+  on('btn-raw-unlock', 'click', function(){ openReauth('raw-unlock'); });
+  on('btn-raw-unlock-inline', 'click', function(){ openReauth('raw-unlock'); });
+  on('raw-tree', 'click', function(ev){
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.raw-file-btn') : null;
+    if(!btn) return;
+    var path = btn.getAttribute('data-path') || '';
+    if(!path) return;
+    settingsState.rawSelectedPath = path;
+    settingsState.rawSelectedRel = btn.getAttribute('data-rel') || '';
+    rawRefreshButtons();
+    guarded(function(){ return rawLoadFile(path); }, 'status-raw', '已切换配置文件。', 1800);
   });
 }
 function bindSaveActions(){
@@ -14125,6 +17569,17 @@ function bindSaveActions(){
     }
   });
   on('btn-save-visual', 'click', async function(){
+    try{
+      setVisualActionBusy(true);
+      await saveVisual();
+    }catch(e){
+      setStatus('status-visual', e.message || e, true);
+      showNotice(e.message || e, 'warn', 3800);
+    }finally{
+      setVisualActionBusy(false);
+    }
+  });
+  on('btn-save-visual-direct', 'click', async function(){
     try{
       setVisualActionBusy(true);
       await saveVisual();
@@ -14153,7 +17608,7 @@ function bindMapAndZoneActions(){
   attachRowRemove('zone-list', function(){ renderZoneRows([]); });
 }
 function bindBrowserPreferenceActions(){
-  ['pref-realtime-track','pref-track-2h'].forEach(function(id){
+  ['pref-realtime-track','pref-track-2h','pref-new-firmware-parser'].forEach(function(id){
     on(id, 'change', saveBrowserPrefs);
   });
 }
@@ -14173,6 +17628,7 @@ function initializeSettingsPage(){
   bindMetricActions();
   bindHomeToolActions();
   bindAccessActions();
+  bindSystemServiceActions();
   bindRawActions();
   bindSaveActions();
   bindMapAndZoneActions();
@@ -14202,7 +17658,7 @@ def http_server_thread() -> None:
         allow_reuse_address = True
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "LightRID/1.0"
+        server_version = APP_SERVER_HEADER
         sys_version = ""
 
         def end_headers(self):
@@ -14442,6 +17898,16 @@ def http_server_thread() -> None:
                 return False
             return True
 
+        def _require_raw_config_access(self) -> bool:
+            if not self._require_page_api():
+                return False
+            if not (_auth_enabled() and _auth_hashes_present(AUTH_CFG)):
+                return True
+            if _raw_config_unlocked(self.headers.get("Cookie")):
+                return True
+            self._page_api_fail(403, "raw config unlock required")
+            return False
+
         def _require_api_token(self, query: dict | None = None) -> bool:
             if not _api_token_enabled():
                 return False
@@ -14484,6 +17950,47 @@ def http_server_thread() -> None:
                 return
             if path == "/api/eula/status":
                 self._send_json(_eula_status_payload(), 200)
+                return
+            if path == "/api/config/tree":
+                if not self._require_raw_config_access():
+                    return
+                try:
+                    root = _config_root_dir()
+                    self._send_json({
+                        "ok": True,
+                        "root": root,
+                        "root_name": os.path.basename(root.rstrip("\\/")) or root,
+                        "tree": _config_tree_entries(root).get("tree") or [],
+                        "raw_access": _raw_config_access_payload(self.headers),
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+                return
+            if path == "/api/config/file":
+                if not self._require_raw_config_access():
+                    return
+                try:
+                    file_path = _config_resolve_path((query.get("path") or [""])[0] if isinstance(query, dict) else None)
+                    if not file_path:
+                        self._send_json({"ok": False, "error": "invalid path"}, 400)
+                        return
+                    root = _config_root_dir()
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                    st = os.stat(file_path)
+                    self._send_json({
+                        "ok": True,
+                        "path": file_path,
+                        "rel_path": _config_rel_path(file_path, root),
+                        "root": root,
+                        "name": os.path.basename(file_path),
+                        "text": text,
+                        "size": int(st.st_size),
+                        "mtime": float(st.st_mtime),
+                        "raw_access": _raw_config_access_payload(self.headers),
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
                 return
             if path in ("/eula", "/eula.html"):
                 next_path = str((query.get("next") or ["/"])[0] or "/")
@@ -14585,11 +18092,7 @@ def http_server_thread() -> None:
                             sso_next = "/"
                         self._redirect(sso_next)
                     else:
-                        body = _build_login_html(next_path).replace(
-                            '<span class="status" id="status"></span>',
-                            '<span class="status err" id="status">SSO 登录失败或链接已失效</span>',
-                            1,
-                        ).encode("utf-8")
+                        body = _build_login_html(next_path, "SSO 登录失败或链接已失效", True).encode("utf-8")
                         self.send_response(401)
                         self.send_header("Content-Type", "text/html; charset=utf-8")
                         self.send_header("Content-Length", str(len(body)))
@@ -14693,7 +18196,7 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _sanitize_track(src.get("track") or [])
+                    track = _track_for_query(src.get("track") or [], query)
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
@@ -14743,7 +18246,7 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _sanitize_track(src.get("track") or [])
+                    track = _track_for_query(src.get("track") or [], query)
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
@@ -14793,17 +18296,48 @@ def http_server_thread() -> None:
                 self.end_headers()
                 self.wfile.write(body)
             elif path == "/api/config":
-                if not APP_CONFIG_PATH:
-                    self._send_json({"ok": False, "error": "config path missing"}, 500)
+                if not self._require_raw_config_access():
                     return
                 try:
-                    ensure_config_file(APP_CONFIG_PATH)
-                    with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
-                        text = f.read()
+                    self._send_json(_config_file_payload(APP_CONFIG_PATH), 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/config/tree":
+                if not self._require_raw_config_access():
+                    return
+                try:
+                    root = _config_root_dir()
                     self._send_json({
                         "ok": True,
-                        "path": APP_CONFIG_PATH,
+                        "root": root,
+                        "root_name": os.path.basename(root.rstrip("\\/")) or root,
+                        "tree": _config_tree_entries(root).get("tree") or [],
+                        "raw_access": _raw_config_access_payload(self.headers),
+                    }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/config/file":
+                if not self._require_raw_config_access():
+                    return
+                try:
+                    file_path = _config_resolve_path((query.get("path") or [""])[0] if isinstance(query, dict) else None)
+                    if not file_path:
+                        self._send_json({"ok": False, "error": "invalid path"}, 400)
+                        return
+                    root = _config_root_dir()
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                    st = os.stat(file_path)
+                    self._send_json({
+                        "ok": True,
+                        "path": file_path,
+                        "rel_path": _config_rel_path(file_path, root),
+                        "root": root,
+                        "name": os.path.basename(file_path),
                         "text": text,
+                        "size": int(st.st_size),
+                        "mtime": float(st.st_mtime),
+                        "raw_access": _raw_config_access_payload(self.headers),
                     }, 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
@@ -14833,6 +18367,8 @@ def http_server_thread() -> None:
                 else:
                     window_sec = 24 * 3600
                 self._send_json(_host_metrics_payload(window_sec=window_sec), 200)
+            elif path == "/api/settings/systemd/status":
+                self._send_json(_systemd_service_status_payload(), 200)
             elif path == "/api/settings/models/list":
                 self._send_json(_model_map_editor_payload(), 200)
             elif path == "/api/logs/view":
@@ -15034,6 +18570,43 @@ def http_server_thread() -> None:
                 rsp = _oobe_save_config(body)
                 self._send_json(rsp, 200 if rsp.get("ok") else 400)
                 return
+            if path == "/api/settings/raw/unlock":
+                if not self._require_page_api():
+                    return
+                body = self._read_json_body()
+                user = str(body.get("username") or "").strip()
+                pwd = str(body.get("password") or "")
+                if not user or not pwd:
+                    self._send_json({"ok": False, "error": "账号和密码必须同时填写", "raw_access": _raw_config_access_payload(self.headers)}, 400)
+                    return
+                if not _auth_check_userpass(user, pwd):
+                    self._send_json({"ok": False, "error": "账号或密码错误", "raw_access": _raw_config_access_payload(self.headers)}, 401)
+                    return
+                _raw_config_unlock_set(self.headers.get("Cookie"))
+                self._send_json({
+                    "ok": True,
+                    "unlocked": True,
+                    "raw_access": _raw_config_access_payload(self.headers),
+                }, 200)
+                return
+            if path == "/api/passkey/login/start":
+                if not _request_same_origin(self.headers) or not _page_api_header_ok(self.headers):
+                    self._page_api_fail(403, "page api header required")
+                    return
+                self._read_json_body()
+                rsp = _passkey_login_begin(self.headers)
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                return
+            if path == "/api/passkey/login/finish":
+                if not _request_same_origin(self.headers) or not _page_api_header_ok(self.headers):
+                    self._page_api_fail(403, "page api header required")
+                    return
+                body = self._read_json_body()
+                rsp, code = _passkey_finish_login(body, self.headers, client_ip=_client_ip_from_handler(self))
+                if rsp.get("ok"):
+                    self._auth_set_cookie_token = str(rsp.pop("session") or "")
+                self._send_json(rsp, code)
+                return
             if _oobe_redirect_required(path) and not (path in ("/login", "/login.html") and _oobe_auth_required()):
                 self._send_json({
                     "ok": False,
@@ -15045,6 +18618,9 @@ def http_server_thread() -> None:
                 body = self._read_json_body()
                 user = str(body.get("username") or "")
                 pwd = str(body.get("password") or "")
+                if not _auth_login_method_enabled("password"):
+                    self._send_json({"ok": False, "error": "账号密码登录已关闭"}, 403)
+                    return
                 ip = _client_ip_from_handler(self)
                 limited, retry_after = _rate_limited("login", ip, user, limit=8, window_sec=300, block_sec=900)
                 if limited:
@@ -15314,49 +18890,14 @@ def http_server_thread() -> None:
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/config/save":
+                if not self._require_raw_config_access():
+                    return
                 body = self._read_json_body()
-                if not APP_CONFIG_PATH:
-                    self._send_json({"ok": False, "error": "config path missing"}, 500)
-                    return
-                raw_text = str(body.get("text") or "")
-                if not raw_text.strip():
-                    self._send_json({"ok": False, "error": "empty config text"}, 400)
-                    return
                 try:
-                    parsed = json.loads(raw_text)
-                    if not isinstance(parsed, dict):
-                        self._send_json({"ok": False, "error": "config root must be object"}, 400)
-                        return
+                    rsp = _config_file_save_payload(str(body.get("path") or APP_CONFIG_PATH or ""), str(body.get("text") or ""), tag="config")
+                    self._send_json(rsp, 200)
                 except Exception as e:
-                    self._send_json({"ok": False, "error": f"invalid json: {e}"}, 400)
-                    return
-                parsed, guard_err = _prepare_security_cfg_for_save(parsed)
-                if guard_err:
-                    self._send_json({"ok": False, "error": guard_err}, 400)
-                    return
-                b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="config")
-                if not b_ok:
-                    self._send_json({"ok": False, "error": f"backup failed: {backup_path}"}, 500)
-                    return
-                ok, msg = save_app_config(APP_CONFIG_PATH, parsed)
-                if not ok:
-                    self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
-                    return
-                cfg_loaded = load_app_config(APP_CONFIG_PATH)
-                r_ok, r_msg = reload_runtime_config(cfg_loaded)
-                if not r_ok:
-                    restore_config_backup(APP_CONFIG_PATH, backup_path)
-                    _op_log("config-save", f"reload_failed={r_msg}", ip=_client_ip_from_handler(self), ok=False)
-                    self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
-                    return
-                _op_log("config-save", f"backup={backup_path}", ip=_client_ip_from_handler(self), ok=True)
-                self._send_json({
-                    "ok": True,
-                    "saved_to": APP_CONFIG_PATH,
-                    "backup_path": backup_path,
-                    "reloaded": bool(r_ok),
-                    "reload_msg": r_msg,
-                }, 200)
+                    self._send_json({"ok": False, "error": str(e)}, 400)
             elif path == "/api/settings/visual/test":
                 body = self._read_json_body()
                 rsp = _save_visual_settings(body, test_only=True)
@@ -15368,46 +18909,58 @@ def http_server_thread() -> None:
                 _op_log("settings-save", str(rsp.get("error") or rsp.get("backup_path") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 self._send_json(rsp, 200 if rsp.get("ok") else 400)
             elif path == "/api/settings/raw/save":
+                if not self._require_raw_config_access():
+                    return
                 body = self._read_json_body()
-                raw_text = str(body.get("text") or "")
-                if not raw_text.strip():
-                    self._send_json({"ok": False, "error": "empty config text"}, 400)
-                    return
                 try:
-                    parsed = json.loads(raw_text)
-                    if not isinstance(parsed, dict):
-                        self._send_json({"ok": False, "error": "config root must be object"}, 400)
-                        return
+                    rsp = _config_file_save_payload(str(body.get("path") or APP_CONFIG_PATH or ""), str(body.get("text") or ""), tag="raw")
+                    self._send_json(rsp, 200)
                 except Exception as e:
-                    self._send_json({"ok": False, "error": f"invalid json: {e}"}, 400)
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+            elif path == "/api/config/file/delete":
+                if not self._require_raw_config_access():
                     return
-                parsed, guard_err = _prepare_security_cfg_for_save(parsed)
-                if guard_err:
-                    self._send_json({"ok": False, "error": guard_err}, 400)
+                body = self._read_json_body()
+                try:
+                    rsp = _config_file_delete_payload(str(body.get("path") or ""))
+                    self._send_json(rsp, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+            elif path == "/api/settings/passkey/start":
+                if not self._require_page_api():
                     return
-                b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="raw")
-                if not b_ok:
-                    self._send_json({"ok": False, "error": f"backup failed: {backup_path}"}, 500)
+                body = self._read_json_body()
+                rsp = _passkey_register_begin(body, self.headers, client_ip=_client_ip_from_handler(self))
+                code = 200
+                if isinstance(rsp, tuple):
+                    payload, code = rsp
+                    self._send_json(payload, code)
+                else:
+                    code = 200 if rsp.get("ok") else 400
+                    self._send_json(rsp, code)
+            elif path == "/api/settings/passkey/finish":
+                if not self._require_page_api():
                     return
-                ok, msg = save_app_config(APP_CONFIG_PATH, parsed)
+                body = self._read_json_body()
+                rsp, code = _passkey_finish_register(body, self.headers, client_ip=_client_ip_from_handler(self))
+                self._send_json(rsp, code)
+            elif path == "/api/settings/passkey/delete":
+                if not self._require_page_api():
+                    return
+                body = self._read_json_body()
+                passkey_id = str(body.get("id") or "").strip()
+                if not passkey_id:
+                    self._send_json({"ok": False, "error": "id required"}, 400)
+                    return
+                def _remove_passkey(items):
+                    return [x for x in items if str((x or {}).get("id") or "") != passkey_id]
+                ok, msg, passkeys = _auth_mutate_passkeys(_remove_passkey, tag="passkey_delete")
                 if not ok:
-                    self._send_json({"ok": False, "error": f"save failed: {msg}"}, 500)
+                    self._send_json({"ok": False, "error": msg, "passkeys": passkeys}, 500)
                     return
-                cfg_loaded = load_app_config(APP_CONFIG_PATH)
-                r_ok, r_msg = reload_runtime_config(cfg_loaded)
-                if not r_ok:
-                    restore_config_backup(APP_CONFIG_PATH, backup_path)
-                    _op_log("settings-raw-save", f"reload_failed={r_msg}", ip=_client_ip_from_handler(self), ok=False)
-                    self._send_json({"ok": False, "error": f"reload failed: {r_msg}", "backup_path": backup_path}, 500)
-                    return
-                _op_log("settings-raw-save", f"backup={backup_path}", ip=_client_ip_from_handler(self), ok=True)
-                self._send_json({
-                    "ok": True,
-                    "saved_to": APP_CONFIG_PATH,
-                    "backup_path": backup_path,
-                    "reloaded": bool(r_ok),
-                    "reload_msg": r_msg,
-                }, 200)
+                _op_log("passkey-delete", "id=" + passkey_id[:16], actor="-", ip=_client_ip_from_handler(self), ok=True)
+                self._send_json({"ok": True, "passkeys": passkeys, "id": passkey_id}, 200)
+                return
             elif path == "/api/settings/notify/test":
                 ok, resp = send_test_notification_from_config()
                 _op_log("notify-test", str(resp or ""), ip=_client_ip_from_handler(self), ok=bool(ok))
@@ -15420,6 +18973,49 @@ def http_server_thread() -> None:
                 self._read_json_body()
                 rsp = _check_app_update_once(manual=True)
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/settings/systemd/register":
+                body = self._read_json_body()
+                if not bool(body.get("confirm")):
+                    self._send_json({"ok": False, "error": "confirm required", "status": _systemd_service_status_payload()}, 400)
+                    return
+                rsp = register_systemd_service(sudo_password=_sudo_password_from_body(body))
+                _op_log("systemd-register", str(rsp.get("error") or rsp.get("message") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                if rsp.get("ok"):
+                    self._send_json(rsp, 200)
+                else:
+                    err = str(rsp.get("error") or "")
+                    code = 403 if ("root" in err or "权限" in err) else 500
+                    self._send_json(rsp, code)
+            elif path == "/api/settings/iw/install":
+                body = self._read_json_body()
+                if not bool(body.get("confirm")):
+                    self._send_json({"ok": False, "error": "confirm required", "status": _systemd_service_status_payload()}, 400)
+                    return
+                rsp = _install_iw_package(sudo_password=_sudo_password_from_body(body))
+                status = _systemd_service_status_payload()
+                payload = dict(rsp)
+                payload["status"] = status
+                payload["message"] = "iw 已安装并可用。" if rsp.get("ok") else str(rsp.get("error") or "iw 安装失败")
+                _op_log("iw-install", payload.get("message") or "", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                if rsp.get("ok"):
+                    self._send_json(payload, 200)
+                else:
+                    err = str(rsp.get("error") or "")
+                    code = 403 if ("root" in err or "权限" in err) else 500
+                    self._send_json(payload, code)
+            elif path == "/api/settings/security/repair":
+                body = self._read_json_body()
+                if not bool(body.get("confirm")):
+                    self._send_json({"ok": False, "error": "confirm required", "status": _systemd_service_status_payload()}, 400)
+                    return
+                rsp = repair_runtime_security(sudo_password=_sudo_password_from_body(body))
+                _op_log("security-repair", str(rsp.get("error") or rsp.get("message") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                if rsp.get("ok"):
+                    self._send_json(rsp, 200)
+                else:
+                    err = str(rsp.get("error") or "")
+                    code = 403 if ("root" in err or "权限" in err or "sudo" in err) else 500
+                    self._send_json(rsp, code)
             elif path == "/api/settings/models/save":
                 body = self._read_json_body()
                 try:
@@ -15723,8 +19319,10 @@ def parse_frame(pkt) -> None:
             except Exception:
                 pass
 
-        # ODID 载荷提取
+        # ODID 载荷提取。旧 ODID 和新版 DJI Beacon payload 保持两套解析路径。
         payloads = extract_from_ies(pkt)
+        ssid_rid = _ssid_to_sn(ssid or "")
+        new_fw_payloads = extract_new_firmware_from_ies(pkt, ssid_rid) if d11.subtype == 8 else []
         if d11.subtype in (13, 5, 8):   # Extra: also scan raw payload for all mgmt subtypes
             raw_p = extract_from_raw(pkt)
             # 去重
@@ -15732,6 +19330,23 @@ def parse_frame(pkt) -> None:
             for p in raw_p:
                 if (zlib.crc32(p)&0xFFFFFFFF) not in sigs:
                     payloads.append(p)
+            if d11.subtype == 8:
+                new_raw = extract_new_firmware_from_raw(pkt, ssid_rid)
+                new_sigs = {_new_fw_payload_sig(p[0]) for p in new_fw_payloads}
+                for p in new_raw:
+                    sig = _new_fw_payload_sig(p[0])
+                    if sig not in new_sigs:
+                        new_sigs.add(sig)
+                        new_fw_payloads.append(p)
+        if new_fw_payloads and payloads:
+            # New-firmware bodies can contain legacy-looking ODID fragments;
+            # drop the overlapping legacy payloads so one beacon is not counted
+            # twice by the old/new parser paths.
+            new_bodies = [bytes(body or b"") for body, _decoded in new_fw_payloads]
+            payloads = [
+                p for p in payloads
+                if not any(p and (bytes(p) == body or body.startswith(bytes(p)) or bytes(p) in body) for body in new_bodies)
+            ]
 
         # Debug scan logs
         if DEBUG_MODE:
@@ -15742,6 +19357,8 @@ def parse_frame(pkt) -> None:
             if payloads:
                 types = [f"{((p[0]>>4)&0xF):X}" for p in payloads if p]
                 odid_s = f" ODID={len(payloads)}[{','.join(types)}]"
+            if new_fw_payloads:
+                odid_s += f" NEWFW={len(new_fw_payloads)}"
             _scan(f"[FRAME] {subtype_name} src={src_mac} {rssi_s} {ch_s}{ssid_s}{odid_s}")
 
         is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
@@ -15751,16 +19368,18 @@ def parse_frame(pkt) -> None:
         except Exception:
             frame_hex = ""
 
-        if not payloads:
+        if not payloads and not new_fw_payloads:
             # Even without ODID payload, if SSID contains RID SN, still refresh last_seen_ts.
             if is_wifi_fast:
                 state_update(src_mac, {"basic_id": {"uas_id": _wifi_fast_sn(src_mac), "id_type": "SSID"}, "location": None, "system": None},
                              rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0,
-                             scan_type="phone", ssid=(ssid or ""), capture_type=subtype_name, raw_pkt_hex=frame_hex)
+                             scan_type="phone", ssid=(ssid or ""), capture_type=subtype_name,
+                             raw_pkt_hex=frame_hex, firmware_type="old")
             elif ssid and src_mac in mac_to_ssid_sn:
                 state_update(src_mac, {"basic_id": None, "location": None, "system": None},
                              rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0,
-                             scan_type="rid", ssid=ssid, capture_type=subtype_name, raw_pkt_hex=frame_hex)
+                             scan_type="rid", ssid=ssid, capture_type=subtype_name,
+                             raw_pkt_hex=frame_hex, firmware_type="old")
             return
 
         _notify_hit(ch if not ch_assumed or ch==current_channel else 0)
@@ -15795,7 +19414,8 @@ def parse_frame(pkt) -> None:
                              ch_assumed=ch_assumed, pl_sig=sig,
                              scan_type=("phone" if is_wifi_fast else "rid"),
                              ssid=ssid, capture_type=subtype_name,
-                             raw_pkt_hex=_hex_preview(piece if piece else payload, max_bytes=160))
+                             raw_pkt_hex=_hex_preview(piece if piece else payload, max_bytes=160),
+                             firmware_type="old")
                 if DEBUG_MODE:
                     b = decoded.get("basic_id")
                     l = decoded.get("location")
@@ -15804,6 +19424,21 @@ def parse_frame(pkt) -> None:
                     if l: _scan(f"  -> Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
                                 f"alt={l.get('alt_geodetic'):.1f}m spd={l.get('speed_ms')}")
                     if s: _scan(f"  -> System(pilot): lat={s.get('pilot_lat')} lon={s.get('pilot_lon')} type={s.get('pilot_loc_type_text')}")
+        for body, decoded in new_fw_payloads:
+            if not body or not decoded:
+                continue
+            sig = _new_fw_payload_sig(body)
+            state_update(src_mac, decoded, rssi=rssi, ch=ch,
+                         ch_assumed=ch_assumed, pl_sig=sig,
+                         scan_type="rid", ssid=ssid, capture_type=subtype_name,
+                         raw_pkt_hex=_hex_preview(body, max_bytes=160),
+                         firmware_type="new")
+            if DEBUG_MODE:
+                b = decoded.get("basic_id")
+                l = decoded.get("location")
+                if b: _scan(f"  -> NewFW BasicID: {b}")
+                if l: _scan(f"  -> NewFW Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
+                            f"alt={l.get('alt_geodetic')}m dir={l.get('direction_deg')}")
     except Exception as ex:
         if DEBUG_MODE:
             _scan(f"[ERR] parse_frame: {ex}")
@@ -16227,6 +19862,7 @@ def main() -> None:
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_model_update_from_config(APP_CONFIG)
+    init_config_update_from_config(APP_CONFIG)
     init_app_update_from_config(APP_CONFIG)
     init_metrics_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
@@ -16246,8 +19882,13 @@ def main() -> None:
             _log(f"[WARN] WeCom test notification failed: {resp}")
         return
 
-    if os.geteuid() != 0:
-        _log("[WARN] recommend running as root (sudo)")
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        if _process_has_capabilities(list(RUNTIME_SERVICE_CAPABILITIES)):
+            _log("[INFO] running without root; required network capabilities are present")
+        else:
+            _log("[WARN] 当前不是 root，且未检测到采集所需网络能力；请在设置页执行一键修复")
+
+    check_iw_available_on_startup()
 
     if SCAN_WIFI_FAST and (not args.hop) and (not args.channel):
         args.hop = True
@@ -16331,6 +19972,7 @@ def main() -> None:
     start_hw_worker()
     start_notify_worker()
     start_model_update_worker()
+    start_config_update_worker()
     start_app_update_check()
 
     def sniff_thread():

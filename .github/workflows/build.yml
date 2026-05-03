@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag name to build (e.g. v0.0.1)"
+        description: "Tag name to build (e.g. v2.0.0)"
         required: true
 
 env:
@@ -67,7 +67,7 @@ jobs:
             --onefile \
             --clean \
             --name "$APP_NAME" \
-            main.py
+            run.py
 
       - name: Prepare artifact
         shell: bash

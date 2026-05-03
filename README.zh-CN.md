@@ -4,14 +4,10 @@
 
 Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定式 Remote ID / OpenDroneID Wi-Fi 监测器。
 
-项目的运行模型保持得比较克制：核心逻辑集中在 `run.py`，重点放在长期稳定运行、受保护的配置写入、历史与轨迹持久化，以及适合局域网部署的 Web 界面。
 
 ## 功能概览
 
-- 现代化局域网页面，分为三大主视图：
-  - `地图`
-  - `飞机列表`
-  - `其他`（实时 AP 列表 + AP 扫描日志）
+- 现代化局域网页面
 - 独立 `/settings` 设置页，支持可视化编辑
 - 独立 `/hardware-assistant` 硬件助手页面
 - 服务端通知中心，多浏览器会话同步
@@ -20,11 +16,17 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - 支持导出全部详情和单机轨迹
 - 支持 Token 保护的外部 API
 - 支持网页登录 / 会话鉴权
+- 支持基于通行密钥的网页登录，首次仍由账号密码引导配置
 - 支持再次验证账密后生成可管理的 SSO 登录链接
 - 支持配置单次网页登录有效期，默认 30 分钟
 - 企业微信支持多机器人通道
 - 支持多个自定义报警区域并绘制到地图上
+- 支持 DJI 新固件 RID Beacon 解析，并显示 UAS ID 与固件类型
+- 支持在配置根目录内进行原始配置树浏览 / 编辑 / 保存 / 删除，并要求再次验证密码
+- 支持一键运行时安全修复、`iw` 安装和 systemd 服务注册 / 更新
 - 支持从可配置地址在线更新 RID 识别库
+- 支持从可配置地址在线更新完整运行配置
+- 支持按 Git 提交号手动检查程序新版本
 - 支持 CPU、内存、温度、系统负载和 AP 数趋势
 
 ## 运行环境
@@ -37,13 +39,17 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - 支持监控模式的无线网卡
 - 切换监控模式 / 信道时需要 root 权限
 
+安装依赖：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
 启动方式：
 
 ```bash
-sudo ~/rid/.venv/bin/python3 run.py
+python3 run.py
 ```
-
-程序现在默认就是无 TUI 模式，不再需要 `--no-tui`。
 
 默认网页地址：
 
@@ -70,7 +76,7 @@ sudo ~/rid/.venv/bin/python3 run.py
 - `/`
   主页面，包含地图、飞机列表、AP/日志视图切换。
 - `/settings`
-  可视化设置、原始配置编辑、通知设置、报警区域设置、API 说明。
+  可视化设置、通行密钥 / SSO、原始配置编辑、运行时安全修复、配置 / 版本更新工具、通知设置、报警区域设置、API 说明。
 - `/hardware-assistant`
   网卡状态、`iw` 检查、监控/托管模式切换、信道调整、网卡重启、主程序重启。
 
@@ -84,6 +90,8 @@ sudo ~/rid/.venv/bin/python3 run.py
   可提交到 Git 的安全示例配置。
 - `rid_config.json`
   实际运行配置，不应提交。
+- `EULA.md`
+  内置 EULA 同意页面显示的源文本。
 - `rid_history_cache.json`
   运行时生成的历史 / 轨迹缓存。
 - `rid_config.json.rollback`
@@ -106,11 +114,15 @@ sudo ~/rid/.venv/bin/python3 run.py
 - `ap`
   AP 列表上限与厂商数据库配置。
 - `auth`
-  浏览器网页登录 / 会话鉴权。
+  浏览器网页登录 / 会话鉴权、通行密钥和 SSO 链接。
 - `api`
   外部 API 的 Token 鉴权。
 - `model_update`
   在线识别库更新设置。
+- `config_update`
+  可选的远程配置更新设置。
+- `app_update`
+  用于手动版本比对的上游提交检查设置。
 - `metrics`
   主机负载趋势保留时间设置。
 
@@ -152,12 +164,12 @@ sudo ~/rid/.venv/bin/python3 run.py
 
 ```bash
 curl -H "X-API-Token: YOUR_TOKEN" \
-  http://192.168.1.32:4600/api/v1/snapshot
+  http://0.0.0.0:4600/api/v1/snapshot
 ```
 
 ```bash
 curl -H "Authorization: Bearer YOUR_TOKEN" \
-  http://192.168.1.32:4600/api/v1/drones
+  http://0.0.0.0:4600/api/v1/drones
 ```
 
 ### 如何启用外部 API
@@ -281,16 +293,30 @@ PY
 - `GET /api/settings/view`
 - `GET /api/settings/runtime`
 - `GET /api/settings/metrics?window=12h|24h|7d`
+- `GET /api/settings/systemd/status`
 - `GET /api/settings/api-docs`
 - `GET /api/logs/view?type=runtime|operation|scan|scan_diff|ap`
 - `GET /api/logs/export?type=all|runtime|operation|scan|scan_diff|ap`
+- `POST /api/settings/visual/test`
 - `POST /api/settings/visual/save`
+- `POST /api/settings/raw/unlock`
 - `POST /api/settings/raw/save`
+- `GET /api/config/file?path=<配置根目录内路径>`
+- `POST /api/config/file/delete`
 - `POST /api/settings/notify/test`
+- `POST /api/settings/passkey/start`
+- `POST /api/settings/passkey/finish`
+- `POST /api/settings/passkey/delete`
+- `POST /api/passkey/login/start`
+- `POST /api/passkey/login/finish`
 - `GET /api/settings/models/list`
 - `POST /api/settings/models/save`
 - `POST /api/settings/models/upsert`
 - `POST /api/settings/models/update`
+- `POST /api/settings/app-update/check`
+- `POST /api/settings/systemd/register`
+- `POST /api/settings/iw/install`
+- `POST /api/settings/security/repair`
 - `POST /api/settings/login-link/create`
 - `POST /api/settings/login-link/delete`
 - `GET /api/hw/status`
@@ -367,12 +393,16 @@ PY
 - 编辑基站位置
 - 通过浏览器定位填充基站坐标
 - 在线更新 RID 识别库，支持修改更新地址并手动触发
+- 支持从可配置地址在线更新完整运行配置
 - 按 CPU、内存、温度、系统负载、AP 数拆分展示主机负载趋势
 - 主机负载趋势支持 12 小时、24 小时、7 天视图
 - 主机负载数据保留时间可配置，默认 7 天
 - 手动进入简化 OOBE 和完整 OOBE
 - 再次验证账密后生成和删除可管理的 SSO 登录链接
-- 原始 `rid_config.json` 编辑
+- 支持通行密钥的添加和删除，用于网页登录
+- 再次验证密码后浏览 / 编辑 / 保存 / 删除原始配置树
+- 支持运行时安全修复、`iw` 安装和 systemd 服务注册 / 更新
+- 支持按上游 Git 提交号手动检查程序新版本
 
 ### 在线识别库更新
 
@@ -390,6 +420,25 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 更新成功或失败都会写入操作日志和通知中心
 - 同一个设置卡片可以把 `rid_models.json` 作为前缀/机型列表编辑
 - 机型为 N/A 的详情卡片可以直接写入本地识别库，或打开预填的 GitHub Issue / PR 编辑页
+
+### 远程配置更新
+
+设置页可以按需从远端 JSON 文件拉取完整运行配置。
+
+行为说明：
+
+- 地址必须以 `http://` 或 `https://` 开头
+- 下载到的 JSON 仍必须能通过完整配置校验
+- 更新流程会先合并默认值，再备份、写入并重载
+- 如果重载失败，会立刻恢复保存前的备份
+- 成功和失败都会写入操作日志
+
+### 通行密钥、原始配置与运行时修复
+
+- 通行密钥以现有网页登录账号密码为引导完成首次注册，之后保存在 `auth.passkeys`。
+- 原始配置编辑被限制在当前配置根目录内，并且需要当前浏览器会话先完成一次短时二次解锁。
+- 运行时修复卡片可以创建 / 确认 `rid` 专用运行账号、授予采集能力、安装 `iw`，并注册 / 更新 `light-rid-scanner.service`。
+- 生成的 systemd 服务始终指向当前 `run.py`、当前配置文件路径以及 `--no-tui` 服务运行模式。
 
 ### 主机负载趋势
 
@@ -412,6 +461,10 @@ commit:<Git短提交号>#<本地构建号>
 ```
 
 `rid_build_info.json` 保存当前 Git 短提交号和本地构建号。`tools/bump_build.py` 用来在同一个 Git commit 上连续本地测试时递增 `#` 后缀；`tools/pi_tools.py sync` 同步到树莓派前会自动执行递增。
+
+设置页可以手动比较本地程序提交号和远端 Git 提交号。这个检查只报告是否存在更新，不会自动下载、套用代码或重启服务。
+
+当前工作区准备发布的版本线是 `v2.0`，但页面仍继续使用上面的 commit 构建标记，便于定位每一次本地构建。
 
 ## 通知中心
 

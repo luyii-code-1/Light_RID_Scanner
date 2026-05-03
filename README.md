@@ -4,14 +4,9 @@
 
 Light RID Scanner is a fixed-station Remote ID / OpenDroneID Wi-Fi monitor designed for Raspberry Pi and other Linux-based capture nodes.
 
-It keeps the runtime model deliberately simple: one main process in `run.py`, long-running stability features, guarded config writes, persistent history/track storage, and a LAN web UI for map/list/log viewing.
-
 ## Highlights
 
-- Modern LAN web UI with three main views:
-  - `Map`
-  - `Aircraft List`
-  - `Other` (Realtime AP list + AP scan log)
+- Modern LAN web UI
 - Dedicated `/settings` page for visual config editing
 - Dedicated `/hardware-assistant` page for NIC / `iw` operations
 - Server-side notification center, synchronized across browser sessions
@@ -20,11 +15,17 @@ It keeps the runtime model deliberately simple: one main process in `run.py`, lo
 - Export helpers for aircraft detail and per-aircraft tracks
 - Optional token-protected external API
 - Optional browser login / session auth for the web UI
+- Passkey-based browser login after an initial username/password bootstrap
 - Managed SSO login links generated after username/password re-check
 - Configurable browser session lifetime, defaulting to 30 minutes
 - Enterprise WeCom notifications with multiple webhook channels
 - Multiple custom alarm zones drawn on the map
+- DJI newer-firmware RID Beacon parsing, with UAS ID and firmware-type display
+- Password-rechecked raw config tree browsing/edit/save/delete inside the config root
+- One-click runtime security repair, `iw` install, and systemd service registration/update
 - Online RID model map updates from a configurable URL
+- Optional remote config updates from a configurable URL
+- Manual app version check by Git commit comparison
 - Host load trends for CPU, memory, temperature, system load, and AP count
 
 ## Runtime
@@ -37,13 +38,17 @@ Recommended environment:
 - Wireless NIC with monitor mode support
 - Root privileges for monitor mode / channel switching
 
+Install dependencies:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
 Start:
 
 ```bash
-sudo ~/rid/.venv/bin/python3 run.py
+python3 run.py
 ```
-
-The program now defaults to non-TUI mode. `--no-tui` is no longer required.
 
 Default web URL:
 
@@ -70,7 +75,7 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
 - `/`
   Main UI with map, aircraft list, and AP/log view switching.
 - `/settings`
-  Visual settings editor, raw config editor, token/API overview, alarm zone editor, notification editor.
+  Visual settings editor, passkeys/SSO, raw config editor, runtime security repair, config/app update tools, token/API overview, alarm zone editor, notification editor.
 - `/hardware-assistant`
   Visual hardware helper for NIC status, `iw` inspection, monitor/managed switching, channel change, NIC restart, and process restart.
 
@@ -84,6 +89,8 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
   Safe Git-tracked example config.
 - `rid_config.json`
   Real runtime config. Do not commit it.
+- `EULA.md`
+  Source text shown by the built-in EULA acceptance flow.
 - `rid_history_cache.json`
   Runtime-generated history / track cache.
 - `rid_config.json.rollback`
@@ -106,11 +113,15 @@ The runtime config is split into these top-level sections:
 - `ap`
   AP list limits and vendor DB settings.
 - `auth`
-  Browser UI login/session auth.
+  Browser UI login/session auth, passkeys, and SSO links.
 - `api`
   External token API auth.
 - `model_update`
   Online model-map update settings.
+- `config_update`
+  Optional remote config update settings.
+- `app_update`
+  Upstream commit-check settings for manual version comparison.
 - `metrics`
   Host-metrics retention settings.
 
@@ -152,12 +163,12 @@ Examples:
 
 ```bash
 curl -H "X-API-Token: YOUR_TOKEN" \
-  http://192.168.1.32:4600/api/v1/snapshot
+  http://0.0.0.0:4600/api/v1/snapshot
 ```
 
 ```bash
 curl -H "Authorization: Bearer YOUR_TOKEN" \
-  http://192.168.1.32:4600/api/v1/drones
+  http://0.0.0.0:4600/api/v1/drones
 ```
 
 ### How to enable the external API
@@ -279,16 +290,30 @@ These are meant for the built-in web UI and current browser session:
 - `GET /api/settings/view`
 - `GET /api/settings/runtime`
 - `GET /api/settings/metrics?window=12h|24h|7d`
+- `GET /api/settings/systemd/status`
 - `GET /api/settings/api-docs`
 - `GET /api/logs/view?type=runtime|operation|scan|scan_diff|ap`
 - `GET /api/logs/export?type=all|runtime|operation|scan|scan_diff|ap`
+- `POST /api/settings/visual/test`
 - `POST /api/settings/visual/save`
+- `POST /api/settings/raw/unlock`
 - `POST /api/settings/raw/save`
+- `GET /api/config/file?path=<within-config-root>`
+- `POST /api/config/file/delete`
 - `POST /api/settings/notify/test`
+- `POST /api/settings/passkey/start`
+- `POST /api/settings/passkey/finish`
+- `POST /api/settings/passkey/delete`
+- `POST /api/passkey/login/start`
+- `POST /api/passkey/login/finish`
 - `GET /api/settings/models/list`
 - `POST /api/settings/models/save`
 - `POST /api/settings/models/upsert`
 - `POST /api/settings/models/update`
+- `POST /api/settings/app-update/check`
+- `POST /api/settings/systemd/register`
+- `POST /api/settings/iw/install`
+- `POST /api/settings/security/repair`
 - `POST /api/settings/login-link/create`
 - `POST /api/settings/login-link/delete`
 - `GET /api/hw/status`
@@ -365,12 +390,16 @@ It supports:
 - base station position editing
 - browser geolocation fill-in for base station position
 - online RID model-map updates, with a configurable URL and manual update button
+- optional remote config updates from a configurable URL
 - host load trend cards for CPU, memory, temperature, load, and AP count
 - selectable host-metrics windows: 12 hours, 24 hours, and 7 days
 - configurable host-metrics retention, defaulting to 7 days
 - manual entry into Simplified OOBE and Full OOBE
 - managed SSO login link generation and deletion after username/password re-check
-- raw `rid_config.json` editing
+- passkey registration/deletion for browser login
+- raw config tree browsing/edit/save/delete after password re-check
+- runtime security repair, `iw` install, and systemd service registration/update
+- manual upstream app commit comparison
 
 ### Online model-map updates
 
@@ -388,6 +417,14 @@ Behavior:
 - successful and failed update attempts are written to the operation log and notification center
 - the same Settings card can edit `rid_models.json` as a prefix/model list
 - N/A aircraft detail cards can add a local mapping or open a prefilled GitHub Issue / PR edit page
+
+
+### Passkeys, raw config, and runtime repair
+
+- Passkeys are bootstrapped from the existing web username/password once, then stored inside `auth.passkeys`.
+- Raw config editing is limited to files inside the active config root and requires a short-lived secondary unlock from the current browser session.
+- The runtime repair card can create/confirm the dedicated `rid` service user, grant capture capabilities, install `iw`, and register/update `light-rid-scanner.service`.
+- The generated systemd unit always points to the current `run.py`, current config path, and `--no-tui` service mode.
 
 ### Host load trends
 
@@ -410,6 +447,10 @@ commit:<git-short-commit>#<local-build-number>
 ```
 
 `rid_build_info.json` stores the current short commit and local build number. The helper script `tools/bump_build.py` increments the `#` suffix for repeated local test builds on the same Git commit. `tools/pi_tools.py sync` runs that bump before uploading files to the Raspberry Pi.
+
+The Settings page can manually compare the local app commit with the upstream Git commit. This check only reports whether a newer commit exists; it does not download, apply, or restart code automatically.
+
+The release line prepared by this checkout is `v2.0`, but the UI keeps using the commit-based build label above so local builds remain traceable.
 
 ## Notification Center
 

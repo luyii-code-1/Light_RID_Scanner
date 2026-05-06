@@ -17,7 +17,7 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - 支持 Token 保护的外部 API
 - 支持网页登录 / 会话鉴权
 - 支持基于通行密钥的网页登录，首次仍由账号密码引导配置
-- 支持再次验证账密后生成可管理的 SSO 登录链接
+- 支持在 `/settings` 中分别导入导出设置文件与扫描数据
 - 支持配置单次网页登录有效期，默认 30 分钟
 - 企业微信支持多机器人通道
 - 支持多个自定义报警区域并绘制到地图上
@@ -76,7 +76,7 @@ python3 run.py
 - `/`
   主页面，包含地图、飞机列表、AP/日志视图切换。
 - `/settings`
-  可视化设置、通行密钥 / SSO、原始配置编辑、运行时安全修复、配置 / 版本更新工具、通知设置、报警区域设置、API 说明。
+  可视化设置、账号密码 / 通行密钥登录控制、原始配置编辑、运行时安全修复、配置 / 版本更新工具、通知设置、报警区域设置、API 说明。
 - `/hardware-assistant`
   网卡状态、`iw` 检查、监控/托管模式切换、信道调整、网卡重启、主程序重启。
 
@@ -394,7 +394,7 @@ PY
 - 通过浏览器定位填充基站坐标
 - 在线更新 RID 识别库，支持修改更新地址并手动触发
 - 支持从可配置地址在线更新完整运行配置
-- 按 CPU、内存、温度、系统负载、AP 数拆分展示主机负载趋势
+- 可选开启主机负载趋势，按 CPU、内存、温度、系统负载、AP 数拆分展示
 - 主机负载趋势支持 12 小时、24 小时、7 天视图
 - 主机负载数据保留时间可配置，默认 7 天
 - 手动进入简化 OOBE 和完整 OOBE
@@ -450,7 +450,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 系统负载
 - AP 数
 
-数据约每分钟采样一次，默认写入系统临时目录下的 `light_rid_scanner/host_metrics.jsonl`。文件不存在会自动创建，服务重启后继续沿用，并按 `metrics.retention_days` 自动裁剪。
+节点负载默认关闭。开启后数据约每分钟采样一次，默认写入系统临时目录下的 `light_rid_scanner/host_metrics.jsonl`。文件不存在会自动创建，服务重启后继续沿用，并按 `metrics.retention_days` 自动裁剪。
 
 ### 构建版本
 
@@ -582,6 +582,10 @@ commit:<Git短提交号>#<本地构建号>
 
 内置页面常用辅助接口：
 
+- `GET /api/settings/export/settings`
+- `GET /api/settings/export/scan-data`
+- `POST /api/settings/import/settings`
+- `POST /api/settings/import/scan-data`
 - `GET /api/tools/export/all`
 - `GET /api/tools/export/track?sn=<SN>`
 - `POST /api/tools/import/all`
@@ -602,3 +606,9 @@ commit:<Git短提交号>#<本地构建号>
 - 浏览器定位按钮是否可用，取决于浏览器安全策略；很多浏览器要求 HTTPS 或 localhost。
 - 地图上的基站、报警区域、轨迹、飞机 / 飞手标记，都来自 `run.py` 的运行时状态。
 - 如果要获取当前最准确的机器可读接口索引，优先使用 `GET /api/docs`。
+
+## OpenDroneID 官方参考
+
+- Open Drone ID Core C Library（官方库）: https://github.com/opendroneid/opendroneid-core-c
+- OpenDroneID specs 仓库: https://github.com/opendroneid/specs
+- specs 仓库已明确说明其中内容是早期草案；如果需要最终 ASTM Remote ID 标准文本，请直接从 ASTM 获取正式版 F3411。

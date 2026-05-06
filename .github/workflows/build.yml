@@ -1,53 +1,106 @@
-name: Build Release Assets
+name: Build Binaries
 
 permissions:
   contents: write
 
 on:
+  push:
+  pull_request:
   release:
     types: [published]
-
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag name to build (e.g. v2.0.0)"
-        required: true
+        description: "Optional tag to build and upload"
+        required: false
+        default: ""
 
 env:
-  TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
   APP_NAME: light_rid_scanner
+  RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
+  BUILD_REF: ${{ github.event.release.tag_name || github.event.inputs.tag || github.sha }}
 
 jobs:
-  build:
+  linux:
+    name: Linux ${{ matrix.artifact }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux
-          - os: ubuntu-latest
+          - runner: ubuntu-24.04
             artifact: linux-amd64
-
-          - os: ubuntu-latest
+          - runner: ubuntu-24.04-arm
             artifact: linux-arm64
-
-          # Windows
-          - os: windows-latest
-            artifact: windows-amd64.exe
-
-          # macOS
-          - os: macos-15-intel       # Intel / amd64
-            artifact: macos-amd64
-
-          - os: macos-latest         # Apple Silicon / arm64
-            artifact: macos-arm64
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG_NAME }}
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r requirements.txt
+
+      - name: Build binary
+        shell: bash
+        run: |
+          pyinstaller \
+            --onefile \
+            --clean \
+            --name "$APP_NAME" \
+            run.py
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p release
+          mv "dist/$APP_NAME" "release/$APP_NAME-${{ matrix.artifact }}"
+
+      - name: Upload workflow artifact
+        if: ${{ env.RELEASE_TAG == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/*
+          if-no-files-found: error
+
+      - name: Upload binary to release
+        if: ${{ env.RELEASE_TAG != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: release/*
+          fail_on_unmatched_files: true
+
+  desktop-release:
+    name: Release ${{ matrix.artifact }}
+    if: ${{ env.RELEASE_TAG != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            artifact: windows-amd64.exe
+          - runner: macos-15-intel
+            artifact: macos-amd64
+          - runner: macos-latest
+            artifact: macos-arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,9 +132,9 @@ jobs:
             mv "dist/$APP_NAME" "release/$APP_NAME-${{ matrix.artifact }}"
           fi
 
-      - name: Upload binary to Release
+      - name: Upload binary to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG_NAME }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: release/*
           fail_on_unmatched_files: true

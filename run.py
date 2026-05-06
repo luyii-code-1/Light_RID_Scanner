@@ -126,6 +126,7 @@ SNIFF_RESTART_AFTER_FAILS = 5
 WIFI_FAST_OUI_PREFIX = "0c:9a:e6"
 TRACK_MAX_POINTS = 12000
 TRACK_MIN_INTERVAL_SEC = 0.8
+TRACK_ANOMALY_MAX_METERS = 50_000.0
 NO_IFACE_DEGRADE_HINT = "未检测到已绑定的无线网卡，已进入降级运行。请打开设置或 OOBE 完成网卡配置。"
 CONFIG_ROLLBACK_SUFFIX = ".rollback"
 
@@ -203,7 +204,7 @@ AUTH_CFG: dict = {
     "password_sha256": "",
     "realm": "Light RID Scanner",
     "session_ttl_min": 30,
-    "login_methods": ["password", "passkey", "sso"],
+    "login_methods": ["password", "passkey"],
     "sso_links": [],
     "passkeys": [],
 }
@@ -283,6 +284,7 @@ config_update_worker_started = False
 app_update_lock = Lock()
 
 METRICS_CFG: dict = {
+    "enabled": False,
     "retention_days": HOST_METRICS_RETENTION_DAYS_DEFAULT,
     "temperature_source": "auto",
 }
@@ -677,9 +679,9 @@ def _track_query_value(query: dict | None, key: str) -> str:
     except Exception:
         return ""
 
-def _track_for_query(raw, query: dict | None = None) -> list[dict]:
+def _track_for_query(raw, query: dict | None = None, firmware_type: str | None = None) -> list[dict]:
     # Always normalize stored points before applying request-level trimming.
-    track = _sanitize_track(raw or [])
+    track = _track_points_for_display(_sanitize_track(raw or []), firmware_type=firmware_type)
     if not isinstance(query, dict):
         return track
     try:
@@ -1014,6 +1016,127 @@ def import_details_payload(payload) -> tuple[int, int, int]:
             _history_mark_dirty()
     return added, updated, skipped
 
+def _settings_export_payload() -> dict:
+    cfg = load_app_config(APP_CONFIG_PATH) if APP_CONFIG_PATH else default_app_config()
+    return {
+        "ok": True,
+        "kind": "settings",
+        "version": 1,
+        "exported_at": time.time(),
+        "config_path": APP_CONFIG_PATH or "",
+        "settings": cfg,
+    }
+
+def _settings_import_candidate(payload) -> tuple[dict | None, str | None]:
+    src = payload
+    if isinstance(src, dict):
+        if isinstance(src.get("settings"), dict):
+            src = src.get("settings")
+        elif isinstance(src.get("config"), dict):
+            src = src.get("config")
+        elif isinstance(src.get("payload"), dict):
+            src = src.get("payload")
+    if not isinstance(src, dict):
+        return None, "payload must be object"
+    if not any(k in src for k in ("basic", "notify", "web", "ap", "auth", "api", "model_update", "config_update", "app_update", "metrics")):
+        return None, "invalid settings payload"
+    candidate = _deep_merge_dict(default_app_config(), src)
+    candidate, guard_err = _prepare_security_cfg_for_save(candidate)
+    if guard_err:
+        return None, guard_err
+    return candidate, None
+
+def _import_settings_payload(payload) -> dict:
+    if not APP_CONFIG_PATH:
+        return {"ok": False, "error": "config path missing"}
+    prev_cfg = load_app_config(APP_CONFIG_PATH)
+    candidate_cfg, err = _settings_import_candidate(payload)
+    if err or not isinstance(candidate_cfg, dict):
+        return {"ok": False, "error": str(err or "invalid settings payload")}
+    b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="settings_import")
+    if not b_ok:
+        return {"ok": False, "error": f"backup failed: {backup_path}"}
+    ok, msg = save_app_config(APP_CONFIG_PATH, candidate_cfg)
+    if not ok:
+        try:
+            restore_config_backup(APP_CONFIG_PATH, backup_path)
+            reload_runtime_config(prev_cfg)
+        except Exception:
+            pass
+        return {"ok": False, "error": f"save failed: {msg}"}
+    cfg_loaded = load_app_config(APP_CONFIG_PATH)
+    r_ok, r_msg = reload_runtime_config(cfg_loaded)
+    if not r_ok:
+        restore_ok, restore_msg = restore_config_backup(APP_CONFIG_PATH, backup_path)
+        try:
+            reload_runtime_config(prev_cfg)
+        except Exception:
+            pass
+        if restore_ok:
+            return {"ok": False, "error": f"reload failed: {r_msg}; rolled back from backup", "backup_path": backup_path}
+        return {"ok": False, "error": f"reload failed: {r_msg}; restore failed: {restore_msg}", "backup_path": backup_path}
+    return {
+        "ok": True,
+        "saved_to": APP_CONFIG_PATH,
+        "backup_path": backup_path,
+        "reload_msg": r_msg,
+        "settings": _settings_view_payload().get("visual"),
+    }
+
+def _scan_data_payload_unwrap(payload):
+    src = payload
+    if isinstance(src, dict):
+        if isinstance(src.get("scan_data"), dict):
+            src = src.get("scan_data")
+        elif isinstance(src.get("payload"), (dict, list)):
+            src = src.get("payload")
+    return src
+
+def _scan_data_payload_valid(payload) -> bool:
+    src = _scan_data_payload_unwrap(payload)
+    if isinstance(src, list):
+        return True
+    if isinstance(src, dict):
+        return isinstance(src.get("items"), list) or isinstance(src.get("drones"), list)
+    return False
+
+def _scan_data_export_payload() -> dict:
+    with state_lock:
+        items = _history_disk_items_locked()
+    return {
+        "ok": True,
+        "kind": "scan_data",
+        "version": 1,
+        "store_version": 3,
+        "exported_at": time.time(),
+        "data_file": HISTORY_STORE_PATH or "",
+        "count": len(items),
+        "items": items,
+    }
+
+def _import_scan_data_payload(payload, *, mode: str = "merge") -> dict:
+    src = _scan_data_payload_unwrap(payload)
+    if not _scan_data_payload_valid(src):
+        return {"ok": False, "error": "invalid payload: expect items[]/drones[] or list"}
+    import_mode = "replace" if str(mode or "").strip().lower() in ("replace", "overwrite", "reset") else "merge"
+    replaced = 0
+    if import_mode == "replace":
+        replaced, _removed = clear_history_store(delete_file=False)
+    added, updated, skipped = import_details_payload(src)
+    save_history_store(force=True)
+    with state_lock:
+        total_count = len(history_table)
+    return {
+        "ok": True,
+        "mode": import_mode,
+        "replaced": int(replaced),
+        "added": int(added),
+        "updated": int(updated),
+        "skipped": int(skipped),
+        "count": int(total_count),
+        "data_file": HISTORY_STORE_PATH or "",
+    }
+
 def _deep_merge_dict(base: dict, override: dict) -> dict:
     out = dict(base)
     for k, v in (override or {}).items():
@@ -1103,6 +1226,7 @@ def default_app_config() -> dict:
             "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
         },
         "metrics": {
+            "enabled": False,
             "retention_days": HOST_METRICS_RETENTION_DAYS_DEFAULT,
             "temperature_source": "auto",
         },
@@ -1112,7 +1236,7 @@ def default_app_config() -> dict:
             "password_sha256": "",
             "realm": "Light RID Scanner",
             "session_ttl_min": 30,
-            "login_methods": ["password", "passkey", "sso"],
+            "login_methods": ["password", "passkey"],
             "passkeys": [],
         },
         "api": {
@@ -1674,6 +1798,7 @@ def _settings_view_payload() -> dict:
                 "state": _app_update_status_payload(),
             },
             "metrics": {
+                "enabled": bool(metrics_cfg.get("enabled")),
                 "retention_days": int(metrics_cfg.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT),
                 "temperature_source": str(metrics_cfg.get("temperature_source") or "auto"),
                 "store_path": HOST_METRICS_PATH,
@@ -1944,6 +2069,8 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
         cfg["app_update"] = _normalize_app_update_cfg({"app_update": app_update})
 
     if p_metrics:
+        if "enabled" in p_metrics:
+            metrics["enabled"] = bool(p_metrics.get("enabled"))
         if "retention_days" in p_metrics:
             try:
                 metrics["retention_days"] = max(1, min(90, int(p_metrics.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT)))
@@ -2280,6 +2407,7 @@ def _normalize_metrics_cfg(cfg: dict | None) -> dict:
             for k in base.keys():
                 if k in raw:
                     base[k] = raw.get(k)
+    base["enabled"] = bool(base.get("enabled", False))
     try:
         base["retention_days"] = max(1, min(90, int(base.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT)))
     except Exception:
@@ -2664,10 +2792,6 @@ def _normalize_auth_login_methods(raw, *, default_missing=None, default_empty=No
         "account_password": "password",
         "passkey": "passkey",
         "webauthn": "passkey",
-        "sso": "sso",
-        "sso_url": "sso",
-        "login_link": "sso",
-        "login_links": "sso",
     }
     if raw is None:
         src = []
@@ -2699,8 +2823,8 @@ def _auth_login_methods(auth_cfg: dict | None = None) -> list[str]:
     source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
     return _normalize_auth_login_methods(
         source.get("login_methods") if isinstance(source, dict) else None,
-        default_missing=("password", "passkey", "sso"),
-        default_empty=("password", "passkey", "sso"),
+        default_missing=("password", "passkey"),
+        default_empty=("password", "passkey"),
     )
 
 def _auth_login_method_enabled(method: str, auth_cfg: dict | None = None) -> bool:
@@ -2729,7 +2853,7 @@ def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
         out["session_ttl_min"] = 30
     out["login_methods"] = _normalize_auth_login_methods(
         out.get("login_methods"),
-        default_missing=("password", "passkey", "sso"),
+        default_missing=("password", "passkey"),
         default_empty=[],
     )
     out["username_sha256"] = user_hash
@@ -2778,9 +2902,8 @@ def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None, web
         return "至少保留一种网页登录方式"
     if bool(auth.get("enabled")) and ("password" not in list(auth.get("login_methods") or [])):
         passkey_ready = any(bool(item.get("enabled", True)) for item in _normalize_passkeys(auth.get("passkeys")))
-        sso_ready = any(bool(_sso_link_state(item).get("active")) for item in _normalize_sso_links(auth.get("sso_links")))
-        if (not passkey_ready) and (not sso_ready):
-            return "关闭账号密码登录前，至少先准备一把可用 PassKey 或一条有效的 SSO URL 登录链接"
+        if not passkey_ready:
+            return "关闭账号密码登录前，至少先准备一把可用 PassKey"
     if bool(auth.get("enabled")) and (not _auth_hashes_present(auth)):
         return "启用网页登录鉴权前，必须先设置网页登录账号和密码"
     api_rule_err = _access_rule_empty_error(
@@ -2840,8 +2963,8 @@ def _normalize_auth_cfg(cfg: dict | None) -> dict:
         base["session_ttl_min"] = 30
     base["login_methods"] = _normalize_auth_login_methods(
         base.get("login_methods"),
-        default_missing=("password", "passkey", "sso"),
-        default_empty=("password", "passkey", "sso"),
+        default_missing=("password", "passkey"),
+        default_empty=("password", "passkey"),
     )
     u = str(base.get("username_sha256") or "").strip().lower()
     p = str(base.get("password_sha256") or "").strip().lower()
@@ -5255,6 +5378,67 @@ def _coord_pair_valid(lat: float, lon: float) -> bool:
         return False
     return True
 
+def _web_base_coord_pair() -> tuple[float, float] | None:
+    web = globals().get("WEB_CFG")
+    if not isinstance(web, dict):
+        return None
+    try:
+        lat_raw = web.get("base_lat")
+        lon_raw = web.get("base_lon")
+        if lat_raw in (None, "") or lon_raw in (None, ""):
+            return None
+        lat = float(lat_raw)
+        lon = float(lon_raw)
+    except Exception:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return (lat, lon)
+
+def _coord_farther_than_limit(lat: float, lon: float, ref_lat: float | None, ref_lon: float | None,
+                              limit_m: float = TRACK_ANOMALY_MAX_METERS) -> bool:
+    if ref_lat is None or ref_lon is None:
+        return False
+    try:
+        return _haversine(float(lat), float(lon), float(ref_lat), float(ref_lon)) > float(limit_m)
+    except Exception:
+        return False
+
+def _new_fw_coord_anomalous(lat: float, lon: float, *,
+                            prev_lat: float | None = None, prev_lon: float | None = None,
+                            ref_lat: float | None = None, ref_lon: float | None = None,
+                            limit_m: float = TRACK_ANOMALY_MAX_METERS) -> bool:
+    if not _coord_pair_valid(lat, lon):
+        return True
+    if _coord_farther_than_limit(lat, lon, prev_lat, prev_lon, limit_m):
+        return True
+    if _coord_farther_than_limit(lat, lon, ref_lat, ref_lon, limit_m):
+        return True
+    return False
+
+def _track_points_for_display(track: list[dict], firmware_type: str | None = None) -> list[dict]:
+    if _firmware_type_key(firmware_type) != "new":
+        return track
+    base = _web_base_coord_pair()
+    ref_lat = base[0] if base else None
+    ref_lon = base[1] if base else None
+    out: list[dict] = []
+    prev_lat = None
+    prev_lon = None
+    for p in track:
+        try:
+            lat = float(p.get("lat"))
+            lon = float(p.get("lon"))
+        except Exception:
+            continue
+        if _new_fw_coord_anomalous(lat, lon, prev_lat=prev_lat, prev_lon=prev_lon,
+                                   ref_lat=ref_lat, ref_lon=ref_lon):
+            continue
+        out.append(p)
+        prev_lat = lat
+        prev_lon = lon
+    return out
+
 def decode_location(msg25: bytes) -> dict | None:
     if len(msg25) < ODID_MSG_SIZE: return None
     try:
@@ -6004,6 +6188,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             e["last_ch"]   = ch
             e["ch_assumed"] = bool(ch_assumed)
 
+        new_fw_base = _web_base_coord_pair() if firmware_type_key == "new" else None
         if loc:
             cands = loc.get("_cands") if isinstance(loc, dict) else None
             if cands and e.get("lat") is not None and e.get("lon") is not None:
@@ -6029,29 +6214,52 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                         best_c = c
                 if best_c is not None and (cur_d is None or (best_d is not None and best_d + 50.0 < cur_d)):
                     loc = best_c
+            if firmware_type_key == "new":
+                try:
+                    cur_lat = None if e.get("lat") is None else float(e.get("lat"))
+                    cur_lon = None if e.get("lon") is None else float(e.get("lon"))
+                    ref_lat = new_fw_base[0] if new_fw_base else None
+                    ref_lon = new_fw_base[1] if new_fw_base else None
+                    if loc.get("lat") is not None and loc.get("lon") is not None:
+                        if _new_fw_coord_anomalous(float(loc.get("lat")), float(loc.get("lon")),
+                                                   prev_lat=cur_lat, prev_lon=cur_lon,
+                                                   ref_lat=ref_lat, ref_lon=ref_lon):
+                            loc = None
+                except Exception:
+                    loc = None
 
-            nlat, nlon = loc.get("lat"), loc.get("lon")
-            if nlat is not None and nlon is not None and (abs(nlat)>0.001 or abs(nlon)>0.001):
-                if e["lat"] is not None:
-                    e["_prev_lat"], e["_prev_lon"] = e["lat"], e["lon"]
-                e["lat"], e["lon"] = nlat, nlon
-                if e.get("_prev_lat") is not None:
-                    d = _haversine(e["_prev_lat"],e["_prev_lon"],nlat,nlon)
-                    if d >= HEADING_MIN_MOVE_M:
-                        b = _bearing(e["_prev_lat"],e["_prev_lon"],nlat,nlon)
-                        if b is not None:
-                            e["move_dir"]  = _bearing8(b)
-                            e["move_dist"] = d
-            e["alt"]    = loc.get("alt_geodetic")
-            e["speed"]  = loc.get("speed_ms")
-            e["vspeed"] = loc.get("vspeed_ms")
-            if e.get("lat") is not None and e.get("lon") is not None:
-                _track_append_point(e, float(e.get("lat")), float(e.get("lon")), float(now_wall))
+            if loc:
+                nlat, nlon = loc.get("lat"), loc.get("lon")
+                if nlat is not None and nlon is not None and (abs(nlat)>0.001 or abs(nlon)>0.001):
+                    if e["lat"] is not None:
+                        e["_prev_lat"], e["_prev_lon"] = e["lat"], e["lon"]
+                    e["lat"], e["lon"] = nlat, nlon
+                    if e.get("_prev_lat") is not None:
+                        d = _haversine(e["_prev_lat"],e["_prev_lon"],nlat,nlon)
+                        if d >= HEADING_MIN_MOVE_M:
+                            b = _bearing(e["_prev_lat"],e["_prev_lon"],nlat,nlon)
+                            if b is not None:
+                                e["move_dir"]  = _bearing8(b)
+                                e["move_dist"] = d
+                e["alt"]    = loc.get("alt_geodetic")
+                e["speed"]  = loc.get("speed_ms")
+                e["vspeed"] = loc.get("vspeed_ms")
+                if e.get("lat") is not None and e.get("lon") is not None:
+                    _track_append_point(e, float(e.get("lat")), float(e.get("lon")), float(now_wall))
 
         if sys_loc and (sys_loc.get("pilot_lat") is not None) and (sys_loc.get("pilot_lon") is not None):
             try:
                 plat = float(sys_loc.get("pilot_lat"))
                 plon = float(sys_loc.get("pilot_lon"))
+                if firmware_type_key == "new":
+                    cur_lat = None if e.get("lat") is None else float(e.get("lat"))
+                    cur_lon = None if e.get("lon") is None else float(e.get("lon"))
+                    ref_lat = new_fw_base[0] if new_fw_base else None
+                    ref_lon = new_fw_base[1] if new_fw_base else None
+                    if _new_fw_coord_anomalous(plat, plon,
+                                               prev_lat=cur_lat, prev_lon=cur_lon,
+                                               ref_lat=ref_lat, ref_lon=ref_lon):
+                        raise ValueError("pilot coord anomaly")
                 if (-90.0 <= plat <= 90.0) and (-180.0 <= plon <= 180.0):
                     e["pilot_lat"] = plat
                     e["pilot_lon"] = plon
@@ -6307,7 +6515,8 @@ def _state_snapshot() -> dict:
             ch = cur.get("last_ch", hist.get("last_ch")) or 0
             ch_assumed = bool(cur.get("ch_assumed", hist.get("ch_assumed")))
             cap_wall_ts = cur.get("last_capture_wall_ts", hist.get("last_capture_wall_ts"))
-            track_data = _sanitize_track(cur.get("track", hist.get("track", [])) or [])
+            track_data = _track_for_query(cur.get("track", hist.get("track", [])) or [],
+                                          firmware_type=firmware_type_key)
             drones.append({
                 "sn": sn,
                 "sn_src": sn_src,
@@ -6580,6 +6789,10 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "GET", "path": "/api/v1/tracks/{sn}", "desc": "Track by SN"},
         {"method": "GET", "path": "/api/v1/aps", "desc": "Realtime AP list"},
         {"method": "GET", "path": "/api/v1/logs?type=event|scan|ap&limit=200", "desc": "Logs"},
+        {"method": "GET", "path": "/api/settings/export/settings", "desc": "Export settings file"},
+        {"method": "GET", "path": "/api/settings/export/scan-data", "desc": "Export scan data"},
+        {"method": "POST", "path": "/api/settings/import/settings", "desc": "Import settings file"},
+        {"method": "POST", "path": "/api/settings/import/scan-data", "desc": "Import scan data"},
         {"method": "GET", "path": "/api/logs/view?type=runtime|operation|scan|scan_diff|ap", "desc": "Built-in page log viewer"},
         {"method": "GET", "path": "/api/logs/export?type=all|runtime|operation|scan|scan_diff|ap", "desc": "Built-in page log export"},
         {"method": "POST", "path": "/api/v1/history/clear", "desc": "Clear history cache"},
@@ -7654,8 +7867,8 @@ def _passkey_register_begin(body: dict | None, headers, *, client_ip: str | None
     }
 
 def _passkey_finish_register(body: dict | None, headers, *, client_ip: str | None = None) -> dict:
-    if not _auth_login_method_enabled("sso"):
-        return {"ok": False, "error": "SSO URL 登录已关闭"}, 403
+    if not _auth_login_method_enabled("passkey"):
+        return {"ok": False, "error": "PassKey 登录已关闭"}, 403
     src = body if isinstance(body, dict) else {}
     token = str(src.get("challenge") or src.get("challenge_token") or "").strip()
     row = _passkey_challenge_take(token, "register")
@@ -7830,8 +8043,6 @@ def _auth_check_sso_link(username_sha256: str, password_sha256: str, check: str 
     raw_check = str(check or "").strip()
     if not raw_check:
         return None
-    if not _auth_login_method_enabled("sso"):
-        return None
     if not _auth_check_userpass_hash(username_sha256, password_sha256):
         return None
     for item in _normalize_sso_links(AUTH_CFG.get("sso_links")):
@@ -7862,8 +8073,6 @@ def _auth_mark_sso_used(check: str | None) -> bool:
 def _build_sso_link_payload(body: dict | None, *, require_reauth: bool = True, headers=None, client_ip: str | None = None) -> tuple[dict, int]:
     if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
         return {"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400
-    if not _auth_login_method_enabled("sso"):
-        return {"ok": False, "error": "SSO URL 登录已关闭"}, 403
     src = body if isinstance(body, dict) else {}
     subject = str(src.get("username") or "-")
     if require_reauth:
@@ -8412,6 +8621,8 @@ def _host_metrics_prune_and_write(rows: list[dict]) -> None:
 
 def _host_metrics_sample(force: bool = False) -> dict | None:
     global host_metrics_last_sample_wall
+    if not bool(METRICS_CFG.get("enabled")):
+        return None
     now = time.time()
     with host_metrics_lock:
         if (not force) and host_metrics_last_sample_wall and (now - host_metrics_last_sample_wall) < HOST_METRICS_SAMPLE_SEC:
@@ -8438,15 +8649,21 @@ def _host_metrics_payload(window_sec: int = 24 * 3600) -> dict:
         window_sec = max(3600, min(7 * 86400, int(window_sec)))
     except Exception:
         window_sec = 24 * 3600
-    try:
-        _host_metrics_sample(force=False)
-    except Exception:
-        pass
+    enabled = bool(METRICS_CFG.get("enabled"))
+    if enabled:
+        try:
+            _host_metrics_sample(force=False)
+        except Exception:
+            pass
     cutoff = time.time() - float(window_sec)
-    with host_metrics_lock:
-        rows = [x for x in _host_metrics_read_all() if float(x.get("ts") or 0.0) >= cutoff]
+    if enabled:
+        with host_metrics_lock:
+            rows = [x for x in _host_metrics_read_all() if float(x.get("ts") or 0.0) >= cutoff]
+    else:
+        rows = []
     return {
         "ok": True,
+        "enabled": enabled,
         "window_sec": int(window_sec),
         "retention_days": int(METRICS_CFG.get("retention_days") or HOST_METRICS_RETENTION_DAYS_DEFAULT),
         "temperature_source": str(METRICS_CFG.get("temperature_source") or "auto"),
@@ -8458,10 +8675,11 @@ def _host_metrics_payload(window_sec: int = 24 * 3600) -> dict:
     }
 
 def host_metrics_loop() -> None:
-    try:
-        _host_metrics_sample(force=True)
-    except Exception as e:
-        _log(f"[WARN] host metrics initial sample failed: {e}")
+    if bool(METRICS_CFG.get("enabled")):
+        try:
+            _host_metrics_sample(force=True)
+        except Exception as e:
+            _log(f"[WARN] host metrics initial sample failed: {e}")
     while True:
         try:
             _host_metrics_sample(force=False)
@@ -8895,7 +9113,8 @@ body.bottom-all-collapsed{
   th:nth-child(3),td:nth-child(3){width:200px}
   th:nth-child(8),td:nth-child(8){width:96px}
   .info-row{grid-template-columns:86px 1fr}
-  .info-card{width:calc(100vw - 14px);max-height:84vh}
+  .info-modal{padding:70px 10px 10px}
+  .info-card{width:calc(100vw - 14px);max-height:74vh;border-radius:16px}
   .info-card-body{padding:10px 12px;font-size:13px}
   .cfg-editor{min-height:170px}
 }
@@ -9042,29 +9261,32 @@ tbody td.hl{
   background-color:rgba(255,216,96,calc(var(--hl-alpha,.0) * .58));
 }
 .info-modal{
-  position:fixed;inset:0;display:none;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.46);backdrop-filter:blur(2px);z-index:9999;padding:14px;
+  position:fixed;inset:0;display:none;align-items:flex-start;justify-content:flex-end;
+  background:transparent;backdrop-filter:none;z-index:9999;padding:78px 18px 18px;
+  pointer-events:none;
 }
 .info-modal.show{display:flex}
 .info-card{
-  width:min(440px, calc(100vw - 28px));
-  max-height:min(78vh, 560px);
-  border:1px solid var(--border);border-radius:4px;overflow:hidden;
-  background:var(--panel);
-  box-shadow:0 16px 32px rgba(0,0,0,.18);
+  width:min(360px, calc(100vw - 24px));
+  max-height:min(68vh, 560px);
+  border:1px solid color-mix(in srgb, var(--border) 82%, transparent);border-radius:18px;overflow:hidden;
+  background:color-mix(in srgb, var(--panel) 94%, rgba(255,255,255,.08));
+  backdrop-filter:blur(16px);
+  box-shadow:0 20px 48px rgba(0,0,0,.24);
   display:flex;flex-direction:column;
+  pointer-events:auto;
 }
 .info-card-hd{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
-  padding:10px 12px;border-bottom:1px solid var(--border);color:var(--txt);font-weight:600;
+  padding:12px 14px;border-bottom:1px solid color-mix(in srgb, var(--border) 80%, transparent);color:var(--txt);font-weight:700;
 }
 .info-card-close{
   border:1px solid var(--border);background:var(--panel2);color:var(--dim);
-  width:26px;height:26px;border-radius:4px;cursor:pointer;line-height:1;
+  width:30px;height:30px;border-radius:999px;cursor:pointer;line-height:1;
 }
 .info-card-close:hover{background:color-mix(in srgb, var(--blue) 10%, var(--panel2));color:var(--txt);border-color:var(--blue)}
 .info-card-body{
-  padding:12px 14px;overflow:auto;
+  padding:12px 14px 14px;overflow:auto;
   white-space:normal;line-height:1.6;color:var(--txt);font-size:14px;
 }
 .info-grid{display:grid;grid-template-columns:1fr;gap:4px}
@@ -9177,11 +9399,11 @@ body.theme-light .map-mini-list{
   border-color:var(--border);background:rgba(255,255,255,.96);
 }
 body.theme-light .map-mini-list .mini-title{color:var(--dim)}
-body.theme-light .info-modal{background:rgba(15,23,42,.24)}
+body.theme-light .info-modal{background:transparent}
 body.theme-light .info-card{
   border-color:var(--border);
-  background:var(--panel);
-  box-shadow:0 16px 28px rgba(15,23,42,.12);
+  background:color-mix(in srgb, #ffffff 92%, rgba(255,255,255,.74));
+  box-shadow:0 20px 48px rgba(15,23,42,.12);
 }
 body.theme-light .info-card-hd{
   color:var(--txt);border-bottom-color:var(--border);
@@ -9281,23 +9503,21 @@ var latestApsTotal = 0;
 var selectedSnSet = {};
 var selectedMacSet = {};
 var historyHiddenSnSet = {};
+var historySelectionTouched = false;
+var historyTrackFilterTs = null;
 var zoneAlarmSnSet = {};
-var autoTrackSnSet = {};
 var rowClickTimer = null;
 var trackCache = {};
 var trackLoading = {};
 var trackFetchMeta = {};
-var prefRealtimeTrack = true;
-var prefTrack2hOnly = false;
+var trackRenderQueue = {};
+var trackRenderScheduled = false;
 var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
 var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
 var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
 var NEW_FIRMWARE_PARSE_KEY = 'rid_new_firmware_parse_enabled';
-var LIVE_TRACK_WINDOW_SEC = 300;
 var LIVE_LOST_WINDOW_SEC = 120;
-var AUTO_TRACK_OFFLINE_HIDE_SEC = LIVE_TRACK_WINDOW_SEC;
-var TRACK_FILTER_WINDOW_SEC = 7200;
-var TRACK_LIVE_FETCH_LIMIT = 600;
+var HISTORY_DEFAULT_WINDOW_SEC = 12 * 3600;
 var TRACK_HISTORY_FETCH_LIMIT = 4000;
 var TRACK_FORCE_RELOAD_MS = 8000;
 var notificationItems = [];
@@ -9390,6 +9610,12 @@ function cookieSet(name, value, days){
   var secure = (location.protocol === 'https:') ? '; Secure' : '';
   document.cookie = key + '=' + val + '; Max-Age=' + Math.round(nDays * 86400) + '; Path=/; SameSite=Lax' + secure;
 }
+function cookieDelete(name){
+  var key = String(name || '').trim();
+  if(!key) return;
+  var secure = (location.protocol === 'https:') ? '; Secure' : '';
+  document.cookie = key + '=; Max-Age=0; Path=/; SameSite=Lax' + secure;
+}
 function cookieBool(name, defVal){
   var v = cookieGet(name);
   if(v == null || v === '') return !!defVal;
@@ -9397,19 +9623,13 @@ function cookieBool(name, defVal){
   return (v === '1' || v === 'true' || v === 'on' || v === 'yes');
 }
 function loadTrackPrefs(){
-  prefRealtimeTrack = cookieBool(COOKIE_TRACK_REALTIME, true);
-  prefTrack2hOnly = cookieBool(COOKIE_TRACK_2H_ONLY, false);
   saveTrackPrefs();
 }
 function saveTrackPrefs(){
-  cookieSet(COOKIE_TRACK_REALTIME, prefRealtimeTrack ? '1' : '0', 365);
-  cookieSet(COOKIE_TRACK_2H_ONLY, prefTrack2hOnly ? '1' : '0', 365);
+  cookieDelete(COOKIE_TRACK_REALTIME);
+  cookieDelete(COOKIE_TRACK_2H_ONLY);
 }
 function syncTrackPrefsUi(){
-  var rt = qs('opt-realtime-track');
-  if(rt) rt.checked = !!prefRealtimeTrack;
-  var f2h = qs('opt-track-2h');
-  if(f2h) f2h.checked = !!prefTrack2hOnly;
 }
 function consumeFreezeOnHomeRequest(){
   try{
@@ -9417,33 +9637,6 @@ function consumeFreezeOnHomeRequest(){
   }catch(_e){
     homeFreezeAfterFirstRender = false;
   }
-}
-function refreshAutoTrackSelection(rows){
-  autoTrackSnSet = {};
-  if(!prefRealtimeTrack) return;
-  var arr = Array.isArray(rows) ? rows : [];
-  for(var i=0;i<arr.length;i++){
-    var e = arr[i] || {};
-    var sn = String(e.sn || '');
-    if(!sn || e.archived) continue;
-    var age = Number(e.age || 0);
-    if(!isFinite(age) || age < 0) age = 0;
-    if(age >= AUTO_TRACK_OFFLINE_HIDE_SEC) continue;
-    autoTrackSnSet[sn] = true;
-  }
-}
-function effectiveTrackSnList(){
-  var out = {};
-  var sel = selectedSnList();
-  for(var i=0;i<sel.length;i++){
-    out[String(sel[i] || '')] = true;
-  }
-  if(prefRealtimeTrack){
-    Object.keys(autoTrackSnSet).forEach(function(sn){
-      if(sn) out[sn] = true;
-    });
-  }
-  return Object.keys(out).filter(function(sn){ return !!sn; });
 }
 function historyVisibleSnList(rows){
   var out = [];
@@ -9455,17 +9648,7 @@ function historyVisibleSnList(rows){
   return out;
 }
 function displayTrackSnList(page, rows){
-  if(page === 'history'){
-    var focus = replayFocusSn();
-    if(focus) return [focus];
-    return historyVisibleSnList(rows);
-  }
-  return effectiveTrackSnList();
-}
-function replayFocusSn(){
-  var sn = String((replayState && replayState.sn) || '');
-  if(currentAppPage() !== 'history' || !sn || replayState.start == null) return '';
-  return sn;
+  return page === 'history' ? historyVisibleSnList(rows) : [];
 }
 function isHistoryTrackVisible(sn){
   sn = String(sn || '');
@@ -9474,28 +9657,58 @@ function isHistoryTrackVisible(sn){
 function isSnCheckedForCurrentPage(sn){
   return currentAppPage() === 'history' ? isHistoryTrackVisible(sn) : isSnSelected(sn);
 }
+function historyTrackLastAgeSec(e){
+  var age = Number((e && e.age) || 0);
+  if(!isFinite(age) || age < 0) return null;
+  return age;
+}
+function pruneHistoryHiddenSnSet(rows){
+  var keep = {};
+  (Array.isArray(rows) ? rows : []).forEach(function(e){
+    var sn = String((e && e.sn) || '');
+    if(sn) keep[sn] = true;
+  });
+  Object.keys(historyHiddenSnSet).forEach(function(sn){
+    if(!keep[sn]) delete historyHiddenSnSet[sn];
+  });
+}
+function applyHistoryDefaultSelection(rows){
+  pruneHistoryHiddenSnSet(rows);
+  if(historySelectionTouched) return;
+  var nextHidden = {};
+  (Array.isArray(rows) ? rows : []).forEach(function(e){
+    var sn = String((e && e.sn) || '');
+    if(!sn) return;
+    var age = historyTrackLastAgeSec(e);
+    if(age == null || age > HISTORY_DEFAULT_WINDOW_SEC){
+      nextHidden[sn] = true;
+    }
+  });
+  historyHiddenSnSet = nextHidden;
+}
 function _trackTsSec(p){
   var ts = Number((p && p.ts) || 0);
   return (isFinite(ts) && ts > 0) ? ts : null;
 }
-function filterTrackForDisplay(track, page){
+function activeHistoryTrackFilterTs(){
+  var ts = Number(historyTrackFilterTs);
+  return (isFinite(ts) && ts > 0) ? ts : null;
+}
+function filterTrackByHistoryTime(track){
   var arr = Array.isArray(track) ? track.slice() : [];
-  if(page === 'live'){
-    var liveThreshold = (Date.now() / 1000) - LIVE_TRACK_WINDOW_SEC;
-    arr = arr.filter(function(p){
-      var ts = _trackTsSec(p);
-      return ts == null ? true : (ts >= liveThreshold);
-    });
-  }else if(prefTrack2hOnly){
-    var threshold = (Date.now() / 1000) - TRACK_FILTER_WINDOW_SEC;
-    arr = arr.filter(function(p){
-      var ts = _trackTsSec(p);
-      return ts == null ? true : (ts >= threshold);
-    });
-  }
-  if(page === 'history'){
-    arr = filterTrackByReplay(arr);
-  }
+  if(currentAppPage() !== 'history') return arr;
+  var start = activeHistoryTrackFilterTs();
+  if(start == null) return arr;
+  return arr.filter(function(p){
+    var ts = _trackTsSec(p);
+    return ts == null ? true : (ts >= start);
+  });
+}
+function filterTrackForDisplay(track, page, sn){
+  if(page !== 'history') return [];
+  var arr = Array.isArray(track) ? track.slice() : [];
+  arr = filterTrackByHistoryTime(arr);
+  arr = filterTrackByReplay(arr, sn);
   return arr;
 }
 function trackLatLngSignature(latlngs){
@@ -9641,35 +9854,46 @@ function isSnSelected(sn){
 function selectedSnList(){
   return Object.keys(selectedSnSet).filter(function(sn){ return !!selectedSnSet[sn]; });
 }
-function trackFetchUrl(sn){
-  var page = currentAppPage();
-  var url = '/api/tracks/get?sn=' + encodeURIComponent(sn);
-  if(page === 'live'){
-    url += '&window=' + encodeURIComponent(String(LIVE_TRACK_WINDOW_SEC));
-    url += '&limit=' + encodeURIComponent(String(TRACK_LIVE_FETCH_LIMIT));
-  }else{
-    if(prefTrack2hOnly){
-      url += '&window=' + encodeURIComponent(String(TRACK_FILTER_WINDOW_SEC));
+function clearLiveSelections(keepSn){
+  var keep = String(keepSn || '');
+  Object.keys(selectedSnSet).forEach(function(sn){
+    if(sn !== keep) delete selectedSnSet[sn];
+  });
+  Object.keys(selectedMacSet).forEach(function(mac){
+    var matched = false;
+    if(keep){
+      var e = latestDroneMap[keep] || null;
+      var keepMac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
+      matched = !!keepMac && keepMac === mac;
     }
-    url += '&limit=' + encodeURIComponent(String(TRACK_HISTORY_FETCH_LIMIT));
-  }
+    if(!matched) delete selectedMacSet[mac];
+  });
+}
+function trackFetchUrl(sn){
+  var url = '/api/tracks/get?sn=' + encodeURIComponent(sn);
+  url += '&limit=' + encodeURIComponent(String(TRACK_HISTORY_FETCH_LIMIT));
   return url;
 }
 async function ensureTrackLoaded(sn, force){
   sn = String(sn || '');
   if(!sn) return;
   if(trackLoading[sn]) return;
-  if(trackCache[sn] && !force) return;
   var nowMs = Date.now();
   var meta = trackFetchMeta[sn] || {};
-  if(force && trackCache[sn] && currentAppPage() === 'live' && (nowMs - Number(meta.ts || 0)) < TRACK_FORCE_RELOAD_MS) return;
+  var scope = 'history|' + TRACK_HISTORY_FETCH_LIMIT;
+  if(trackCache[sn] && !force && meta.scope === scope) return;
   trackLoading[sn] = true;
   try{
     var data = await getJson(trackFetchUrl(sn));
     var tr = Array.isArray(data.track) ? data.track : [];
     trackCache[sn] = tr;
-    trackFetchMeta[sn] = {ts: Date.now(), count:Number(data.count || tr.length || 0), shown:Number(tr.length || 0)};
-    if(isSnSelected(sn) || (prefRealtimeTrack && autoTrackSnSet[sn])){
+    trackFetchMeta[sn] = {
+      ts: Date.now(),
+      scope: scope,
+      total: Number(data.count_total || data.count || tr.length || 0),
+      shown: Number(tr.length || 0)
+    };
+    if(currentAppPage() === 'history' && isHistoryTrackVisible(sn)){
       updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
   }catch(_e){
@@ -9697,56 +9921,70 @@ function syncSelectedFromRows(rows){
   }
   selectedMacSet = nextMac;
 }
-function setSnSelected(sn, on){
+function setSnSelected(sn, on, opts){
+  opts = (opts && typeof opts === 'object') ? opts : {};
   sn = String(sn || '');
   if(!sn) return;
   var e = latestDroneMap[sn] || null;
   var mac = String((e && (e.mac || e.src_mac)) || '').toLowerCase();
   if(on){
+    if(opts.exclusive) clearLiveSelections(sn);
     selectedSnSet[sn] = true;
     if(mac) selectedMacSet[mac] = true;
   }else{
     delete selectedSnSet[sn];
     if(mac) delete selectedMacSet[mac];
   }
-  if(on) ensureTrackLoaded(sn, false);
   syncTableSelectionUi();
   renderLiveCards(latestDroneRows);
   renderMapMiniList(latestDroneRows);
   refreshTrackMgrOptions(latestDroneRows);
   updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
-function setHistorySnVisible(sn, on){
-  sn = String(sn || '');
-  if(!sn) return;
-  if(on){
-    delete historyHiddenSnSet[sn];
-    ensureTrackLoaded(sn, false);
-  }else{
-    historyHiddenSnSet[sn] = true;
-  }
+function setHistoryVisibleSet(snList, opts){
+  opts = (opts && typeof opts === 'object') ? opts : {};
+  historySelectionTouched = true;
+  var visibleSet = {};
+  (Array.isArray(snList) ? snList : []).forEach(function(sn){
+    sn = String(sn || '');
+    if(sn) visibleSet[sn] = true;
+  });
+  var nextHidden = {};
+  (Array.isArray(latestDroneRows) ? latestDroneRows : []).forEach(function(e){
+    var sn = String((e && e.sn) || '');
+    if(!sn) return;
+    if(visibleSet[sn]){
+      ensureTrackLoaded(sn, false);
+    }else{
+      nextHidden[sn] = true;
+    }
+  });
+  historyHiddenSnSet = nextHidden;
+  if(!opts.keepReplay && replayState.sn) clearReplaySelection({render:false});
   syncTableSelectionUi();
   renderMapMiniList(latestDroneRows);
   refreshReplayBounds(false);
   updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
+function setHistorySnVisible(sn, on, opts){
+  sn = String(sn || '');
+  if(!sn) return;
+  var current = historyVisibleSnList(latestDroneRows);
+  var next = {};
+  current.forEach(function(id){ if(id) next[id] = true; });
+  if(on) next[sn] = true;
+  else delete next[sn];
+  setHistoryVisibleSet(Object.keys(next), opts);
+}
+function setHistoryExclusiveVisible(sn, opts){
+  sn = String(sn || '');
+  setHistoryVisibleSet(sn ? [sn] : [], opts);
+}
 function setAllVisibleSelected(on){
   if(currentAppPage() === 'history'){
     var hRows = Array.isArray(latestDroneRows) ? latestDroneRows : [];
-    hRows.forEach(function(e){
-      var sn = String((e && e.sn) || '');
-      if(!sn) return;
-      if(on){
-        delete historyHiddenSnSet[sn];
-        ensureTrackLoaded(sn, false);
-      }else{
-        historyHiddenSnSet[sn] = true;
-      }
-    });
-    syncTableSelectionUi();
-    renderMapMiniList(latestDroneRows);
-    refreshReplayBounds(false);
-    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    var next = on ? hRows.map(function(e){ return String((e && e.sn) || ''); }).filter(function(sn){ return !!sn; }) : [];
+    setHistoryVisibleSet(next, {});
     return;
   }
   var rows = Array.isArray(latestDroneRows) ? latestDroneRows : [];
@@ -10643,7 +10881,7 @@ function renderMapMiniList(list){
     return String(a.sn || '').localeCompare(String(b.sn || ''));
   });
   var snSig = rows.map(function(e){ return String(e.sn || ''); }).join('|');
-  var selSig = selectedSnList().slice().sort().join('|');
+  var selSig = (currentAppPage() === 'history' ? historyVisibleSnList(rows) : selectedSnList()).slice().sort().join('|');
   var sig = snSig + '::' + selSig + '::' + (show ? '1' : '0');
   if(sig === miniListRenderSig){
     return;
@@ -10653,7 +10891,7 @@ function renderMapMiniList(list){
     box.innerHTML = '<div class="mini-title">暂无飞机</div>';
     return;
   }
-  var html = '<div class="mini-title">历史记录 · 选择飞机查看轨迹</div>';
+  var html = '<div class="mini-title">历史记录 · 勾选飞机显示轨迹</div>';
   rows.forEach(function(e, idx){
     e = e || {};
     var sn = String(e.sn || '');
@@ -10730,7 +10968,7 @@ function buildExtraUi(){
     modal.id = 'info-modal';
     modal.className = 'info-modal';
     modal.innerHTML =
-      '<div class="info-card" role="dialog" aria-modal="true" aria-label="详情信息">'+
+      '<div class="info-card" role="dialog" aria-modal="false" aria-label="详情信息">'+
       '  <div class="info-card-hd"><span>详情信息</span><button id="info-card-close" class="info-card-close" type="button" title="关闭">×</button></div>'+
       '  <div id="info-card-body" class="info-card-body"></div>'+
       '</div>';
@@ -10861,13 +11099,7 @@ function buildExtraUi(){
       '    <div class="adv-row">'+
       '      <label><input id="scan-wifi-fast" type="checkbox"> 扫描WiFi快传(5GHz常见信道)</label>'+
       '    </div>'+
-      '    <div class="adv-row">'+
-      '      <label><input id="opt-realtime-track" type="checkbox"> 实时轨迹（最近5分钟轨迹）</label>'+
-      '    </div>'+
-      '    <div class="adv-row">'+
-      '      <label><input id="opt-track-2h" type="checkbox"> 自动筛选 2 小时内轨迹</label>'+
-      '    </div>'+
-      '    <div class="adv-note">轨迹偏好已保存到 Cookie</div>'+
+      '    <div class="adv-note">新版固件解析显示偏好已保存到当前浏览器</div>'+
       '    <div class="adv-row">'+
       '      <label for="base-name">基站名称</label>'+
       '      <input id="base-name" class="adv-input" type="text" placeholder="例如: 基站A">'+
@@ -11094,18 +11326,6 @@ function buildExtraUi(){
   if(qs('btn-save-iface-default')) qs('btn-save-iface-default').addEventListener('click', saveDefaultIfaceConfig);
   if(qs('iface-select')) qs('iface-select').addEventListener('change', function(){ this.dataset.edited='1'; });
   if(qs('scan-wifi-fast')) qs('scan-wifi-fast').addEventListener('change', function(){ this.dataset.edited='1'; });
-  if(qs('opt-realtime-track')) qs('opt-realtime-track').addEventListener('change', function(ev){
-    prefRealtimeTrack = !!(ev && ev.target && ev.target.checked);
-    saveTrackPrefs();
-    refreshAutoTrackSelection(latestDroneRows);
-    effectiveTrackSnList().forEach(function(sn){ ensureTrackLoaded(sn, false); });
-    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
-  });
-  if(qs('opt-track-2h')) qs('opt-track-2h').addEventListener('change', function(ev){
-    prefTrack2hOnly = !!(ev && ev.target && ev.target.checked);
-    saveTrackPrefs();
-    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
-  });
   if(qs('restart-args')) qs('restart-args').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-name')) qs('base-name').addEventListener('input', function(){ this.dataset.edited='1'; });
   if(qs('base-lat')) qs('base-lat').addEventListener('input', function(){ this.dataset.edited='1'; });
@@ -11139,6 +11359,10 @@ function buildExtraUi(){
       }
       rowClickTimer = setTimeout(function(){
         rowClickTimer = null;
+        if(currentAppPage() === 'history'){
+          focusHistoryAircraft(sn);
+          return;
+        }
         var e = latestDroneMap[sn];
         if(e) showInfoCard(buildInfoHtml(e), true);
       }, 220);
@@ -11866,8 +12090,8 @@ function onData(d){
   handleDroneNotifications(list);
   latestDroneMap = {};
   latestDroneRows = list.slice();
+  applyHistoryDefaultSelection(latestDroneRows);
   syncSelectedFromRows(latestDroneRows);
-  refreshAutoTrackSelection(latestDroneRows);
   displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){ ensureTrackLoaded(sn, false); });
 
   var rows='';
@@ -11947,8 +12171,10 @@ function onData(d){
   latestMapRows = Array.isArray(d.map_drones) ? d.map_drones : (Array.isArray(d.drones) ? d.drones : []);
   displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){
     var e = latestDroneMap[sn];
-    if(e && Number(e.track_count || 0) !== Number((trackCache[sn] || []).length)){
+    if(e){
       var tm = trackFetchMeta[sn] || {};
+      var cachedTotal = Number(tm.total || (trackCache[sn] || []).length || 0);
+      if(Number(e.track_count || 0) === cachedTotal) return;
       if(currentAppPage() === 'history' || (Date.now() - Number(tm.ts || 0)) >= TRACK_FORCE_RELOAD_MS){
         ensureTrackLoaded(sn, true);
       }
@@ -11969,7 +12195,7 @@ var motionState = {};
 var COLORS = ['#58a6ff','#3fb950','#d29922','#d2a8ff','#79c0ff','#ff7b72'];
 var TRACK_COLORS = ['#1f9dff','#12b886','#ff8f1f','#ff4d6d','#8b5cf6','#06b6d4','#84cc16','#eab308'];
 var colorIdx = {};
-var LIVE_RECENT_WINDOW_SEC = LIVE_TRACK_WINDOW_SEC;
+var LIVE_RECENT_WINDOW_SEC = 300;
 window.addEventListener('resize', function(){
   if(map) map.invalidateSize(false);
   if(latestApsRows.length){
@@ -12028,6 +12254,40 @@ function wgs84ToGcj02(lat, lon){
 }
 function toMapLatLng(lat, lon){
   return wgs84ToGcj02(lat, lon);
+}
+function focusEntryOnMap(e, zoom){
+  if(!map || !e) return;
+  var lat = Number(e.lat), lon = Number(e.lon);
+  if(!isFinite(lat) || !isFinite(lon)) return;
+  var pos = toMapLatLng(lat, lon);
+  var nextZoom = Math.max(Number(zoom || 16), Number(map.getZoom ? map.getZoom() : 0) || 0);
+  markMapUserInteracted();
+  try{
+    if(map.flyTo) map.flyTo(pos, nextZoom, {animate:true, duration:0.35});
+    else map.setView(pos, nextZoom);
+  }catch(_e){
+    try{ map.setView(pos, nextZoom); }catch(_e2){}
+  }
+}
+function focusLiveAircraft(sn){
+  sn = String(sn || '');
+  if(!sn) return;
+  setSnSelected(sn, true, {exclusive:true});
+  var e = latestDroneMap[sn];
+  if(e){
+    showInfoCard(buildInfoHtml(e), true);
+    focusEntryOnMap(e, 16);
+  }
+}
+function focusHistoryAircraft(sn){
+  sn = String(sn || '');
+  if(!sn) return;
+  setHistoryVisibleSet([sn], {keepReplay:false});
+  var e = latestDroneMap[sn];
+  if(e){
+    showInfoCard(buildInfoHtml(e), true);
+    focusEntryOnMap(e, 16);
+  }
 }
 
 function _deg2rad(d){ return d * Math.PI / 180; }
@@ -12121,20 +12381,63 @@ function splitLatLngsByMeters(latlngs, meters){
   return out;
 }
 function makeTrackLayer(latlngs, color){
-  var group = L.layerGroup();
-  var segments = splitLatLngsByMeters(latlngs, 100);
-  if(!segments.length) segments = [latlngs];
-  segments.forEach(function(seg){
-    L.polyline(seg, {
-      color: color,
-      weight: 4,
-      opacity: 0.84,
-      dashArray: '8 9',
-      lineCap: 'butt',
-      lineJoin: 'round'
-    }).addTo(group);
+  return L.polyline(latlngs, {
+    color: color,
+    weight: 4,
+    opacity: 0.9,
+    lineCap: 'round',
+    lineJoin: 'round',
+    smoothFactor: 1
   });
-  return group;
+}
+function dropTrackLayer(sn){
+  sn = String(sn || '');
+  if(!sn) return;
+  delete trackRenderQueue[sn];
+  if(trackLines[sn]){
+    try{ map.removeLayer(trackLines[sn]); }catch(_e){}
+    delete trackLines[sn];
+  }
+  delete trackLineSig[sn];
+}
+function queueTrackLayerRender(sn, latlngs, color, sig){
+  sn = String(sn || '');
+  if(!sn || !Array.isArray(latlngs) || latlngs.length < 2) return;
+  trackRenderQueue[sn] = {sn:sn, latlngs:latlngs, color:color, sig:String(sig || '')};
+  if(trackRenderScheduled) return;
+  trackRenderScheduled = true;
+  requestAnimationFrame(flushTrackLayerRenderQueue);
+}
+function flushTrackLayerRenderQueue(){
+  trackRenderScheduled = false;
+  if(!map){
+    trackRenderQueue = {};
+    return;
+  }
+  var nowFn = (window.performance && typeof window.performance.now === 'function')
+    ? function(){ return window.performance.now(); }
+    : function(){ return Date.now(); };
+  var deadline = nowFn() + 10;
+  while(true){
+    var keys = Object.keys(trackRenderQueue);
+    if(!keys.length) break;
+    var sn = keys[0];
+    var task = trackRenderQueue[sn];
+    delete trackRenderQueue[sn];
+    if(!task) continue;
+    if(trackLines[sn] && trackLineSig[sn] === task.sig) continue;
+    if(trackLines[sn]){
+      try{ map.removeLayer(trackLines[sn]); }catch(_e){}
+      delete trackLines[sn];
+    }
+    trackLines[sn] = makeTrackLayer(task.latlngs, task.color).addTo(map);
+    trackLineSig[sn] = task.sig;
+    if(nowFn() >= deadline) break;
+  }
+  if(Object.keys(trackRenderQueue).length){
+    trackRenderScheduled = true;
+    requestAnimationFrame(flushTrackLayerRenderQueue);
+  }
 }
 
 function initMap(){
@@ -12212,6 +12515,66 @@ function fmtReplayTime(ts){
     return '-';
   }
 }
+function collectHistoryTrackBounds(){
+  var selected = historyVisibleSnList(latestDroneRows);
+  var minTs = null;
+  var maxTs = null;
+  var loadedCount = 0;
+  var pointCount = 0;
+  selected.forEach(function(sn){
+    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    if(tr.length) loadedCount += 1;
+    for(var i=0;i<tr.length;i++){
+      var ts = _trackTsSec(tr[i]);
+      if(ts == null) continue;
+      pointCount += 1;
+      if(minTs == null || ts < minTs) minTs = ts;
+      if(maxTs == null || ts > maxTs) maxTs = ts;
+    }
+  });
+  return {selectedCount:selected.length, loadedCount:loadedCount, pointCount:pointCount, min:minTs, max:maxTs};
+}
+function historyFilterSliderToTs(bounds, val){
+  if(!bounds || bounds.min == null || bounds.max == null) return null;
+  var span = Number(bounds.max) - Number(bounds.min);
+  if(!isFinite(span) || span <= 0) return Number(bounds.min);
+  var v = Math.max(0, Math.min(1000, Number(val || 0)));
+  return Number(bounds.min) + span * (v / 1000);
+}
+function historyFilterTsToSlider(bounds, ts){
+  if(!bounds || bounds.min == null || bounds.max == null) return 0;
+  var span = Number(bounds.max) - Number(bounds.min);
+  if(!isFinite(span) || span <= 0) return 0;
+  var target = (ts == null) ? Number(bounds.min) : Number(ts);
+  var v = (target - Number(bounds.min)) / span;
+  return Math.max(0, Math.min(1000, Math.round(v * 1000)));
+}
+function normalizeHistoryTrackFilterTs(bounds){
+  if(!bounds || bounds.min == null || bounds.max == null || bounds.max <= bounds.min){
+    historyTrackFilterTs = null;
+    return;
+  }
+  var ts = activeHistoryTrackFilterTs();
+  if(ts == null) return;
+  if(ts < Number(bounds.min)) historyTrackFilterTs = Number(bounds.min);
+  else if(ts > Number(bounds.max)) historyTrackFilterTs = Number(bounds.max);
+}
+function onHistoryTrackFilterInput(){
+  var bounds = collectHistoryTrackBounds();
+  var slider = qs('history-filter-progress');
+  var nextTs = historyFilterSliderToTs(bounds, slider ? slider.value : 0);
+  if(nextTs == null) return;
+  if(replayState.sn) clearReplaySelection({render:false});
+  historyTrackFilterTs = nextTs;
+  renderReplayCard();
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
+function resetHistoryTrackFilter(){
+  if(replayState.sn) clearReplaySelection({render:false});
+  historyTrackFilterTs = null;
+  renderReplayCard();
+  updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+}
 function replaySliderToTs(val){
   if(replayState.min == null || replayState.max == null) return null;
   var span = Number(replayState.max) - Number(replayState.min);
@@ -12242,29 +12605,44 @@ function ensureTrackReplayCard(){
   card.id = 'track-replay-card';
   card.className = 'track-replay-card';
   card.innerHTML =
-    '<div class="track-replay-head"><div><div class="track-replay-title">轨迹重放</div><div id="track-replay-count" class="track-replay-sub">-</div></div><button class="btn-mini" id="btn-replay-play" type="button">播放</button></div>'+
+    '<div class="track-replay-head"><div><div class="track-replay-title">轨迹时间线</div><div id="track-replay-count" class="track-replay-sub">-</div></div><button class="btn-mini" id="btn-replay-play" type="button">播放</button></div>'+
+    '<div class="track-replay-time" id="track-history-filter-time">-</div>'+
+    '<div class="track-replay-ranges">'+
+    '  <input id="history-filter-progress" type="range" min="0" max="1000" step="1" value="0" aria-label="轨迹时间线过滤">'+
+    '</div>'+
+    '<div class="track-replay-controls">'+
+    '  <button class="btn-mini" id="btn-history-filter-reset" type="button">显示全部</button>'+
+    '</div>'+
     '<select id="replay-sn-select" class="input-mini" aria-label="选择重放目标"><option value="">选择飞机</option></select>'+
     '<div class="track-replay-time" id="track-replay-time">-</div>'+
     '<div class="track-replay-ranges">'+
-    '  <input id="replay-progress" type="range" min="0" max="1000" step="1" value="0" aria-label="重放进度">'+
+      '  <input id="replay-progress" type="range" min="0" max="1000" step="1" value="0" aria-label="重放进度">'+
     '</div>'+
     '<div class="track-replay-controls">'+
-    '  <button class="btn-mini" id="btn-replay-reset" type="button">起点</button>'+
+    '  <button class="btn-mini" id="btn-replay-reset" type="button">重放起点</button>'+
     '  <label class="track-speed-label"><span>速度</span><input id="replay-speed" type="range" min="1" max="10" step="0.1" value="1" aria-label="重放速度"><span id="replay-speed-value" class="track-speed-value">1.0x</span></label>'+
     '  <button class="btn-mini" id="btn-replay-100x" type="button">100x</button>'+
     '</div>'+
-    '<div class="track-replay-status" id="track-replay-status">请选择一架飞机后重放。</div>';
+    '<div class="track-replay-status" id="track-replay-status">勾选飞机只影响地图显示。需要回放时，请在下方手动选择一架飞机。</div>';
   panel.appendChild(card);
+  var historyFilter = qs('history-filter-progress');
+  if(historyFilter) historyFilter.addEventListener('input', onHistoryTrackFilterInput);
+  var historyReset = qs('btn-history-filter-reset');
+  if(historyReset) historyReset.addEventListener('click', resetHistoryTrackFilter);
   var progress = qs('replay-progress');
   if(progress) progress.addEventListener('input', onReplayRangeInput);
   var play = qs('btn-replay-play');
   if(play) play.addEventListener('click', function(){ setReplayPlaying(!replayState.playing); });
   var sel = qs('replay-sn-select');
   if(sel) sel.addEventListener('change', function(){
-    if(replayState.playing) setReplayPlaying(false);
-    replayState.sn = String(sel.value || '') || null;
-    refreshReplayBounds(true);
-    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    var sn = String(sel.value || '').trim();
+    if(!sn){
+      clearReplaySelection();
+      updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+      return;
+    }
+    replayState.sn = sn;
+    setHistoryExclusiveVisible(sn, {keepReplay:true});
   });
   var reset = qs('btn-replay-reset');
   if(reset) reset.addEventListener('click', resetReplayRange);
@@ -12282,11 +12660,13 @@ function ensureTrackReplayCard(){
 }
 function replayCandidateList(){
   var rows = Array.isArray(latestDroneRows) ? latestDroneRows : [];
+  var selectedSet = {};
+  historyVisibleSnList(rows).forEach(function(sn){ if(sn) selectedSet[sn] = true; });
   var seen = {};
   var out = [];
   rows.forEach(function(e){
     var sn = String((e && e.sn) || '');
-    if(!sn || seen[sn]) return;
+    if(!sn || seen[sn] || !selectedSet[sn]) return;
     var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
     if(!tr.length) return;
     seen[sn] = true;
@@ -12301,8 +12681,6 @@ function replaySelectedSn(){
   candidates.forEach(function(x){ set[String(x.sn)] = true; });
   var cur = String(replayState.sn || '');
   if(cur && set[cur]) return cur;
-  var visible = historyVisibleSnList(latestDroneRows).filter(function(sn){ return !!set[String(sn)]; });
-  if(visible.length === 1) return String(visible[0]);
   return '';
 }
 function syncReplaySelect(candidates, selectedSn){
@@ -12321,8 +12699,9 @@ function collectReplayBounds(){
   var candidates = replayCandidateList();
   var sn = replaySelectedSn();
   syncReplaySelect(candidates, sn);
+  var visibleCount = historyVisibleSnList(latestDroneRows).length;
   if(!sn){
-    return {sn:null, min:null, max:null, selectedCount:0, candidateCount:candidates.length, count:0};
+    return {sn:null, min:null, max:null, visibleCount:visibleCount, candidateCount:candidates.length, count:0};
   }
   replayState.sn = sn;
   var minTs = null;
@@ -12334,13 +12713,30 @@ function collectReplayBounds(){
     if(minTs == null || ts < minTs) minTs = ts;
     if(maxTs == null || ts > maxTs) maxTs = ts;
   }
-  return {sn:sn, min:minTs, max:maxTs, selectedCount:1, candidateCount:candidates.length, count:tr.length};
+  return {sn:sn, min:minTs, max:maxTs, visibleCount:visibleCount, candidateCount:candidates.length, count:tr.length};
+}
+function clearReplaySelection(opts){
+  opts = (opts && typeof opts === 'object') ? opts : {};
+  stopReplayTimer();
+  setReplaySyncPaused(false);
+  replayState.sn = null;
+  replayState.min = null;
+  replayState.max = null;
+  replayState.start = null;
+  replayState.end = null;
+  replayState.cursor = null;
+  replayState.userRange = false;
+  var sel = qs('replay-sn-select');
+  if(sel) sel.value = '';
+  clearReplayMarkers();
+  if(opts.render !== false) renderReplayCard();
 }
 function refreshReplayBounds(keepRange){
   ensureTrackReplayCard();
   var b = collectReplayBounds();
+  var filterStart = activeHistoryTrackFilterTs();
   replayState.sn = b.sn || null;
-  if(b.selectedCount !== 1){
+  if(!b.sn){
     if(replayState.playing) setReplayPlaying(false);
     else {
       stopReplayTimer();
@@ -12366,10 +12762,10 @@ function refreshReplayBounds(keepRange){
   }
   replayState.min = b.min;
   replayState.max = b.max;
-  replayState.start = b.min;
+  replayState.start = (filterStart != null && filterStart >= b.min && filterStart <= b.max) ? filterStart : b.min;
   replayState.end = b.max;
-  if(!keepRange || replayState.cursor == null || replayState.cursor < b.min || replayState.cursor > b.max){
-    replayState.cursor = b.min;
+  if(!keepRange || replayState.cursor == null || replayState.cursor < replayState.start || replayState.cursor > b.max){
+    replayState.cursor = replayState.start;
   }
   renderReplayCard();
 }
@@ -12378,14 +12774,39 @@ function renderReplayCard(){
   if(!card) return;
   var page = currentAppPage();
   card.style.display = (page === 'history') ? '' : 'none';
+  var historyBounds = collectHistoryTrackBounds();
+  normalizeHistoryTrackFilterTs(historyBounds);
+  var activeFilter = activeHistoryTrackFilterTs();
   var candidates = replayCandidateList();
   var selectedSn = replaySelectedSn();
   syncReplaySelect(candidates, selectedSn);
-  var count = selectedSn ? 1 : 0;
   var countEl = qs('track-replay-count');
   if(countEl){
-    if(selectedSn) countEl.textContent = '重放目标 ' + selectedSn;
-    else countEl.textContent = candidates.length ? ('可选 ' + candidates.length + ' 架') : '暂无可重放轨迹';
+    if(selectedSn) countEl.textContent = '已勾选 ' + historyBounds.selectedCount + ' 架 · 回放目标 ' + selectedSn;
+    else if(historyBounds.selectedCount) countEl.textContent = '已勾选 ' + historyBounds.selectedCount + ' 架 · 回放未开启';
+    else countEl.textContent = '默认仅勾选 12 小时内飞机';
+  }
+  var historyFilterEl = qs('history-filter-progress');
+  var hasHistoryRange = historyBounds.min != null && historyBounds.max != null && historyBounds.max > historyBounds.min;
+  if(historyFilterEl){
+    historyFilterEl.disabled = !hasHistoryRange;
+    historyFilterEl.value = String(historyFilterTsToSlider(historyBounds, activeFilter));
+  }
+  var historyFilterReset = qs('btn-history-filter-reset');
+  if(historyFilterReset){
+    historyFilterReset.disabled = !hasHistoryRange || (activeFilter == null && !selectedSn);
+  }
+  var historyTime = qs('track-history-filter-time');
+  if(historyTime){
+    if(!historyBounds.selectedCount){
+      historyTime.textContent = '进入历史记录后默认只勾选 12 小时内飞机。勾选目标后，可拖动时间线仅显示指定时间点后的轨迹。';
+    }else if(!hasHistoryRange){
+      historyTime.textContent = historyBounds.loadedCount ? '已勾选飞机的轨迹点不足，暂不能按时间线过滤。' : '正在加载已勾选飞机的轨迹...';
+    }else if(activeFilter == null){
+      historyTime.textContent = '当前显示全部已勾选轨迹\\n范围 ' + fmtReplayTime(historyBounds.min) + '  ~  ' + fmtReplayTime(historyBounds.max);
+    }else{
+      historyTime.textContent = '当前显示 ' + fmtReplayTime(activeFilter) + ' 之后的轨迹\\n范围 ' + fmtReplayTime(historyBounds.min) + '  ~  ' + fmtReplayTime(historyBounds.max);
+    }
   }
   var progressEl = qs('replay-progress');
   var hasRange = replayState.min != null && replayState.max != null && replayState.max > replayState.min;
@@ -12415,15 +12836,15 @@ function renderReplayCard(){
   var time = qs('track-replay-time');
   if(time){
     time.textContent = hasRange
-      ? ('当前 ' + fmtReplayTime(replayState.cursor == null ? replayState.start : replayState.cursor) + '\\n首包 ' + fmtReplayTime(replayState.start) + '  末包 ' + fmtReplayTime(replayState.end))
+      ? ('当前 ' + fmtReplayTime(replayState.cursor == null ? replayState.start : replayState.cursor) + '\\n重放起点 ' + fmtReplayTime(replayState.start) + '  末包 ' + fmtReplayTime(replayState.end))
       : '暂无可重放轨迹';
   }
   var status = qs('track-replay-status');
   if(status){
     var speedText = speedValue ? speedValue.textContent : ((Number(replayState.speed || 1) === 100) ? '100x' : (Number(replayState.speed || 1).toFixed(1) + 'x'));
-    if(!selectedSn) status.textContent = candidates.length ? '选择一架飞机后开始重放，地图会聚焦该目标。' : '当前没有可重放轨迹。';
+    if(!selectedSn) status.textContent = candidates.length ? '勾选飞机只影响地图显示。需要回放时，请在下方手动选择一架飞机。' : '当前没有可重放轨迹。';
     else if(!hasRange) status.textContent = '轨迹正在加载或时间点不足。';
-    else status.textContent = replayState.playing ? ('正在重演中，新的数据同步已暂停。倍速 ' + speedText + '，超过 ' + REPLAY_GAP_SKIP_SEC + 's 的空白段会自动跳过。') : '点击播放会从第一数据包开始重演。';
+    else status.textContent = replayState.playing ? ('正在重演中，新的数据同步已暂停。倍速 ' + speedText + '，超过 ' + REPLAY_GAP_SKIP_SEC + 's 的空白段会自动跳过。') : '已锁定单机回放。拖动上方时间线或点“显示全部”会退出回放。';
   }
   updateReplaySyncUi();
 }
@@ -12438,7 +12859,10 @@ function onReplayRangeInput(){
 }
 function resetReplayRange(){
   if(replayState.min == null || replayState.max == null) return;
-  replayState.start = replayState.min;
+  var filterStart = activeHistoryTrackFilterTs();
+  replayState.start = (filterStart != null && filterStart >= replayState.min && filterStart <= replayState.max)
+    ? filterStart
+    : replayState.min;
   replayState.end = replayState.max;
   replayState.cursor = replayState.start;
   replayState.userRange = false;
@@ -12513,9 +12937,10 @@ function setReplayPlaying(on){
   replayState.sn = b.sn;
   replayState.min = b.min;
   replayState.max = b.max;
-  replayState.start = b.min;
+  var filterStart = activeHistoryTrackFilterTs();
+  replayState.start = (filterStart != null && filterStart >= b.min && filterStart <= b.max) ? filterStart : b.min;
   replayState.end = b.max;
-  replayState.cursor = b.min;
+  replayState.cursor = replayState.start;
   if(replayState.start == null || replayState.end == null || replayState.end <= replayState.start) return;
   replayState.playing = true;
   setReplaySyncPaused(true);
@@ -12545,9 +12970,11 @@ function replayWindowEnd(){
   if(replayState.playing && replayState.cursor != null) return replayState.cursor;
   return replayState.end;
 }
-function filterTrackByReplay(track){
+function filterTrackByReplay(track, sn){
   var arr = Array.isArray(track) ? track.slice() : [];
   if(currentAppPage() !== 'history') return arr;
+  var targetSn = String(replayState.sn || '');
+  if(!targetSn || String(sn || '') !== targetSn) return arr;
   if(replayState.start == null || replayState.end == null) return arr;
   var start = Number(replayState.start);
   var end = Number(replayWindowEnd());
@@ -12566,46 +12993,47 @@ function clearReplayMarkers(){
 }
 function updateReplayMarkers(){
   if(!map) return;
-  if(currentAppPage() !== 'history' || replayState.start == null || replayWindowEnd() == null){
+  var replaySn = String(replayState.sn || '');
+  if(currentAppPage() !== 'history' || !replaySn || replayState.start == null || replayWindowEnd() == null){
     clearReplayMarkers();
     return;
   }
   var active = {};
   var end = Number(replayWindowEnd());
   var start = Number(replayState.start);
-  displayTrackSnList('history', latestDroneRows).forEach(function(sn){
-    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
-    var point = null;
-    var prevPoint = null;
-    for(var i=0;i<tr.length;i++){
-      var p = tr[i] || {};
-      var ts = _trackTsSec(p);
-      if(ts == null || ts < start || ts > end) continue;
-      if(point) prevPoint = point;
-      point = p;
-    }
-    if(!point) return;
+  var tr = Array.isArray(trackCache[replaySn]) ? trackCache[replaySn] : [];
+  var point = null;
+  var prevPoint = null;
+  for(var i=0;i<tr.length;i++){
+    var p = tr[i] || {};
+    var ts = _trackTsSec(p);
+    if(ts == null || ts < start || ts > end) continue;
+    if(point) prevPoint = point;
+    point = p;
+  }
+  if(point){
     var lat = Number(point.lat), lon = Number(point.lon);
-    if(!isFinite(lat) || !isFinite(lon)) return;
-    active[sn] = true;
-    var pos = toMapLatLng(lat, lon);
-    var col = trackColorForSn(sn);
-    var heading = null;
-    if(prevPoint && isFinite(Number(prevPoint.lat)) && isFinite(Number(prevPoint.lon))){
-      var hs = calcHeadingByLatLon(Number(prevPoint.lat), Number(prevPoint.lon), lat, lon, 0.5);
-      if(hs.ok) heading = hs.heading;
-    }
-    var popup = '<b>'+esc(sn)+'</b><br>重放位置<br>'+fmtReplayTime(point.ts);
-    var icon = droneIcon(col, false, heading, true, 1, false);
-    if(replayMarkers[sn] && replayMarkers[sn].setIcon){
-      replayMarkers[sn].setLatLng(pos).setIcon(icon).setPopupContent(popup);
-    }else{
-      if(replayMarkers[sn]){
-        try{ map.removeLayer(replayMarkers[sn]); }catch(_e){}
+    if(isFinite(lat) && isFinite(lon)){
+      active[replaySn] = true;
+      var pos = toMapLatLng(lat, lon);
+      var col = trackColorForSn(replaySn);
+      var heading = null;
+      if(prevPoint && isFinite(Number(prevPoint.lat)) && isFinite(Number(prevPoint.lon))){
+        var hs = calcHeadingByLatLon(Number(prevPoint.lat), Number(prevPoint.lon), lat, lon, 0.5);
+        if(hs.ok) heading = hs.heading;
       }
-      replayMarkers[sn] = L.marker(pos, {icon: icon}).addTo(map).bindPopup(popup);
+      var popup = '<b>'+esc(replaySn)+'</b><br>重放位置<br>'+fmtReplayTime(point.ts);
+      var icon = droneIcon(col, false, heading, true, 1, false);
+      if(replayMarkers[replaySn] && replayMarkers[replaySn].setIcon){
+        replayMarkers[replaySn].setLatLng(pos).setIcon(icon).setPopupContent(popup);
+      }else{
+        if(replayMarkers[replaySn]){
+          try{ map.removeLayer(replayMarkers[replaySn]); }catch(_e){}
+        }
+        replayMarkers[replaySn] = L.marker(pos, {icon: icon}).addTo(map).bindPopup(popup);
+      }
     }
-  });
+  }
   Object.keys(replayMarkers).forEach(function(sn){
     if(!active[sn]){
       map.removeLayer(replayMarkers[sn]);
@@ -12651,8 +13079,6 @@ function updateMap(drones){
   var page = currentAppPage();
   var rows = Array.isArray(drones) ? drones : [];
   var selected = (page === 'history') ? historyVisibleSnList(rows) : selectedSnList();
-  var replayFocus = replayFocusSn();
-  if(page === 'history' && replayFocus) selected = [replayFocus];
   var selectedSet = {};
   selected.forEach(function(sn){ selectedSet[sn] = true; });
   var recentRows = liveRecentRows(rows);
@@ -12673,7 +13099,7 @@ function updateMap(drones){
   });
   var mapHintTxt = '';
   if(page === 'live'){
-    mapHintTxt = '实时目标:' + recentRows.length + '  飞机:' + liveAir.length + '  飞手:' + livePilot.length + '  离线:2分钟  轨迹:5分钟';
+    mapHintTxt = '实时目标:' + recentRows.length + '  飞机:' + liveAir.length + '  飞手:' + livePilot.length + '  离线:2分钟';
   }else{
     mapHintTxt = '显示飞机:' + liveAir.length + '  已选:' + selected.length + '  轨迹:' + trackSn.length + '  飞手:' + livePilot.length;
   }
@@ -12746,7 +13172,7 @@ function updateMap(drones){
       (function(snLocal){
         markers[snLocal].on('click', function(){
           if(currentAppPage() === 'history') setHistorySnVisible(snLocal, true);
-          else setSnSelected(snLocal, true);
+          else focusLiveAircraft(snLocal);
         });
       })(sn);
     }
@@ -12774,7 +13200,7 @@ function updateMap(drones){
       (function(snLocal){
         pilotMarkers[snLocal].on('click', function(){
           if(currentAppPage() === 'history') setHistorySnVisible(snLocal, true);
-          else setSnSelected(snLocal, true);
+          else focusLiveAircraft(snLocal);
         });
       })(sn);
     }
@@ -12785,13 +13211,9 @@ function updateMap(drones){
   trackSn.forEach(function(sn){
     sn = String(sn || '');
     if(!sn) return;
-    var tr = filterTrackForDisplay(Array.isArray(trackCache[sn]) ? trackCache[sn] : [], page);
+    var tr = filterTrackForDisplay(Array.isArray(trackCache[sn]) ? trackCache[sn] : [], page, sn);
     if(tr.length < 2){
-      if(trackLines[sn]){
-        map.removeLayer(trackLines[sn]);
-        delete trackLines[sn];
-        delete trackLineSig[sn];
-      }
+      dropTrackLayer(sn);
       return;
     }
     var latlngs = [];
@@ -12805,11 +13227,7 @@ function updateMap(drones){
       }
     }
     if(latlngs.length < 2){
-      if(trackLines[sn]){
-        map.removeLayer(trackLines[sn]);
-        delete trackLines[sn];
-        delete trackLineSig[sn];
-      }
+      dropTrackLayer(sn);
       return;
     }
     activeTrack[sn] = true;
@@ -12818,12 +13236,7 @@ function updateMap(drones){
     if(trackLines[sn] && trackLineSig[sn] === sig){
       return;
     }
-    if(trackLines[sn]){
-      map.removeLayer(trackLines[sn]);
-      delete trackLines[sn];
-    }
-    trackLines[sn] = makeTrackLayer(latlngs, tColor).addTo(map);
-    trackLineSig[sn] = sig;
+    queueTrackLayerRender(sn, latlngs, tColor, sig);
   });
 
   // remove stale aircraft markers
@@ -12846,7 +13259,7 @@ function updateMap(drones){
   // remove stale or unselected tracks
   Object.keys(trackLines).forEach(function(sn){
     if(!activeTrack[sn]){
-      map.removeLayer(trackLines[sn]); delete trackLines[sn]; delete trackLineSig[sn];
+      dropTrackLayer(sn);
     }
   });
   Object.keys(motionState).forEach(function(sn){
@@ -13469,8 +13882,10 @@ _MAIN_PAGE_PATCH_JS = r"""
         else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
       }catch(_e){}
     }
+    if(p !== 'history' && replayState.playing) setReplayPlaying(false);
     document.body.setAttribute('data-page', p);
     cookieSet(PAGE_COOKIE, p, 365);
+    if(p === 'history') applyHistoryDefaultSelection(latestDroneRows);
     var tabs = document.querySelectorAll('.app-tab-btn');
     for(var i=0;i<tabs.length;i++){
       tabs[i].classList.toggle('active', tabs[i].getAttribute('data-page') === p);
@@ -13690,11 +14105,7 @@ _MAIN_PAGE_PATCH_JS = r"""
           setSnSelected(sn, !!cb.checked);
           return;
         }
-        setSnSelected(sn, true);
-        var e = latestDroneMap[sn];
-        if(e) showInfoCard(buildInfoHtml(e), true);
-        updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
-        renderLiveCards(latestDroneRows);
+        focusLiveAircraft(sn);
       });
     }
     var historyTableSlot = qs('history-table-slot');
@@ -14086,7 +14497,7 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
     if not safe_next.startswith("/") or safe_next.startswith("//"):
         safe_next = "/"
     password_enabled = _auth_login_method_enabled("password")
-    sso_enabled = _auth_login_method_enabled("sso")
+    sso_available = any(bool(_sso_link_state(item).get("active")) for item in _normalize_sso_links(AUTH_CFG.get("sso_links")))
     passkey_enabled = _auth_login_method_enabled("passkey")
     has_passkey = passkey_enabled and any(bool(item.get("enabled", True)) for item in _normalize_passkeys(AUTH_CFG.get("passkeys")))
     password_login_html = (
@@ -14104,10 +14515,10 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
         if has_passkey else ""
     )
     if not status_message:
-        if passkey_enabled and (not has_passkey) and (not password_enabled) and (not sso_enabled):
+        if passkey_enabled and (not has_passkey) and (not password_enabled) and (not sso_available):
             status_message = "当前已启用 PassKey 登录，但尚未登记可用密钥。"
         elif (not password_enabled) and (not has_passkey):
-            if sso_enabled:
+            if sso_available:
                 status_message = "当前仅允许通过 SSO URL 登录，请使用已生成的登录链接进入。"
             else:
                 status_message = "当前没有可用的网页登录方式，请返回设置检查登录方式配置。"
@@ -14120,8 +14531,8 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
         method_labels.append("PassKey")
     elif passkey_enabled:
         method_labels.append("PassKey(待登记)")
-    if sso_enabled:
-        method_labels.append("SSO URL")
+    if sso_available:
+        method_labels.append("SSO URL(最高优先级)")
     login_method_copy = ("可用方式: " + " / ".join(method_labels)) if method_labels else "当前没有可用的网页登录方式。"
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
@@ -14685,6 +15096,8 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .model-map-empty{padding:16px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);background:var(--card2)}
 .metric-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
 .metric-toolbar .btn.active{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,var(--card2))}
+.metric-toggle{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;margin-right:4px}
+.metric-toggle input{width:16px;height:16px}
 .metric-retention{display:grid;grid-template-columns:auto 82px auto;gap:8px;align-items:center;margin-left:auto;color:var(--muted);font-size:12px}
 .metric-retention input{height:36px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:7px 9px;font:600 13px/1 var(--font-ui)}
 .metric-list{display:grid;gap:12px;margin-top:12px}
@@ -14828,7 +15241,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
-            <div class="field full"><label>历史缓存文件</label><input id="cfg-history-file" type="text"></div>
+            <div class="field full"><label>扫描数据文件</label><input id="cfg-history-file" type="text"></div>
           </div>
           <div class="checks" style="margin-top:14px">
             <label><input id="cfg-heal" type="checkbox"> 自愈恢复</label>
@@ -14891,7 +15304,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="section-head">
             <div>
               <h2>通知与访问控制</h2>
-              <div class="section-copy">通知发送、网页会话、临时登录链接、外部 API Token 和访问白名单集中在这里。</div>
+              <div class="section-copy">通知发送、网页会话、PassKey、外部 API Token 和访问白名单集中在这里。</div>
             </div>
           </div>
           <div class="access-subgrid">
@@ -14932,7 +15345,6 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <div class="checks">
                 <label><input id="cfg-auth-method-password" type="checkbox"> 账号密码登录</label>
                 <label><input id="cfg-auth-method-passkey" type="checkbox"> PassKey 登录</label>
-                <label><input id="cfg-auth-method-sso" type="checkbox"> SSO URL 登录</label>
               </div>
               <div class="micro" id="auth-method-state">至少保留一种网页登录方式；关闭账号密码直接登录后，账号密码仍用于设置页二次确认。</div>
             </div>
@@ -14956,7 +15368,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">SSO 登录链接</div>
-                  <div class="access-subcopy">为内置页面生成带有效期和单次登录控制的登录链接；过期记录保留。</div>
+                  <div class="access-subcopy">SSO 不作为可关闭的登录方式；只要存在有效链接，它就是最高优先级验证入口。</div>
                 </div>
               </div>
               <div class="token-actions">
@@ -14974,7 +15386,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <div class="field hidden" id="login-link-custom-field"><label>自定义有效期(min)</label><input id="login-link-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
                 <label class="sso-single-use"><input id="login-link-single-use" type="checkbox"> 单次登录</label>
               </div>
-              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制；过期记录保留在列表。</div>
+              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制；命中有效 SSO 链接时优先于其它网页登录方式。</div>
               <div id="login-link-list" class="list-wrap sso-link-list"></div>
             </div>
             <div class="access-subcard full">
@@ -15082,6 +15494,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             </div>
           </div>
           <div class="metric-toolbar">
+            <label class="metric-toggle"><input id="cfg-metrics-enabled" type="checkbox"><span>启用节点负载记录</span></label>
             <button class="btn ghost metric-window active" data-window="12h" type="button">12小时</button>
             <button class="btn ghost metric-window" data-window="24h" type="button">24小时</button>
             <button class="btn ghost metric-window" data-window="7d" type="button">7天</button>
@@ -15109,6 +15522,27 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           </div>
           <label class="metric-zoom"><span>缩放</span><input id="metrics-zoom" type="range" min="1" max="100" step="1" value="1"><span id="metrics-zoom-value">1x</span></label>
           <div id="status-metrics" class="micro">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>设置与扫描数据</h2>
+              <div class="section-copy">设置文件和扫描数据分开储存。这里可分别导出或导入；设置导入默认覆盖，扫描数据导入会先询问增量更新还是覆盖。</div>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-export-settings-file" type="button">导出设置文件</button>
+            <button class="btn ghost" id="btn-import-settings-file" type="button">导入设置文件</button>
+            <input id="import-settings-file" type="file" accept=".json,application/json" style="display:none">
+          </div>
+          <div class="row-actions" style="margin-top:10px">
+            <button class="btn" id="btn-export-scan-data" type="button">导出扫描数据</button>
+            <button class="btn ghost" id="btn-import-scan-data" type="button">导入扫描数据</button>
+            <input id="import-scan-data-file" type="file" accept=".json,application/json" style="display:none">
+          </div>
+          <div class="micro" id="settings-config-path" style="margin-top:10px">设置文件: -</div>
+          <div class="micro" id="settings-scan-data-path">扫描数据文件: -</div>
+          <div id="status-data-transfer" class="status">-</div>
         </div>
         <div class="card">
           <div class="section-head">
@@ -15143,12 +15577,10 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="section-head">
             <div>
               <h2>浏览器偏好</h2>
-              <div class="section-copy">实时轨迹和 2 小时轨迹过滤保存在当前浏览器。</div>
+              <div class="section-copy">新版固件解析显示偏好保存在当前浏览器。</div>
             </div>
           </div>
           <div class="checks pref-checks" style="margin-top:14px">
-            <label><input id="pref-realtime-track" type="checkbox"> 实时轨迹</label>
-            <label><input id="pref-track-2h" type="checkbox"> 只显示近 2 小时轨迹</label>
             <label><input id="pref-new-firmware-parser" type="checkbox"> 显示 RID 包解析结果</label>
           </div>
           <div class="micro">只控制当前浏览器显示；后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
@@ -15220,7 +15652,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
     <h3>再次验证</h3>
-    <div class="section-copy">二次验证保护 Token 显示、复制和 SSO 链接生成。</div>
+    <div class="section-copy">二次验证保护 Token 显示、复制、PassKey 添加和原始配置解锁。</div>
     <div class="grid" style="margin-top:14px">
       <div class="field full"><label>账号</label><input id="reauth-user" type="text" autocomplete="username"></div>
       <div class="field full"><label>密码</label><input id="reauth-pass" type="password" autocomplete="current-password"></div>
@@ -15350,6 +15782,12 @@ function cookieSet(name, value, days){
   document.cookie = key + '=' + encodeURIComponent(String(value == null ? '' : value))
     + '; Max-Age=' + Math.round(nDays * 86400) + '; Path=/; SameSite=Lax' + secure;
 }
+function cookieDelete(name){
+  var key = String(name || '').trim();
+  if(!key) return;
+  var secure = (location.protocol === 'https:') ? '; Secure' : '';
+  document.cookie = key + '=; Max-Age=0; Path=/; SameSite=Lax' + secure;
+}
 function cookieBool(name, defVal){
   var v = cookieGet(name);
   if(v == null || v === '') return !!defVal;
@@ -15466,6 +15904,93 @@ async function downloadQualityReport(){
   }, 15000);
   showNotice('质量分析包已生成。', 'ok', 3200);
 }
+function transferStamp(){
+  var d = new Date();
+  function pad(n){ return String(n).padStart(2, '0'); }
+  return String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+}
+function downloadBlobFile(name, blob){
+  var fileName = String(name || 'download.bin').trim() || 'download.bin';
+  var data = blob instanceof Blob ? blob : new Blob([blob == null ? '' : blob], {type:'application/octet-stream'});
+  var url = URL.createObjectURL(data);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  window.setTimeout(function(){
+    URL.revokeObjectURL(url);
+    if(a.parentNode) a.parentNode.removeChild(a);
+  }, 15000);
+}
+function downloadJsonObject(name, data){
+  var text = JSON.stringify(data == null ? {} : data, null, 2) + '\\n';
+  downloadBlobFile(name, new Blob([text], {type:'application/json;charset=utf-8'}));
+}
+function pickFileInput(id){
+  var input = qs(id);
+  if(!input) return;
+  input.value = '';
+  input.click();
+}
+function readJsonFile(file){
+  return new Promise(function(resolve, reject){
+    if(!file){
+      reject(new Error('未选择文件'));
+      return;
+    }
+    var fr = new FileReader();
+    fr.onload = function(){
+      try{
+        resolve(JSON.parse(String(fr.result || '')));
+      }catch(e){
+        reject(new Error('JSON 解析失败: ' + (e && e.message ? e.message : e)));
+      }
+    };
+    fr.onerror = function(){ reject(new Error('文件读取失败')); };
+    fr.readAsText(file, 'utf-8');
+  });
+}
+async function exportSettingsFile(){
+  setStatus('status-data-transfer', '正在导出设置文件...', false);
+  var data = await getJson('/api/settings/export/settings');
+  downloadJsonObject('rid_settings_' + transferStamp() + '.json', data);
+  setStatus('status-data-transfer', '设置文件已导出: ' + String(data.config_path || '-'), false);
+  showNotice('设置文件已导出。', 'ok', 2600);
+}
+async function exportScanDataFile(){
+  setStatus('status-data-transfer', '正在导出扫描数据...', false);
+  var data = await getJson('/api/settings/export/scan-data');
+  downloadJsonObject('rid_scan_data_' + transferStamp() + '.json', data);
+  setStatus('status-data-transfer', '扫描数据已导出: ' + Number(data.count || 0) + ' 条', false);
+  showNotice('扫描数据已导出。', 'ok', 2600);
+}
+async function importSettingsFileFromFile(file){
+  setStatus('status-data-transfer', '正在导入设置文件...', false);
+  var payload = await readJsonFile(file);
+  var data = await postJson('/api/settings/import/settings', {payload: payload});
+  var msg = '设置文件导入完成: ' + String(data.saved_to || '-');
+  if(data.backup_path) msg += '\\n备份: ' + String(data.backup_path);
+  if(data.reload_msg) msg += '\\n' + String(data.reload_msg);
+  setStatus('status-data-transfer', msg, false);
+  showNotice('设置文件已导入并生效。', 'ok', 3200);
+  await loadVisual();
+}
+async function importScanDataFileFromFile(file){
+  var payload = await readJsonFile(file);
+  var merge = window.confirm('扫描数据导入方式：\\n确定 = 增量更新\\n取消 = 覆盖已有扫描数据');
+  var mode = merge ? 'merge' : 'replace';
+  setStatus('status-data-transfer', '正在导入扫描数据(' + (mode === 'merge' ? '增量更新' : '覆盖导入') + ')...', false);
+  var data = await postJson('/api/settings/import/scan-data', {mode: mode, payload: payload});
+  var parts = [];
+  if(data.mode === 'replace') parts.push('已清空 ' + Number(data.replaced || 0) + ' 条旧数据');
+  parts.push('新增 ' + Number(data.added || 0));
+  parts.push('更新 ' + Number(data.updated || 0));
+  parts.push('跳过 ' + Number(data.skipped || 0));
+  parts.push('当前共 ' + Number(data.count || 0) + ' 条');
+  setStatus('status-data-transfer', '扫描数据导入完成: ' + parts.join('，'), false);
+  showNotice('扫描数据导入完成。', 'ok', 3200);
+}
 async function getJson(url){
   const r = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
   const d = await r.json().catch(()=>({}));
@@ -15525,22 +16050,18 @@ function applyTheme(theme){
   qs('btn-theme').textContent = light ? '深色' : '浅色';
 }
 function loadBrowserPrefs(){
-  var rt = qs('pref-realtime-track');
-  var f2h = qs('pref-track-2h');
   var newFw = qs('pref-new-firmware-parser');
-  if(rt) rt.checked = cookieBool(COOKIE_TRACK_REALTIME, true);
-  if(f2h) f2h.checked = cookieBool(COOKIE_TRACK_2H_ONLY, false);
+  cookieDelete(COOKIE_TRACK_REALTIME);
+  cookieDelete(COOKIE_TRACK_2H_ONLY);
   if(newFw){
     try{ newFw.checked = localStorage.getItem(NEW_FIRMWARE_PARSE_KEY) !== '0'; }
     catch(_e){ newFw.checked = true; }
   }
 }
 function saveBrowserPrefs(){
-  var rt = qs('pref-realtime-track');
-  var f2h = qs('pref-track-2h');
   var newFw = qs('pref-new-firmware-parser');
-  cookieSet(COOKIE_TRACK_REALTIME, (rt && rt.checked) ? '1' : '0', 365);
-  cookieSet(COOKIE_TRACK_2H_ONLY, (f2h && f2h.checked) ? '1' : '0', 365);
+  cookieDelete(COOKIE_TRACK_REALTIME);
+  cookieDelete(COOKIE_TRACK_2H_ONLY);
   if(newFw){
     try{ localStorage.setItem(NEW_FIRMWARE_PARSE_KEY, newFw.checked ? '1' : '0'); }catch(_e){}
   }
@@ -15670,7 +16191,6 @@ function checkedAuthLoginMethods(){
   var out = [];
   if(check('cfg-auth-method-password')) out.push('password');
   if(check('cfg-auth-method-passkey')) out.push('passkey');
-  if(check('cfg-auth-method-sso')) out.push('sso');
   return out;
 }
 function ensureAuthLoginMethodSelection(preferredId, noisy){
@@ -15691,22 +16211,11 @@ function syncAuthMethodUi(){
   var authConfigured = !!settingsState.authConfigured;
   var allowPassword = methods.indexOf('password') >= 0;
   var allowPasskey = methods.indexOf('passkey') >= 0;
-  var allowSso = methods.indexOf('sso') >= 0;
   if(qs('auth-method-state')){
     var labels = [];
     if(allowPassword) labels.push('账号密码');
     if(allowPasskey) labels.push('PassKey');
-    if(allowSso) labels.push('SSO URL');
     qs('auth-method-state').textContent = '当前允许: ' + (labels.join(' / ') || '未选择') + '。至少保留一种网页登录方式；账号密码仍用于设置页二次确认和 PassKey 注册。';
-  }
-  if(qs('login-link-state')){
-    if(!authEnabled || !authConfigured){
-      qs('login-link-state').textContent = '网页登录账号密码完整时，SSO URL 登录可用。';
-    }else if(!allowSso){
-      qs('login-link-state').textContent = '当前已关闭 SSO URL 登录；已生成的链接会保留，但不会生效。';
-    }else{
-      qs('login-link-state').textContent = '生成的链接可在下面管理；链接受有效期和单次登录状态控制。';
-    }
   }
   if(qs('passkey-state')){
     if(!authEnabled || !authConfigured){
@@ -15717,7 +16226,14 @@ function syncAuthMethodUi(){
       qs('passkey-state').textContent = '通行密钥可以直接用于网页登录。';
     }
   }
-  if(qs('btn-login-link-create')) qs('btn-login-link-create').disabled = !(authEnabled && authConfigured && allowSso);
+  if(qs('login-link-state')){
+    if(!authEnabled || !authConfigured){
+      qs('login-link-state').textContent = '网页登录账号密码完整后即可生成 SSO 链接。SSO 不在登录方式开关中关闭。';
+    }else{
+      qs('login-link-state').textContent = 'SSO 链接已作为最高优先级验证入口；命中有效链接时会先于密码和 PassKey 会话处理。';
+    }
+  }
+  if(qs('btn-login-link-create')) qs('btn-login-link-create').disabled = !(authEnabled && authConfigured);
   if(qs('btn-passkey-add')) qs('btn-passkey-add').disabled = !(authEnabled && authConfigured && allowPasskey);
 }
 function renderHostStats(host, basic){
@@ -16239,8 +16755,8 @@ function drawMetricSpark(def, rows, range){
   ctx.fillStyle = muted;
   ctx.textBaseline = 'alphabetic';
   ctx.font = String(10 * dpr) + 'px sans-serif';
-  ctx.fillText(fmtMetricTime(start).replace(/^\\d{4}\\//,''), padPx.l, h - 6 * dpr);
-  var endLabel = fmtMetricTime(end).replace(/^\\d{4}\\//,'');
+  ctx.fillText(fmtMetricTime(start).replace(/^[0-9]{4}[/]/,''), padPx.l, h - 6 * dpr);
+  var endLabel = fmtMetricTime(end).replace(/^[0-9]{4}[/]/,'');
   var endW = ctx.measureText(endLabel).width;
   ctx.fillText(endLabel, Math.max(padPx.l, w - padPx.r - endW), h - 6 * dpr);
   if(metricsState.hover && metricsState.hover.key === def.key){
@@ -16280,8 +16796,20 @@ function drawMetricSpark(def, rows, range){
   }
 }
 async function loadMetrics(){
+  if(!check('cfg-metrics-enabled')){
+    metricsState.items = [];
+    drawMetricsChart();
+    if(qs('status-metrics')) qs('status-metrics').textContent = '节点负载记录已关闭；开启并保存后开始采样。';
+    return;
+  }
   const data = await getJson('/api/settings/metrics?window=' + encodeURIComponent(metricsState.window || '12h'));
   metricsState.items = Array.isArray(data.items) ? data.items : [];
+  if(data.enabled === false){
+    metricsState.items = [];
+    drawMetricsChart();
+    if(qs('status-metrics')) qs('status-metrics').textContent = '节点负载记录已关闭；开启并保存后开始采样。';
+    return;
+  }
   if(qs('status-metrics') && data.store_path){
     qs('status-metrics').textContent = '数据文件: ' + String(data.store_path);
   }
@@ -16506,6 +17034,7 @@ function collectVisualPayload(){
       enabled: check('cfg-app-update-enabled')
     },
     metrics: {
+      enabled: check('cfg-metrics-enabled'),
       retention_days: n('cfg-metrics-retention'),
       temperature_source: v('cfg-metrics-temp-source') || 'auto'
     }
@@ -16673,6 +17202,20 @@ function rawPathLabel(path){
 function rawActivePath(){
   return String(settingsState.rawSelectedPath || '');
 }
+function rawDirContainsSelected(node, selectedPath){
+  var selected = String(selectedPath || '');
+  if(!selected || !node) return false;
+  var base = String(node.path || '');
+  if(base && selected.indexOf(base + '\\\\') === 0) return true;
+  if(base && selected.indexOf(base + '/') === 0) return true;
+  var children = Array.isArray(node.children) ? node.children : [];
+  for(var i=0;i<children.length;i++){
+    var child = children[i] || {};
+    if(child.type === 'file' && String(child.path || '') === selected) return true;
+    if(child.type === 'dir' && rawDirContainsSelected(child, selected)) return true;
+  }
+  return false;
+}
 function rawSetMeta(data){
   data = data || {};
   if(qs('raw-tree-path')) qs('raw-tree-path').textContent = String(data.root || settingsState.rawRoot || '-');
@@ -16704,7 +17247,8 @@ function rawRenderTreeNodes(nodes, selectedPath){
     var rel = enc(node.rel_path || '');
     var path = enc(node.path || '');
     if(type === 'dir'){
-      return '<details class="raw-dir" open><summary title="'+rel+'">'+name+'</summary><div class="raw-dir-child">'+rawRenderTreeNodes(node.children || [], selectedPath)+'</div></details>';
+      var openAttr = rawDirContainsSelected(node, selectedPath) ? ' open' : '';
+      return '<details class="raw-dir"'+openAttr+'><summary title="'+rel+'">'+name+'</summary><div class="raw-dir-child">'+rawRenderTreeNodes(node.children || [], selectedPath)+'</div></details>';
     }
     var active = String(node.path || '') === String(selectedPath || '');
     return '<button class="raw-file-btn'+(active ? ' active' : '')+'" type="button" data-path="'+path+'" data-rel="'+rel+'"><span class="clip" title="'+path+'">'+name+'</span><span class="micro">'+enc(formatBytes(node.size))+'</span></button>';
@@ -17271,9 +17815,8 @@ async function loadVisual(){
   qs('cfg-auth-enabled').checked = !!auth.enabled;
   qs('cfg-auth-method-password').checked = false;
   qs('cfg-auth-method-passkey').checked = false;
-  qs('cfg-auth-method-sso').checked = false;
-  (Array.isArray(auth.login_methods) && auth.login_methods.length ? auth.login_methods : ['password','passkey','sso']).forEach(function(method){
-    var id = method === 'password' ? 'cfg-auth-method-password' : (method === 'passkey' ? 'cfg-auth-method-passkey' : (method === 'sso' ? 'cfg-auth-method-sso' : ''));
+  (Array.isArray(auth.login_methods) && auth.login_methods.length ? auth.login_methods : ['password','passkey']).forEach(function(method){
+    var id = method === 'password' ? 'cfg-auth-method-password' : (method === 'passkey' ? 'cfg-auth-method-passkey' : '');
     if(id && qs(id)) qs(id).checked = true;
   });
   qs('cfg-auth-user').value = '';
@@ -17282,7 +17825,7 @@ async function loadVisual(){
   qs('cfg-auth-pass').placeholder = '留空即不修改';
   qs('cfg-auth-realm').value = String(auth.realm || 'Light RID Scanner');
   qs('cfg-auth-ttl').value = String(auth.session_ttl_min || 30);
-  qs('login-link-name').value = '';
+  if(qs('login-link-name')) qs('login-link-name').value = '';
   if(qs('login-link-expire-mode')) qs('login-link-expire-mode').value = '86400';
   if(qs('login-link-ttl-min')) qs('login-link-ttl-min').value = '1440';
   if(qs('login-link-single-use')) qs('login-link-single-use').checked = false;
@@ -17296,12 +17839,15 @@ async function loadVisual(){
   renderPasskeyRows(Array.isArray(auth.passkeys) ? auth.passkeys : []);
   if(qs('cfg-passkey-name')) qs('cfg-passkey-name').value = '';
   syncAuthMethodUi();
+  if(qs('settings-config-path')) qs('settings-config-path').textContent = '设置文件: ' + String(data.path || '-');
+  if(qs('settings-scan-data-path')) qs('settings-scan-data-path').textContent = '扫描数据文件: ' + String(b.history_file || '-');
   var rawAccess = data.raw_access || {};
   settingsState.rawUnlocked = !rawAccess.required || !!rawAccess.unlocked;
   settingsState.rawRoot = String(rawAccess.root || settingsState.rawRoot || '');
   settingsState.rawSelectedPath = String(data.path || settingsState.rawSelectedPath || '');
   rawSetLocked(!settingsState.rawUnlocked, settingsState.rawUnlocked ? '' : '需要先验证网页登录密码，才能查看和编辑配置文件。');
   rawRefreshButtons();
+  qs('cfg-metrics-enabled').checked = !!mc.enabled;
   qs('cfg-metrics-retention').value = String(mc.retention_days || 7);
   qs('cfg-metrics-temp-source').value = String(mc.temperature_source || 'auto');
   var apiTokenCount = Array.isArray(api.tokens) ? api.tokens.length : 0;
@@ -17396,6 +17942,10 @@ function bindModelEditorActions(){
   });
 }
 function bindMetricActions(){
+  on('cfg-metrics-enabled', 'change', function(){
+    updateVisualDraftState();
+    loadMetrics().catch(function(e){ if(qs('status-metrics')) qs('status-metrics').textContent = e.message || String(e); });
+  });
   qsa('.metric-window').forEach(function(btn){
     btn.addEventListener('click', function(){ setMetricWindow(btn.getAttribute('data-window') || '12h'); });
   });
@@ -17404,6 +17954,26 @@ function bindMetricActions(){
   });
   qsa('.metric-spark').forEach(function(canvas){
     metricBindCanvasEvents(canvas);
+  });
+}
+function bindDataTransferActions(){
+  on('btn-export-settings-file', 'click', function(){
+    guarded(exportSettingsFile, 'status-data-transfer', '设置文件已导出。', 2200, 3600);
+  });
+  on('btn-import-settings-file', 'click', function(){ pickFileInput('import-settings-file'); });
+  on('import-settings-file', 'change', function(ev){
+    var file = (ev && ev.target && ev.target.files && ev.target.files[0]) ? ev.target.files[0] : null;
+    if(!file) return;
+    guarded(function(){ return importSettingsFileFromFile(file); }, 'status-data-transfer', '', 0, 4200);
+  });
+  on('btn-export-scan-data', 'click', function(){
+    guarded(exportScanDataFile, 'status-data-transfer', '扫描数据已导出。', 2200, 3600);
+  });
+  on('btn-import-scan-data', 'click', function(){ pickFileInput('import-scan-data-file'); });
+  on('import-scan-data-file', 'change', function(ev){
+    var file = (ev && ev.target && ev.target.files && ev.target.files[0]) ? ev.target.files[0] : null;
+    if(!file) return;
+    guarded(function(){ return importScanDataFileFromFile(file); }, 'status-data-transfer', '', 0, 4200);
   });
 }
 function bindHomeToolActions(){
@@ -17485,7 +18055,7 @@ function bindAccessActions(){
   on('btn-login-link-create', 'click', function(){ openReauth('login-link'); });
   on('btn-passkey-add', 'click', function(){ openReauth('passkey-create'); });
   on('cfg-auth-enabled', 'change', syncAuthMethodUi);
-  ['cfg-auth-method-password','cfg-auth-method-passkey','cfg-auth-method-sso'].forEach(function(id){
+  ['cfg-auth-method-password','cfg-auth-method-passkey'].forEach(function(id){
     on(id, 'change', function(){
       ensureAuthLoginMethodSelection(id, true);
       syncAuthMethodUi();
@@ -17608,7 +18178,7 @@ function bindMapAndZoneActions(){
   attachRowRemove('zone-list', function(){ renderZoneRows([]); });
 }
 function bindBrowserPreferenceActions(){
-  ['pref-realtime-track','pref-track-2h','pref-new-firmware-parser'].forEach(function(id){
+  ['pref-new-firmware-parser'].forEach(function(id){
     on(id, 'change', saveBrowserPrefs);
   });
 }
@@ -17626,6 +18196,7 @@ function initializeSettingsPage(){
   bindCaptureActions();
   bindModelEditorActions();
   bindMetricActions();
+  bindDataTransferActions();
   bindHomeToolActions();
   bindAccessActions();
   bindSystemServiceActions();
@@ -18196,7 +18767,7 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _track_for_query(src.get("track") or [], query)
+                    track = _track_for_query(src.get("track") or [], query, firmware_type=src.get("firmware_type"))
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
@@ -18246,7 +18817,7 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _track_for_query(src.get("track") or [], query)
+                    track = _track_for_query(src.get("track") or [], query, firmware_type=src.get("firmware_type"))
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
@@ -18427,11 +18998,14 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _sanitize_track(src.get("track") or [])
+                    firmware_type = src.get("firmware_type")
+                    full_track = _track_for_query(src.get("track") or [], firmware_type=firmware_type)
+                    track = _track_for_query(src.get("track") or [], query, firmware_type=firmware_type)
                 self._send_json({
                     "ok": True,
                     "sn": sn,
                     "count": len(track),
+                    "count_total": len(full_track),
                     "track": track,
                 }, 200)
             elif path == "/api/tools/export/all":
@@ -18466,6 +19040,14 @@ def http_server_thread() -> None:
                     "count": len(track),
                     "track": track,
                 }, 200)
+            elif path == "/api/settings/export/settings":
+                payload = _settings_export_payload()
+                _op_log("settings-export", f"path={payload.get('config_path') or '-'}", ip=_client_ip_from_handler(self), ok=True)
+                self._send_json(payload, 200)
+            elif path == "/api/settings/export/scan-data":
+                payload = _scan_data_export_payload()
+                _op_log("scan-data-export", f"count={payload.get('count') or 0}", ip=_client_ip_from_handler(self), ok=True)
+                self._send_json(payload, 200)
             elif path == "/api/tools/diagnostic.zip":
                 try:
                     body, filename = _diagnostic_zip_bytes()
@@ -18768,6 +19350,19 @@ def http_server_thread() -> None:
                 removed = delete_history_item(sn)
                 _op_log("history-delete", f"sn={sn} removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({"ok": True, "sn": sn, "removed": bool(removed)}, 200)
+            elif path == "/api/settings/import/settings":
+                body = self._read_json_body()
+                payload = body.get("payload", body) if isinstance(body, dict) else body
+                rsp = _import_settings_payload(payload)
+                _op_log("settings-import", f"ok={bool(rsp.get('ok'))}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+            elif path == "/api/settings/import/scan-data":
+                body = self._read_json_body()
+                payload = body.get("payload", body) if isinstance(body, dict) else body
+                mode = str(body.get("mode") or "merge") if isinstance(body, dict) else "merge"
+                rsp = _import_scan_data_payload(payload, mode=mode)
+                _op_log("scan-data-import", f"mode={rsp.get('mode') or mode} ok={bool(rsp.get('ok'))}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
             elif path == "/api/tracks/clear":
                 body = self._read_json_body()
                 sn = str(body.get("sn") or "").strip()

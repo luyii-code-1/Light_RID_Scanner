@@ -81,7 +81,10 @@
     "password_sha256": "",
     "realm": "Light RID Scanner",
     "session_ttl_min": 30,
-    "sso_links": [],
+    "login_methods": [
+      "password",
+      "passkey"
+    ],
     "passkeys": []
   },
   "api": {
@@ -105,6 +108,7 @@
     "commit_url": "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
   },
   "metrics": {
+    "enabled": false,
     "retention_days": 7
   }
 }

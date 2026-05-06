@@ -16,7 +16,7 @@ Light RID Scanner is a fixed-station Remote ID / OpenDroneID Wi-Fi monitor desig
 - Optional token-protected external API
 - Optional browser login / session auth for the web UI
 - Passkey-based browser login after an initial username/password bootstrap
-- Managed SSO login links generated after username/password re-check
+- Separate settings-file and scan-data import/export flows in `/settings`
 - Configurable browser session lifetime, defaulting to 30 minutes
 - Enterprise WeCom notifications with multiple webhook channels
 - Multiple custom alarm zones drawn on the map
@@ -26,7 +26,7 @@ Light RID Scanner is a fixed-station Remote ID / OpenDroneID Wi-Fi monitor desig
 - Online RID model map updates from a configurable URL
 - Optional remote config updates from a configurable URL
 - Manual app version check by Git commit comparison
-- Host load trends for CPU, memory, temperature, system load, and AP count
+- Optional host load trends for CPU, memory, temperature, system load, and AP count
 
 ## Runtime
 
@@ -75,7 +75,7 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
 - `/`
   Main UI with map, aircraft list, and AP/log view switching.
 - `/settings`
-  Visual settings editor, passkeys/SSO, raw config editor, runtime security repair, config/app update tools, token/API overview, alarm zone editor, notification editor.
+  Visual settings editor, password/passkey login controls, raw config editor, runtime security repair, config/app update tools, token/API overview, alarm zone editor, notification editor.
 - `/hardware-assistant`
   Visual hardware helper for NIC status, `iw` inspection, monitor/managed switching, channel change, NIC restart, and process restart.
 
@@ -391,7 +391,7 @@ It supports:
 - browser geolocation fill-in for base station position
 - online RID model-map updates, with a configurable URL and manual update button
 - optional remote config updates from a configurable URL
-- host load trend cards for CPU, memory, temperature, load, and AP count
+- optional host load trend cards for CPU, memory, temperature, load, and AP count
 - selectable host-metrics windows: 12 hours, 24 hours, and 7 days
 - configurable host-metrics retention, defaulting to 7 days
 - manual entry into Simplified OOBE and Full OOBE
@@ -436,7 +436,7 @@ The Settings page shows host trends as separate mini charts:
 - system load
 - AP count
 
-Metrics are sampled about once per minute and stored in the system temp directory under `light_rid_scanner/host_metrics.jsonl`. The file is created automatically, kept across service restarts, and pruned according to `metrics.retention_days`.
+Metrics are disabled by default. When enabled in `/settings`, they are sampled about once per minute and stored in the system temp directory under `light_rid_scanner/host_metrics.jsonl`. The file is created automatically, kept across service restarts, and pruned according to `metrics.retention_days`.
 
 ### Build version
 
@@ -568,6 +568,10 @@ Supported operations:
 
 Useful helper APIs from the built-in UI:
 
+- `GET /api/settings/export/settings`
+- `GET /api/settings/export/scan-data`
+- `POST /api/settings/import/settings`
+- `POST /api/settings/import/scan-data`
 - `GET /api/tools/export/all`
 - `GET /api/tools/export/track?sn=<SN>`
 - `POST /api/tools/import/all`
@@ -588,3 +592,9 @@ Before pushing to GitHub:
 - The browser geolocation helper may require HTTPS or localhost, depending on browser security policy.
 - The map base station, alarm zones, track drawing, and aircraft/pilot markers are all driven by runtime state from `run.py`.
 - For current machine-readable endpoint metadata, prefer `GET /api/docs`.
+
+## OpenDroneID Reference
+
+- Open Drone ID Core C Library (official): https://github.com/opendroneid/opendroneid-core-c
+- OpenDroneID specs repository: https://github.com/opendroneid/specs
+- The specs repository explicitly notes that it contains early drafts; for final ASTM Remote ID text, obtain the official ASTM F3411 standard directly.

@@ -1,4 +1,4 @@
-name: Build Binaries
+name: Build Linux Binaries
 
 permissions:
   contents: write
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional tag to build and upload"
+        description: "Optional tag to build and upload to release"
         required: false
         default: ""
 
@@ -31,110 +31,84 @@ jobs:
             artifact: linux-amd64
           - runner: ubuntu-24.04-arm
             artifact: linux-arm64
+
     runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          uname -m
+          python --version
 
       - name: Install dependencies
         shell: bash
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
           pip install pyinstaller -r requirements.txt
 
       - name: Build binary
         shell: bash
         run: |
+          set -euxo pipefail
+
           pyinstaller \
             --onefile \
             --clean \
             --name "$APP_NAME" \
             run.py
 
+          echo "=== dist files ==="
+          ls -lah dist
+          file "dist/$APP_NAME"
+
       - name: Prepare artifact
         shell: bash
         run: |
+          set -euxo pipefail
+
           mkdir -p release
-          mv "dist/$APP_NAME" "release/$APP_NAME-${{ matrix.artifact }}"
+
+          SRC="dist/$APP_NAME"
+          DST="release/$APP_NAME-${{ matrix.artifact }}"
+
+          test -f "$SRC"
+          mv "$SRC" "$DST"
+          chmod +x "$DST"
+
+          echo "=== release files ==="
+          ls -lah release
+          file "$DST"
 
       - name: Upload workflow artifact
         if: ${{ env.RELEASE_TAG == '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: release/*
+          path: release/${{ env.APP_NAME }}-${{ matrix.artifact }}
           if-no-files-found: error
 
-      - name: Upload binary to release
+      - name: Upload binary to GitHub Release
         if: ${{ env.RELEASE_TAG != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: release/*
-          fail_on_unmatched_files: true
-
-  desktop-release:
-    name: Release ${{ matrix.artifact }}
-    if: ${{ github.event_name == 'release' || github.event.inputs.tag != '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-latest
-            artifact: windows-amd64.exe
-          - runner: macos-15-intel
-            artifact: macos-amd64
-          - runner: macos-latest
-            artifact: macos-arm64
-    runs-on: ${{ matrix.runner }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BUILD_REF }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller -r requirements.txt
+          set -euxo pipefail
 
-      - name: Build binary
-        shell: bash
-        run: |
-          pyinstaller \
-            --onefile \
-            --clean \
-            --name "$APP_NAME" \
-            run.py
-
-      - name: Prepare artifact
-        shell: bash
-        run: |
-          mkdir -p release
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            mv "dist/$APP_NAME.exe" "release/$APP_NAME-${{ matrix.artifact }}"
-          else
-            mv "dist/$APP_NAME" "release/$APP_NAME-${{ matrix.artifact }}"
-          fi
-
-      - name: Upload binary to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: release/*
-          fail_on_unmatched_files: true
+          gh release upload "${RELEASE_TAG}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

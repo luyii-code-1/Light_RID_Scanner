@@ -83,7 +83,7 @@ jobs:
 
   desktop-release:
     name: Release ${{ matrix.artifact }}
-    if: ${{ env.RELEASE_TAG != '' }}
+    if: ${{ github.event_name == 'release' || github.event.inputs.tag != '' }}
     strategy:
       fail-fast: false
       matrix:

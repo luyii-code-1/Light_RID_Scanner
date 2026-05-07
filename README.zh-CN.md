@@ -35,20 +35,29 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 
 - Linux
 - 推荐 Raspberry Pi OS
-- Python 3.10+
+- 使用 `linux-arm64` 发布产物时需要 64 位系统
 - 支持监控模式的无线网卡
 - 切换监控模式 / 信道时需要 root 权限
 
-安装依赖：
+部署 Linux 二进制文件：
 
 ```bash
-python3 -m pip install -r requirements.txt
+install -m 0755 light_rid_scanner-linux-arm64 /home/luyii/rid/light_rid_scanner
 ```
 
-启动方式：
+运行目录需要放置二进制文件和运行数据：
 
-```bash
-python3 run.py
+```text
+/home/luyii/rid/light_rid_scanner
+/home/luyii/rid/rid_config.json
+/home/luyii/rid/rid_models.json
+/home/luyii/rid/EULA.md
+```
+
+systemd 应直接执行二进制文件：
+
+```ini
+ExecStart=/home/luyii/rid/light_rid_scanner --config /home/luyii/rid/rid_config.json --no-tui
 ```
 
 默认网页地址：
@@ -83,7 +92,11 @@ python3 run.py
 ## 关键文件
 
 - `run.py`
-  主扫描器、解析器、HTTP/WS 服务、内嵌页面与 API 处理逻辑。
+  源码和构建共用的薄入口。
+- `light_rid/`
+  拆分后的扫描、解析、HTTP/WS 服务、内嵌页面、API、设置、认证、硬件辅助和 CLI/TUI 模块。
+- `light_rid_scanner`
+  部署目标上的 Linux 单文件运行二进制。
 - `rid_models.json`
   机型前缀映射表。
 - `rid_config.example.json`
@@ -438,7 +451,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 通行密钥以现有网页登录账号密码为引导完成首次注册，之后保存在 `auth.passkeys`。
 - 原始配置编辑被限制在当前配置根目录内，并且需要当前浏览器会话先完成一次短时二次解锁。
 - 运行时修复卡片可以创建 / 确认 `rid` 专用运行账号、授予采集能力、安装 `iw`，并注册 / 更新 `light-rid-scanner.service`。
-- 生成的 systemd 服务始终指向当前 `run.py`、当前配置文件路径以及 `--no-tui` 服务运行模式。
+- 二进制部署时，systemd 服务应始终指向已安装的 `light_rid_scanner` 二进制文件、当前配置文件路径以及 `--no-tui` 服务运行模式。
 
 ### 主机负载趋势
 
@@ -460,7 +473,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 commit:<Git短提交号>#<本地构建号>
 ```
 
-`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。`tools/bump_build.py` 用来在同一个 Git commit 上连续本地测试时递增 `#` 后缀；`tools/pi_tools.py sync` 同步到树莓派前会自动执行递增。
+`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成用于部署的 Linux 单文件产物，其中 64 位 Raspberry Pi OS 使用 `light_rid_scanner-linux-arm64`。
 
 设置页可以手动比较本地程序提交号和远端 Git 提交号。这个检查只报告是否存在更新，不会自动下载、套用代码或重启服务。
 

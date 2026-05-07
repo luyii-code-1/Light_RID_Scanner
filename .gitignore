@@ -6,6 +6,9 @@ __pycache__/
 venv/
 .codex
 build
+dist/
+release/
+*.spec
 # Runtime config (contains secrets)
 rid_config.json
 rid_config.json.rollback

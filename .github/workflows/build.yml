@@ -68,6 +68,8 @@ jobs:
           pyinstaller \
             --onefile \
             --clean \
+            --collect-submodules scapy \
+            --add-data "light_rid:light_rid" \
             --name "$APP_NAME" \
             run.py
 

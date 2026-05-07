@@ -34,20 +34,29 @@ Recommended environment:
 
 - Linux
 - Raspberry Pi OS recommended
-- Python 3.10+
+- 64-bit OS for the `linux-arm64` release artifact
 - Wireless NIC with monitor mode support
 - Root privileges for monitor mode / channel switching
 
-Install dependencies:
+Deploy the Linux binary:
 
 ```bash
-python3 -m pip install -r requirements.txt
+install -m 0755 light_rid_scanner-linux-arm64 /home/luyii/rid/light_rid_scanner
 ```
 
-Start:
+The runtime directory should keep the binary and runtime data together:
 
-```bash
-python3 run.py
+```text
+/home/luyii/rid/light_rid_scanner
+/home/luyii/rid/rid_config.json
+/home/luyii/rid/rid_models.json
+/home/luyii/rid/EULA.md
+```
+
+Systemd should execute the binary directly:
+
+```ini
+ExecStart=/home/luyii/rid/light_rid_scanner --config /home/luyii/rid/rid_config.json --no-tui
 ```
 
 Default web URL:
@@ -82,7 +91,11 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
 ## Important Files
 
 - `run.py`
-  Main scanner, parser, HTTP/WS server, embedded pages, API handlers.
+  Thin source/build entry point.
+- `light_rid/`
+  Split scanner, parser, HTTP/WS server, embedded pages, API handlers, settings, auth, hardware, and CLI/TUI modules.
+- `light_rid_scanner`
+  Installed Linux one-file runtime binary on deployment targets.
 - `rid_models.json`
   Model prefix mapping.
 - `rid_config.example.json`
@@ -424,7 +437,7 @@ Behavior:
 - Passkeys are bootstrapped from the existing web username/password once, then stored inside `auth.passkeys`.
 - Raw config editing is limited to files inside the active config root and requires a short-lived secondary unlock from the current browser session.
 - The runtime repair card can create/confirm the dedicated `rid` service user, grant capture capabilities, install `iw`, and register/update `light-rid-scanner.service`.
-- The generated systemd unit always points to the current `run.py`, current config path, and `--no-tui` service mode.
+- Binary deployments should keep the systemd unit pointed at the installed `light_rid_scanner` binary, current config path, and `--no-tui` service mode.
 
 ### Host load trends
 
@@ -446,7 +459,7 @@ The UI version string is shown as:
 commit:<git-short-commit>#<local-build-number>
 ```
 
-`rid_build_info.json` stores the current short commit and local build number. The helper script `tools/bump_build.py` increments the `#` suffix for repeated local test builds on the same Git commit. `tools/pi_tools.py sync` runs that bump before uploading files to the Raspberry Pi.
+`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces one-file Linux artifacts for deployment, including `light_rid_scanner-linux-arm64` for 64-bit Raspberry Pi OS.
 
 The Settings page can manually compare the local app commit with the upstream Git commit. This check only reports whether a newer commit exists; it does not download, apply, or restart code automatically.
 

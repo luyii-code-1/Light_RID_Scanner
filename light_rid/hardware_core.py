@@ -1254,7 +1254,7 @@ def _systemd_quote_arg(value: str) -> str:
 def _systemd_service_spec() -> dict:
     # Always point the generated unit at the current script/config pair and
     # force no-TUI mode for unattended service execution.
-    script = os.path.abspath(str(sys.argv[0] or os.path.join(APP_START_CWD, "run.py")))
+    script = os.path.abspath(_runtime_entrypoint_path())
     workdir = os.path.abspath(APP_START_CWD or os.path.dirname(script) or ".")
     config_path = os.path.abspath(APP_CONFIG_PATH or os.path.join(workdir, CONFIG_FILE_DEFAULT))
     py = os.path.abspath(sys.executable or "python3")

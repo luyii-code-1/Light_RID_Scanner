@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .runtime import load_namespace
+from .runtime import RuntimeContext, create_runtime_context, load_namespace
 
 
 def _packager_import_anchor() -> None:
@@ -49,5 +49,6 @@ def _packager_import_anchor() -> None:
     return None
 
 
-def main() -> None:
-    load_namespace()["main"]()
+def main(ctx: RuntimeContext | None = None) -> None:
+    runtime_ctx = ctx or create_runtime_context()
+    load_namespace(runtime_ctx)["main"]()

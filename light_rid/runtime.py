@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
+from types import MappingProxyType
+from typing import Any
 
-_CHUNK_FILES = (
+
+DEFAULT_CHUNK_FILES: tuple[str, ...] = (
     "common_core.py",
     "hardware_core.py",
     "scan_core.py",
@@ -13,33 +17,83 @@ _CHUNK_FILES = (
     "cli_app.py",
 )
 
-_LOADED = False
 
-# The legacy runtime was one file with shared globals. During the first split we
-# keep one namespace so behavior remains stable while the physical source is
-# separated by responsibility.
-_NAMESPACE = {
-    "__name__": "light_rid._assembled",
-    "__package__": "light_rid",
-    "__file__": str(Path(sys.argv[0]).resolve()),
-}
+@dataclass
+class RuntimeContext:
+    package_dir: Path
+    entrypoint: Path
+    chunk_files: tuple[str, ...] = DEFAULT_CHUNK_FILES
+    module_name: str = "light_rid._assembled"
+    package_name: str = "light_rid"
+    namespace: dict[str, Any] = field(default_factory=dict)
+    loaded: bool = False
+
+    def __post_init__(self) -> None:
+        self.package_dir = Path(self.package_dir).resolve()
+        self.entrypoint = Path(self.entrypoint).resolve()
+        self.chunk_files = tuple(str(name) for name in self.chunk_files)
+        self.namespace.update(
+            {
+                "__name__": self.module_name,
+                "__package__": self.package_name,
+                "__file__": str(self.entrypoint),
+                "RUNTIME_CONTEXT": self,
+            }
+        )
+
+    @property
+    def chunks(self) -> tuple[str, ...]:
+        return self.chunk_files
+
+    @property
+    def public_config(self) -> MappingProxyType:
+        return MappingProxyType(
+            {
+                "package_dir": str(self.package_dir),
+                "entrypoint": str(self.entrypoint),
+                "chunk_files": self.chunk_files,
+                "module_name": self.module_name,
+                "package_name": self.package_name,
+                "loaded": self.loaded,
+            }
+        )
+
+    def chunk_path(self, name: str) -> Path:
+        path = (self.package_dir / name).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"runtime chunk not found: {path}")
+        if self.package_dir not in path.parents:
+            raise ValueError(f"runtime chunk outside package: {path}")
+        return path
 
 
-def _package_dir() -> Path:
+def default_package_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def _chunk_path(name: str) -> Path:
-    return _package_dir() / name
+def default_entrypoint() -> Path:
+    return Path(sys.argv[0] or "run.py").resolve()
 
 
-def load_namespace() -> dict:
-    global _LOADED
-    if _LOADED:
-        return _NAMESPACE
-    for name in _CHUNK_FILES:
-        path = _chunk_path(name)
+def create_runtime_context(
+    *,
+    package_dir: Path | None = None,
+    entrypoint: Path | None = None,
+    chunk_files: tuple[str, ...] | None = None,
+) -> RuntimeContext:
+    return RuntimeContext(
+        package_dir=package_dir or default_package_dir(),
+        entrypoint=entrypoint or default_entrypoint(),
+        chunk_files=chunk_files or DEFAULT_CHUNK_FILES,
+    )
+
+
+def load_namespace(ctx: RuntimeContext) -> dict[str, Any]:
+    if ctx.loaded:
+        return ctx.namespace
+    for name in ctx.chunks:
+        path = ctx.chunk_path(name)
         source = path.read_text(encoding="utf-8")
-        exec(compile(source, str(path), "exec"), _NAMESPACE)
-    _LOADED = True
-    return _NAMESPACE
+        exec(compile(source, str(path), "exec"), ctx.namespace)
+    ctx.loaded = True
+    return ctx.namespace

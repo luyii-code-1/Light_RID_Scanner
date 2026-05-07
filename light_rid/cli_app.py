@@ -480,7 +480,7 @@ def _schedule_self_restart(tokens: list[str]) -> tuple[bool, str]:
     if not bool(WEB_CFG.get("allow_restart", True)):
         return False, "restart disabled"
     py = sys.executable or "python3"
-    script = os.path.abspath(sys.argv[0])
+    script = os.path.abspath(_runtime_entrypoint_path())
     if not os.path.exists(script):
         return False, f"script not found: {script}"
     exec_target = py

@@ -434,8 +434,18 @@ def _oobe_state() -> dict:
     with OOBE_LOCK:
         return {"required": bool(OOBE_REQUIRED), "reason": str(OOBE_REASON or "")}
 
+def _runtime_entrypoint_path() -> str:
+    ctx = globals().get("RUNTIME_CONTEXT")
+    entrypoint = getattr(ctx, "entrypoint", None)
+    if entrypoint:
+        return str(entrypoint)
+    return str(__file__)
+
+def _app_root_dir() -> str:
+    return os.path.dirname(os.path.abspath(_runtime_entrypoint_path()))
+
 def _app_file_path(name: str) -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), str(name or ""))
+    return os.path.join(_app_root_dir(), str(name or ""))
 
 def _eula_set_path() -> str:
     return _app_file_path(EULA_SET_FILE)

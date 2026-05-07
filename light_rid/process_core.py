@@ -698,7 +698,7 @@ def _api_iso_now(ts: float | None = None) -> str:
         return ""
 
 def _load_build_info() -> dict:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), BUILD_INFO_FILE)
+    path = _app_file_path(BUILD_INFO_FILE)
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -707,7 +707,7 @@ def _load_build_info() -> dict:
         return {}
 
 def _local_git_commit() -> str:
-    repo = os.path.dirname(os.path.abspath(__file__))
+    repo = _app_root_dir()
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -735,7 +735,7 @@ def _local_app_commit() -> str:
 
 def _fallback_private_commit() -> str:
     try:
-        path = os.path.abspath(__file__)
+        path = os.path.abspath(_runtime_entrypoint_path())
         st = os.stat(path)
         raw = f"{path}|{st.st_size}|{int(st.st_mtime)}".encode("utf-8", errors="replace")
         return hashlib.sha1(raw).hexdigest()[:7]
@@ -753,7 +753,7 @@ def _app_version_label() -> str:
         commit = _fallback_private_commit()
     if build <= 0:
         try:
-            build = int(os.stat(os.path.abspath(__file__)).st_mtime)
+            build = int(os.stat(os.path.abspath(_runtime_entrypoint_path())).st_mtime)
         except Exception:
             build = int(time.time())
     return f"commit:{commit}#{build}"

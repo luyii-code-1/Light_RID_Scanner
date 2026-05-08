@@ -1,10 +1,13 @@
+"""Application bootstrap for the assembled Light RID runtime."""
+
 from __future__ import annotations
 
 from .runtime import RuntimeContext, create_runtime_context, load_namespace
 
 
 def _packager_import_anchor() -> None:
-    # pylint: disable=import-outside-toplevel,unused-import,unused-variable,import-error
+    """Expose dynamic runtime imports to packagers without executing scanner code."""
+    # pylint: disable=import-outside-toplevel,unused-import,unused-variable
     # PyInstaller cannot see imports inside the legacy chunks loaded by exec().
     # Keep this uncalled anchor until those chunks become normal modules.
     import argparse
@@ -44,11 +47,12 @@ def _packager_import_anchor() -> None:
     import zlib
     from collections import deque
     from threading import Lock, Thread
-    from scapy.all import Dot11, Dot11Beacon, Dot11Elt, RadioTap, conf, sniff
-
-    return None
+    from scapy.config import conf
+    from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
+    from scapy.sendrecv import sniff
 
 
 def main(ctx: RuntimeContext | None = None) -> None:
+    """Load the assembled scanner namespace and run its main function."""
     runtime_ctx = ctx or create_runtime_context()
     load_namespace(runtime_ctx)["main"]()

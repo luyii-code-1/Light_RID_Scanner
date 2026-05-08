@@ -242,8 +242,10 @@ def tui_main(stdscr, args) -> None:
         now = time.monotonic()
         h, w = stdscr.getmaxyx()
 
-        try:   key = stdscr.getch()
-        except: key = -1
+        try:
+            key = stdscr.getch()
+        except curses.error:
+            key = -1
 
         if key in (ord('q'), ord('Q')):
             break

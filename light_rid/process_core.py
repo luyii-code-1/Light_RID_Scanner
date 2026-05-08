@@ -524,10 +524,9 @@ def _ws_frame(data: bytes) -> bytes:
     n = len(data)
     if n <= 125:
         return bytes([0x81, n]) + data
-    elif n <= 65535:
+    if n <= 65535:
         return bytes([0x81, 126, (n>>8)&0xFF, n&0xFF]) + data
-    else:
-        return bytes([0x81, 127]) + n.to_bytes(8,"big") + data
+    return bytes([0x81, 127]) + n.to_bytes(8,"big") + data
 
 
 def _fmt_wall_ts(ts: float | None) -> str:

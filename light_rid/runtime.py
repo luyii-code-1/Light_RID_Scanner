@@ -20,6 +20,8 @@ DEFAULT_CHUNK_FILES: tuple[str, ...] = (
 
 @dataclass
 class RuntimeContext:
+    """Configuration for loading ordered legacy runtime chunks."""
+
     package_dir: Path
     entrypoint: Path
     chunk_files: tuple[str, ...] = DEFAULT_CHUNK_FILES
@@ -43,10 +45,12 @@ class RuntimeContext:
 
     @property
     def chunks(self) -> tuple[str, ...]:
+        """Return chunk filenames in execution order."""
         return self.chunk_files
 
     @property
     def public_config(self) -> MappingProxyType:
+        """Return a read-only snapshot suitable for diagnostics."""
         return MappingProxyType(
             {
                 "package_dir": str(self.package_dir),
@@ -59,6 +63,7 @@ class RuntimeContext:
         )
 
     def chunk_path(self, name: str) -> Path:
+        """Resolve a chunk path and ensure it stays inside the package."""
         path = (self.package_dir / name).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"runtime chunk not found: {path}")
@@ -68,10 +73,12 @@ class RuntimeContext:
 
 
 def default_package_dir() -> Path:
+    """Return the package directory containing runtime chunks."""
     return Path(__file__).resolve().parent
 
 
 def default_entrypoint() -> Path:
+    """Return the process entrypoint used for runtime metadata."""
     return Path(sys.argv[0] or "run.py").resolve()
 
 
@@ -81,6 +88,7 @@ def create_runtime_context(
     entrypoint: Path | None = None,
     chunk_files: tuple[str, ...] | None = None,
 ) -> RuntimeContext:
+    """Create a runtime context with project defaults."""
     return RuntimeContext(
         package_dir=package_dir or default_package_dir(),
         entrypoint=entrypoint or default_entrypoint(),
@@ -89,6 +97,7 @@ def create_runtime_context(
 
 
 def load_namespace(ctx: RuntimeContext) -> dict[str, Any]:
+    """Execute ordered chunk files into the shared runtime namespace."""
     if ctx.loaded:
         return ctx.namespace
     for name in ctx.chunks:

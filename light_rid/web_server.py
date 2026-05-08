@@ -9411,7 +9411,8 @@ initializeSettingsPage();
 </script></body></html>"""
 
 def http_server_thread() -> None:
-    import socket as _socket, threading as _threading
+    import socket as _socket
+    import threading as _threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from socketserver import ThreadingMixIn
 

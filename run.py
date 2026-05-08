@@ -1,3 +1,5 @@
+"""Command-line entrypoint for Light RID Scanner."""
+
 from __future__ import annotations
 
 from light_rid.app import main

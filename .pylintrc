@@ -1,0 +1,44 @@
+[MASTER]
+ignore=tmph5bp2m4h,build,backups,__pycache__
+
+[MESSAGES CONTROL]
+# The runtime still loads the legacy core files as ordered exec() chunks into a
+# shared namespace. Pylint analyzes each chunk as an isolated module, so cross-
+# chunk globals are reported as undefined even though runtime loading is valid.
+#
+# Keep protocol/realtime behavior stable first. These disabled rules are either
+# low-value for this scanner or dominated by the current chunk architecture.
+disable=
+    line-too-long,
+    invalid-name,
+    missing-module-docstring,
+    missing-class-docstring,
+    too-many-arguments,
+    too-many-instance-attributes,
+    too-many-lines,
+    too-many-return-statements,
+    too-many-branches,
+    too-many-statements,
+    too-many-locals,
+    broad-exception-caught,
+    duplicate-code,
+    undefined-variable,
+    used-before-assignment,
+    attribute-defined-outside-init,
+    global-variable-undefined,
+    global-statement,
+    possibly-used-before-assignment,
+    mixed-line-endings,
+    trailing-newlines,
+    superfluous-parens,
+    multiple-statements,
+    missing-function-docstring,
+    unused-import,
+    import-outside-toplevel,
+    too-many-positional-arguments,
+    exec-used,
+    no-name-in-module,
+    import-error
+
+[FORMAT]
+max-line-length=140

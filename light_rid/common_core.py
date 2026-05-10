@@ -2087,14 +2087,14 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     if "username" in p_auth:
         raw_user = str(p_auth.get("username") or "").strip()
         if raw_user not in ("", "__KEEP__", "已设置"):
-            auth["username_sha256"] = _sha256_hex(raw_user)
+            auth["username_sha256"] = _password_hash(raw_user)
         elif raw_user.lower() == "__clear__":
             auth["username_sha256"] = ""
     if "password" in p_auth:
         raw_pass = str(p_auth.get("password") or "")
         raw_pass_trim = raw_pass.strip()
         if raw_pass_trim not in ("", "__KEEP__", "********"):
-            auth["password_sha256"] = _sha256_hex(raw_pass)
+            auth["password_sha256"] = _password_hash(raw_pass)
         elif raw_pass_trim.lower() == "__clear__":
             auth["password_sha256"] = ""
 
@@ -2494,11 +2494,81 @@ def _normalize_metrics_cfg(cfg: dict | None) -> dict:
     return base
 
 def _sha256_hex(text: str) -> str:
+    # Only for non-security identifiers/cache keys. Do not use for passwords or auth secrets.
     return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest().lower()
+
+def _password_hash(value: str, salt: str | None = None) -> str:
+    if not salt:
+        salt_bytes = secrets.token_bytes(16)
+        salt = base64.urlsafe_b64encode(salt_bytes).decode("ascii").rstrip("=")
+    else:
+        salt_bytes = base64.urlsafe_b64decode(salt + "=" * (-len(salt) % 4))
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(value or "").encode("utf-8", errors="ignore"),
+        salt_bytes,
+        200_000,
+    )
+    hash_text = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return f"pbkdf2_sha256$200000${salt}${hash_text}"
+
+def _verify_password_hash(value: str, stored: str) -> bool:
+    try:
+        alg, rounds_text, salt, expected = str(stored or "").split("$", 3)
+        if alg != "pbkdf2_sha256":
+            return False
+        rounds = int(rounds_text)
+        salt_bytes = base64.urlsafe_b64decode(salt + "=" * (-len(salt) % 4))
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(value or "").encode("utf-8", errors="ignore"),
+            salt_bytes,
+            rounds,
+        )
+        actual = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        return secrets.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+def _legacy_sha256_auth_secret_matches(value: str, stored: str) -> bool:
+    legacy = str(stored or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", legacy or ""):
+        return False
+    # Legacy fallback for existing SHA-256 config entries only; new auth secrets use PBKDF2.
+    actual = hashlib.sha256(  # lgtm[py/weak-sensitive-data-hashing]
+        str(value or "").encode("utf-8", errors="ignore")
+    ).hexdigest().lower()
+    return secrets.compare_digest(actual, legacy)
+
+def _normalize_auth_secret_hash(stored: str | None) -> str:
+    raw = str(stored or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{64}", raw or ""):
+        return raw.lower()
+    try:
+        alg, rounds_text, salt, expected = raw.split("$", 3)
+        if alg == "pbkdf2_sha256" and int(rounds_text) > 0 and salt and expected:
+            return raw
+    except Exception:
+        pass
+    return ""
+
+def _verify_auth_secret(value: str, stored: str) -> bool:
+    normalized = _normalize_auth_secret_hash(stored)
+    if not normalized:
+        return False
+    return bool(
+        _verify_password_hash(value, normalized)
+        or _legacy_sha256_auth_secret_matches(value, normalized)
+    )
+
+def _stored_auth_secret_matches(candidate: str, stored: str) -> bool:
+    candidate_norm = _normalize_auth_secret_hash(candidate)
+    stored_norm = _normalize_auth_secret_hash(stored)
+    return bool(candidate_norm and stored_norm and secrets.compare_digest(candidate_norm, stored_norm))
 
 def _auth_hashes_present(auth_cfg: dict | None = None) -> bool:
     source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
-    return bool(str(source.get("username_sha256") or "").strip()) and bool(str(source.get("password_sha256") or "").strip())
+    return bool(_normalize_auth_secret_hash(source.get("username_sha256"))) and bool(_normalize_auth_secret_hash(source.get("password_sha256")))
 
 def _parse_whitelist_entries(values) -> list[str]:
     items: list[str] = []
@@ -2682,9 +2752,11 @@ def _sso_expiry_from_payload(body: dict | None, now_wall: float | None = None) -
     return now_wall + ttl_sec, None
 
 def _api_token_id_from_hash(token_hash: str | None, idx: int = 1) -> str:
-    raw = str(token_hash or "").strip().lower()
+    raw = str(token_hash or "").strip()
     if re.fullmatch(r"[0-9a-f]{64}", raw or ""):
         return "tok_" + raw[:12]
+    if raw:
+        return "tok_" + _sha256_hex(raw)[:12]
     return "tok_" + secrets.token_urlsafe(8).replace("-", "_")[:12]
 
 def _api_token_expiry_from_row(row: dict | None, now_wall: float | None = None, fallback: float = 0.0) -> tuple[float, str | None]:
@@ -2708,8 +2780,8 @@ def _normalize_api_tokens(raw, legacy_token: str = "", legacy_hash: str = "") ->
     src = raw if isinstance(raw, list) else []
     if not src:
         legacy_plain = str(legacy_token or "").strip()
-        legacy_digest = str(legacy_hash or "").strip().lower()
-        if legacy_plain or re.fullmatch(r"[0-9a-f]{64}", legacy_digest or ""):
+        legacy_digest = _normalize_auth_secret_hash(legacy_hash)
+        if legacy_plain or legacy_digest:
             src = [{
                 "id": "legacy",
                 "name": "默认 Token",
@@ -2729,10 +2801,10 @@ def _normalize_api_tokens(raw, legacy_token: str = "", legacy_hash: str = "") ->
         token_plain = str(item.get("token") or item.get("token_plain") or "").strip()
         if token_plain in ("********", "__KEEP__"):
             token_plain = ""
-        token_hash = str(item.get("token_sha256") or "").strip().lower()
+        token_hash = _normalize_auth_secret_hash(item.get("token_sha256"))
         if token_plain:
-            token_hash = _sha256_hex(token_plain)
-        if not re.fullmatch(r"[0-9a-f]{64}", token_hash or ""):
+            token_hash = _password_hash(token_plain)
+        if not _normalize_auth_secret_hash(token_hash):
             continue
         raw_id = str(item.get("id") or "").strip()
         token_id = raw_id if re.fullmatch(r"[A-Za-z0-9_-]{3,64}", raw_id or "") else _api_token_id_from_hash(token_hash, idx)
@@ -2898,16 +2970,12 @@ def _prepare_auth_cfg_for_save(auth_cfg: dict | None) -> dict:
     out = dict(raw)
     plain_user = str(out.pop("username", "") or "").strip()
     plain_pass = str(out.pop("password", "") or "")
-    user_hash = str(out.get("username_sha256") or "").strip().lower()
-    pass_hash = str(out.get("password_sha256") or "").strip().lower()
+    user_hash = _normalize_auth_secret_hash(out.get("username_sha256"))
+    pass_hash = _normalize_auth_secret_hash(out.get("password_sha256"))
     if plain_user:
-        user_hash = _sha256_hex(plain_user)
+        user_hash = _password_hash(plain_user)
     if plain_pass:
-        pass_hash = _sha256_hex(plain_pass)
-    if not re.fullmatch(r"[0-9a-f]{64}", user_hash or ""):
-        user_hash = ""
-    if not re.fullmatch(r"[0-9a-f]{64}", pass_hash or ""):
-        pass_hash = ""
+        pass_hash = _password_hash(plain_pass)
     out["enabled"] = bool(out.get("enabled"))
     out["realm"] = str(out.get("realm") or "Light RID Scanner").strip() or "Light RID Scanner"
     try:
@@ -2929,11 +2997,9 @@ def _prepare_api_cfg_for_save(api_cfg: dict | None) -> dict:
     raw = dict(api_cfg) if isinstance(api_cfg, dict) else {}
     out = dict(raw)
     plain_token = str(out.get("token") or out.get("token_plain") or "").strip()
-    token_hash = str(out.get("token_sha256") or "").strip().lower()
+    token_hash = _normalize_auth_secret_hash(out.get("token_sha256"))
     if plain_token:
-        token_hash = _sha256_hex(plain_token)
-    if not re.fullmatch(r"[0-9a-f]{64}", token_hash or ""):
-        token_hash = ""
+        token_hash = _password_hash(plain_token)
     tokens = _normalize_api_tokens(out.get("tokens"), plain_token, token_hash)
     first = tokens[0] if tokens else {}
     out["enabled"] = bool(out.get("enabled"))
@@ -3029,18 +3095,14 @@ def _normalize_auth_cfg(cfg: dict | None) -> dict:
         default_missing=("password", "passkey"),
         default_empty=("password", "passkey"),
     )
-    u = str(base.get("username_sha256") or "").strip().lower()
-    p = str(base.get("password_sha256") or "").strip().lower()
+    u = _normalize_auth_secret_hash(base.get("username_sha256"))
+    p = _normalize_auth_secret_hash(base.get("password_sha256"))
     if (not u) and plain_user:
-        u = _sha256_hex(plain_user)
-        _log("[WARN] auth.username detected in plain text; converted to SHA-256 in memory")
+        u = _password_hash(plain_user)
+        _log("[WARN] auth.username detected in plain text; converted to PBKDF2 in memory")
     if (not p) and plain_pass:
-        p = _sha256_hex(plain_pass)
-        _log("[WARN] auth.password detected in plain text; converted to SHA-256 in memory")
-    if not re.fullmatch(r"[0-9a-f]{64}", u or ""):
-        u = ""
-    if not re.fullmatch(r"[0-9a-f]{64}", p or ""):
-        p = ""
+        p = _password_hash(plain_pass)
+        _log("[WARN] auth.password detected in plain text; converted to PBKDF2 in memory")
     base["username_sha256"] = u
     base["password_sha256"] = p
     base["sso_links"] = _normalize_sso_links(base.get("sso_links"))
@@ -3176,8 +3238,8 @@ def _normalize_api_cfg(cfg: dict | None) -> dict:
                     base[k] = api.get(k)
     base = _prepare_api_cfg_for_save(base)
     if base.get("token") and not str(base.get("token_sha256") or "").strip():
-        base["token_sha256"] = _sha256_hex(str(base.get("token") or "").strip())
-        _log("[WARN] api.token detected in plain text; converted to SHA-256 in memory")
+        base["token_sha256"] = _password_hash(str(base.get("token") or "").strip())
+        _log("[WARN] api.token detected in plain text; converted to PBKDF2 in memory")
     auth_cfg = _normalize_auth_cfg(cfg)
     if base["enabled"] and not _api_tokens_have_secret(base):
         _log("[WARN] api token enabled but token hash missing, fallback disabled")

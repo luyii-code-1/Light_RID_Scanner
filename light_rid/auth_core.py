@@ -7,10 +7,9 @@ def _api_token_check_value(token: str | None) -> dict | None:
     raw = str(token or "").strip()
     if not raw:
         return None
-    incoming_hash = _sha256_hex(raw)
     for item in _normalize_api_tokens(API_CFG.get("tokens"), API_CFG.get("token") or "", API_CFG.get("token_sha256") or ""):
-        token_hash = str(item.get("token_sha256") or "").strip().lower()
-        if token_hash and hmac.compare_digest(incoming_hash, token_hash) and bool(_sso_link_state(item).get("active")):
+        token_hash = str(item.get("token_sha256") or "").strip()
+        if token_hash and _verify_auth_secret(raw, token_hash) and bool(_sso_link_state(item).get("active")):
             return dict(item)
     return None
 
@@ -101,7 +100,7 @@ def _build_api_token_create_payload(body: dict | None, *, headers=None, client_i
     if not name:
         name = "API Token " + time.strftime("%Y-%m-%d %H:%M:%S")
     token_plain = secrets.token_urlsafe(32)
-    token_hash = _sha256_hex(token_plain)
+    token_hash = _password_hash(token_plain)
     token_id = _api_token_id_from_hash(token_hash)
     item = {
         "id": token_id,
@@ -347,8 +346,8 @@ def _oobe_save_config(body: dict | None) -> dict:
         if not username or not password:
             return {"ok": False, "error": "账号和密码必须同时填写"}
         auth["enabled"] = True
-        auth["username_sha256"] = _sha256_hex(username)
-        auth["password_sha256"] = _sha256_hex(password)
+        auth["username_sha256"] = _password_hash(username)
+        auth["password_sha256"] = _password_hash(password)
         auth["realm"] = str(auth.get("realm") or "Light RID Scanner")
     b_ok, backup_path = create_config_backup(APP_CONFIG_PATH, tag="oobe")
     if not b_ok:
@@ -514,28 +513,24 @@ def _auth_enabled() -> bool:
 def _auth_check_userpass(username: str, password: str) -> bool:
     if not _auth_enabled():
         return True
-    u_hash = str(AUTH_CFG.get("username_sha256") or "").strip().lower()
-    p_hash = str(AUTH_CFG.get("password_sha256") or "").strip().lower()
+    u_hash = str(AUTH_CFG.get("username_sha256") or "").strip()
+    p_hash = str(AUTH_CFG.get("password_sha256") or "").strip()
     if not u_hash or not p_hash:
         return False
-    u_ok = hmac.compare_digest(_sha256_hex(username), u_hash)
-    p_ok = hmac.compare_digest(_sha256_hex(password), p_hash)
+    u_ok = _verify_auth_secret(username, u_hash)
+    p_ok = _verify_auth_secret(password, p_hash)
     return bool(u_ok and p_ok)
 
 def _auth_check_userpass_hash(username_sha256: str, password_sha256: str) -> bool:
     if not _auth_enabled():
         return True
-    u_hash = str(AUTH_CFG.get("username_sha256") or "").strip().lower()
-    p_hash = str(AUTH_CFG.get("password_sha256") or "").strip().lower()
-    u_in = str(username_sha256 or "").strip().strip("'\"").lower()
-    p_in = str(password_sha256 or "").strip().strip("'\"").lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", u_in or ""):
-        return False
-    if not re.fullmatch(r"[0-9a-f]{64}", p_in or ""):
-        return False
+    u_hash = str(AUTH_CFG.get("username_sha256") or "").strip()
+    p_hash = str(AUTH_CFG.get("password_sha256") or "").strip()
+    u_in = str(username_sha256 or "").strip().strip("'\"")
+    p_in = str(password_sha256 or "").strip().strip("'\"")
     if not u_hash or not p_hash:
         return False
-    return bool(hmac.compare_digest(u_in, u_hash) and hmac.compare_digest(p_in, p_hash))
+    return bool(_stored_auth_secret_matches(u_in, u_hash) and _stored_auth_secret_matches(p_in, p_hash))
 
 def _webauthn_b64u_encode(data: bytes | None) -> str:
     raw = bytes(data or b"")
@@ -1202,8 +1197,8 @@ def _auth_sso_path(check: str, next_path: str = "/") -> str:
     target = str(next_path or "/").strip() or "/"
     if not target.startswith("/") or target.startswith("//"):
         target = "/"
-    user_hash = str(AUTH_CFG.get("username_sha256") or "").strip().lower()
-    pass_hash = str(AUTH_CFG.get("password_sha256") or "").strip().lower()
+    user_hash = str(AUTH_CFG.get("username_sha256") or "").strip()
+    pass_hash = str(AUTH_CFG.get("password_sha256") or "").strip()
     return (
         "/login?user=" + quote(user_hash, safe="")
         + "&password=" + quote(pass_hash, safe="")
@@ -1214,8 +1209,8 @@ def _auth_sso_path(check: str, next_path: str = "/") -> str:
 def _auth_sso_public_links(auth_cfg: dict | None = None, *, include_paths: bool = False) -> list[dict]:
     from urllib.parse import quote
     source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
-    user_hash = str(source.get("username_sha256") or "").strip().lower()
-    pass_hash = str(source.get("password_sha256") or "").strip().lower()
+    user_hash = str(source.get("username_sha256") or "").strip()
+    pass_hash = str(source.get("password_sha256") or "").strip()
     out: list[dict] = []
     for item in _normalize_sso_links(source.get("sso_links")):
         check = str(item.get("check") or "").strip()

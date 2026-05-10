@@ -38,26 +38,27 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - 使用 `linux-arm64` 发布产物时需要 64 位系统
 - 支持监控模式的无线网卡
 - 切换监控模式 / 信道时需要 root 权限
+- 使用 AP 热点网页服务时需要 `iw` 和 `hostapd`
 
 部署 Linux 二进制文件：
 
 ```bash
-install -m 0755 light_rid_scanner-linux-arm64 /home/luyii/rid/light_rid_scanner
+install -m 0755 light_rid_scanner-linux-arm64 /opt/light-rid/light_rid_scanner
 ```
 
 运行目录需要放置二进制文件和运行数据：
 
 ```text
-/home/luyii/rid/light_rid_scanner
-/home/luyii/rid/rid_config.json
-/home/luyii/rid/rid_models.json
-/home/luyii/rid/EULA.md
+/opt/light-rid/light_rid_scanner
+/opt/light-rid/rid_config.json
+/opt/light-rid/rid_models.json
+/opt/light-rid/EULA.md
 ```
 
 systemd 应直接执行二进制文件：
 
 ```ini
-ExecStart=/home/luyii/rid/light_rid_scanner --config /home/luyii/rid/rid_config.json --no-tui
+ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.json --no-tui
 ```
 
 默认网页地址：
@@ -68,16 +69,15 @@ ExecStart=/home/luyii/rid/light_rid_scanner --config /home/luyii/rid/rid_config.
 
 - 扫描器不再自动递增轮换网卡。
 - `basic.iface` 现在被视为固定绑定项；如果这张网卡不存在，服务会保持降级运行并提示配置，而不是悄悄切到别的网卡。
+- `basic.lost_timeout` 用于配置飞机离线判定时间，默认 15 秒。
+- OOBE 和设置页提供“自定义网卡绑定”，可以把每张网卡设置为 `scan`（扫描）、`web`（网页服务）、`ap_web`（AP 热点网页服务）、`disabled`（禁用）、`idle`（闲置）或 `none`；`scan` 会同步写回 `basic.iface`。
+- `ap_web` 会通过 `hostapd` 配置热点，使用内置 DHCP 在 `172.16.0.0/24` 分配地址，并在服务具备所需 Linux capability 时把网页服务暴露到 `172.16.0.1:80`。
 - 如果 `rid_config.json` 缺失、损坏，或者还没有绑定默认网卡，网页会进入 `/oobe` 初始化流程。
 - OOBE 用来完成最小可运行配置：
   - 选择默认无线网卡
   - 设置 RID 信道
   - 可选填写基站坐标
   - 可选设置网页登录账号和密码
-- 设置页可以手动进入两种 OOBE：
-  - 简化 OOBE，用于完成最小配置
-  - 完整 OOBE，留在设置页编辑完整配置
-
 这样做的目的很直接：多网卡环境下不再抓错卡，启动异常也会直接暴露为配置问题，方便固定基站长期稳定运行。
 
 ## 主要页面
@@ -207,7 +207,7 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
     "whitelist_enabled": true,
     "whitelist": [
       "127.0.0.1",
-      "192.168.1.0/24"
+      "<trusted-lan-cidr>"
     ]
   }
 }
@@ -410,7 +410,6 @@ PY
 - 可选开启主机负载趋势，按 CPU、内存、温度、系统负载、AP 数拆分展示
 - 主机负载趋势支持 12 小时、24 小时、7 天视图
 - 主机负载数据保留时间可配置，默认 7 天
-- 手动进入简化 OOBE 和完整 OOBE
 - 再次验证账密后生成和删除可管理的 SSO 登录链接
 - 支持通行密钥的添加和删除，用于网页登录
 - 再次验证密码后浏览 / 编辑 / 保存 / 删除原始配置树
@@ -450,7 +449,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 
 - 通行密钥以现有网页登录账号密码为引导完成首次注册，之后保存在 `auth.passkeys`。
 - 原始配置编辑被限制在当前配置根目录内，并且需要当前浏览器会话先完成一次短时二次解锁。
-- 运行时修复卡片可以创建 / 确认 `rid` 专用运行账号、授予采集能力、安装 `iw`，并注册 / 更新 `light-rid-scanner.service`。
+- 运行时修复卡片可以创建 / 确认 `rid` 专用运行账号、授予采集和热点能力、安装无线工具，并注册 / 更新 `light-rid-scanner.service`。
 - 二进制部署时，systemd 服务应始终指向已安装的 `light_rid_scanner` 二进制文件、当前配置文件路径以及 `--no-tui` 服务运行模式。
 
 ### 主机负载趋势

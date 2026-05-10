@@ -1,3 +1,10 @@
+from light_rid.platform_compat import (
+    local_group_exists as _platform_local_group_exists,
+    local_user_exists as _platform_local_user_exists,
+    username_for_uid as _platform_username_for_uid,
+)
+
+
 def _wecom_send_text(key: str, content: str, timeout_sec: int = 8) -> tuple[bool, str]:
     body = json.dumps({
         "msgtype": "text",
@@ -998,6 +1005,7 @@ def _capability_bit(name: str) -> int | None:
     caps = {
         "CAP_NET_ADMIN": 12,
         "CAP_NET_RAW": 13,
+        "CAP_NET_BIND_SERVICE": 10,
     }
     return caps.get(str(name or "").strip().upper())
 
@@ -1021,9 +1029,8 @@ def _process_has_capabilities(names: tuple[str, ...] | list[str]) -> bool:
 def _username_for_uid(uid: int | None) -> str:
     try:
         if uid is not None and _is_linux_host():
-            import pwd
-            return str(pwd.getpwuid(int(uid)).pw_name or "")
-    except Exception:
+            return _platform_username_for_uid(uid)
+    except (OSError, TypeError, ValueError):
         pass
     try:
         return str(os.environ.get("USER") or os.environ.get("USERNAME") or "")
@@ -1035,28 +1042,26 @@ def _local_user_exists(name: str) -> bool:
     if not user or not _is_linux_host():
         return False
     try:
-        import pwd
-        pwd.getpwnam(user)
-        return True
-    except KeyError:
-        return False
-    except Exception:
-        ok, _out, _rc = _run_program(["id", "-u", user], timeout=4)
-        return bool(ok)
+        exists = _platform_local_user_exists(user)
+    except (OSError, TypeError, ValueError):
+        exists = None
+    if exists is not None:
+        return bool(exists)
+    ok, _out, _rc = _run_program(["id", "-u", user], timeout=4)
+    return bool(ok)
 
 def _local_group_exists(name: str) -> bool:
     group = str(name or "").strip()
     if not group or not _is_linux_host():
         return False
     try:
-        import grp
-        grp.getgrnam(group)
-        return True
-    except KeyError:
-        return False
-    except Exception:
-        ok, _out, _rc = _run_program(["getent", "group", group], timeout=4)
-        return bool(ok)
+        exists = _platform_local_group_exists(group)
+    except (OSError, TypeError, ValueError):
+        exists = None
+    if exists is not None:
+        return bool(exists)
+    ok, _out, _rc = _run_program(["getent", "group", group], timeout=4)
+    return bool(ok)
 
 def _sudo_available() -> bool:
     return bool(_is_linux_host() and _command_path("sudo"))
@@ -1114,7 +1119,7 @@ def _systemctl_privileged(args: list[str], timeout: int = 20, sudo_password: str
     return _systemctl(args, timeout=timeout, sudo_password=sudo_password, privileged=True)
 
 def _iw_manual_install_hint() -> str:
-    return "请手动安装: sudo apt-get update && sudo apt-get install -y iw"
+    return "请手动安装: sudo apt-get update && sudo apt-get install -y iw hostapd"
 
 def _iw_missing_message() -> str:
     return "未检测到 iw 命令，无法枚举或切换无线网卡。"
@@ -1126,16 +1131,24 @@ def _set_iw_check_state(**updates) -> dict:
 
 def _refresh_iw_check_state(message: str | None = None) -> dict:
     path = _command_path(IW_PACKAGE_NAME)
+    hostapd_path = _command_path("hostapd")
     available = bool(path)
     msg = str(message or "").strip()
     if not msg:
-        msg = f"iw 可用: {path}" if available else _iw_missing_message()
+        if available and hostapd_path:
+            msg = f"无线工具可用: iw={path} hostapd={hostapd_path}"
+        elif not available:
+            msg = _iw_missing_message()
+        else:
+            msg = "未检测到 hostapd，AP 热点无法广播。"
     return _set_iw_check_state(
         checked=True,
         available=available,
         path=path,
+        hostapd_available=bool(hostapd_path),
+        hostapd_path=hostapd_path,
         message=msg,
-        manual_hint=("" if available else _iw_manual_install_hint()),
+        manual_hint=("" if available and hostapd_path else _iw_manual_install_hint()),
     )
 
 def _iw_status_payload(refresh: bool = True) -> dict:
@@ -1153,29 +1166,29 @@ def _iw_status_payload(refresh: bool = True) -> dict:
 
 def _install_iw_package(sudo_password: str | None = None) -> dict:
     existing = _iw_status_payload(refresh=True)
-    if existing.get("available"):
+    if existing.get("available") and existing.get("hostapd_available"):
         return {
             "ok": True,
             "installed": False,
-            "message": "iw 已可用，无需安装。",
+            "message": "无线工具已可用，无需安装。",
             "iw": existing,
         }
     _set_iw_check_state(install_attempted=True, install_ok=False)
     if not _is_linux_host():
-        snap = _refresh_iw_check_state("当前主机不是 Linux，无法自动安装 iw。")
+        snap = _refresh_iw_check_state("当前主机不是 Linux，无法通过网页自动安装无线工具。")
         return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
     if not _command_path("apt-get"):
-        snap = _refresh_iw_check_state("未检测到 apt-get，无法自动安装 iw。")
+        snap = _refresh_iw_check_state("未检测到 apt-get，无法通过网页自动安装无线工具。")
         return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
     if not (_is_root_user() or _sudo_available()):
-        snap = _refresh_iw_check_state("自动安装 iw 需要 root 或 sudo 提权。")
+        snap = _refresh_iw_check_state("网页安装无线工具需要 root 或 sudo 提权。")
         return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
 
     env = dict(os.environ)
     env["DEBIAN_FRONTEND"] = "noninteractive"
     ok_update, out_update, rc_update = _run_privileged(["apt-get", "update"], timeout=300, env=env, sudo_password=sudo_password)
     if not ok_update:
-        snap = _refresh_iw_check_state("apt-get update 失败，iw 未安装。")
+        snap = _refresh_iw_check_state("apt-get update 失败，无法通过网页安装无线工具。")
         return {
             "ok": False,
             "installed": False,
@@ -1184,15 +1197,15 @@ def _install_iw_package(sudo_password: str | None = None) -> dict:
             "output": out_update,
             "iw": snap,
         }
-    ok_install, out_install, rc_install = _run_privileged(["apt-get", "install", "-y", IW_PACKAGE_NAME], timeout=300, env=env, sudo_password=sudo_password)
-    snap = _refresh_iw_check_state("iw 安装完成。" if ok_install else "apt-get install iw 失败。")
-    installed = bool(ok_install and snap.get("available"))
+    ok_install, out_install, rc_install = _run_privileged(["apt-get", "install", "-y", IW_PACKAGE_NAME, "hostapd"], timeout=300, env=env, sudo_password=sudo_password)
+    snap = _refresh_iw_check_state("无线工具安装完成。" if ok_install else "apt-get install iw hostapd 失败。")
+    installed = bool(ok_install and snap.get("available") and snap.get("hostapd_available"))
     _set_iw_check_state(install_ok=installed)
     snap = _iw_status_payload(refresh=False)
     return {
         "ok": installed,
         "installed": installed,
-        "error": "" if installed else str(snap.get("message") or "iw install failed"),
+        "error": "" if installed else str(snap.get("message") or "wireless tools install failed"),
         "returncode": rc_install,
         "output": _truncate_text((out_update + "\n" + out_install).strip()),
         "iw": snap,
@@ -1877,21 +1890,206 @@ def _sniff_iface_candidates() -> dict[str, str]:
             iftypes[cur] = m2.group(1)
     return iftypes
 
+def _ip_json_snapshot(args: list[str]) -> dict:
+    try:
+        ok, out, _rc = _run_program(["ip", "-j"] + [str(x) for x in args], timeout=4)
+        if not ok or not out:
+            return {}
+        data = json.loads(out)
+        if not isinstance(data, list):
+            return {}
+        return {
+            str(item.get("ifname") or ""): item
+            for item in data
+            if isinstance(item, dict) and str(item.get("ifname") or "")
+        }
+    except Exception:
+        return {}
+
+def _iface_sysfs_flags(name: str) -> int | None:
+    try:
+        with open(os.path.join("/sys/class/net", name, "flags"), "r", encoding="utf-8", errors="ignore") as f:
+            return int(f.read().strip(), 16)
+    except Exception:
+        return None
+
+def _iface_addr_lists(name: str, addr_item: dict | None = None) -> tuple[list[str], list[str]]:
+    ipv4: list[str] = []
+    ipv6: list[str] = []
+    item = addr_item if isinstance(addr_item, dict) else {}
+    for addr in item.get("addr_info") or []:
+        if not isinstance(addr, dict):
+            continue
+        local = str(addr.get("local") or "").strip()
+        prefix = addr.get("prefixlen")
+        if not local:
+            continue
+        text = local + (f"/{prefix}" if prefix not in (None, "") else "")
+        if str(addr.get("family") or "").lower() == "inet":
+            ipv4.append(text)
+        elif str(addr.get("family") or "").lower() == "inet6":
+            ipv6.append(text)
+    return ipv4, ipv6
+
+def _sysfs_read_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+def _iface_device_model(name: str) -> dict:
+    out = {"model": "", "driver": "", "bus": "", "vendor_id": "", "product_id": ""}
+    try:
+        dev_path = os.path.realpath(os.path.join("/sys/class/net", name, "device"))
+    except Exception:
+        dev_path = ""
+    if not dev_path or not os.path.exists(dev_path):
+        return out
+    try:
+        driver_link = os.path.realpath(os.path.join(dev_path, "driver"))
+        if driver_link and os.path.exists(driver_link):
+            out["driver"] = os.path.basename(driver_link)
+    except Exception:
+        pass
+    cur = dev_path
+    for _ in range(8):
+        vid = _sysfs_read_text(os.path.join(cur, "idVendor"))
+        pid = _sysfs_read_text(os.path.join(cur, "idProduct"))
+        if vid or pid:
+            manufacturer = _sysfs_read_text(os.path.join(cur, "manufacturer"))
+            product = _sysfs_read_text(os.path.join(cur, "product"))
+            out.update({
+                "bus": "usb",
+                "vendor_id": vid.lower(),
+                "product_id": pid.lower(),
+                "model": " ".join(x for x in (manufacturer, product) if x) or f"USB {vid}:{pid}",
+            })
+            return out
+        parent = os.path.dirname(cur)
+        if not parent or parent == cur or parent == "/sys":
+            break
+        cur = parent
+    modalias = _sysfs_read_text(os.path.join(dev_path, "modalias"))
+    if modalias.startswith("pci:"):
+        slot = os.path.basename(dev_path)
+        ok, desc, _rc = _run_program(["lspci", "-D", "-s", slot], timeout=4)
+        out["bus"] = "pci"
+        if ok and desc:
+            out["model"] = re.sub(r"^[0-9a-fA-F:.]+\\s+", "", desc.strip())
+        else:
+            out["vendor_id"] = _sysfs_read_text(os.path.join(dev_path, "vendor")).replace("0x", "").lower()
+            out["product_id"] = _sysfs_read_text(os.path.join(dev_path, "device")).replace("0x", "").lower()
+            if out["vendor_id"] or out["product_id"]:
+                out["model"] = f"PCI {out['vendor_id']}:{out['product_id']}"
+    return out
+
+def _iface_detected_role(item: dict) -> str:
+    if bool(item.get("is_loopback")):
+        return "none"
+    if item.get("admin_up") is False:
+        return "disabled"
+    mode = str(item.get("mode") or "").strip().lower()
+    ipv4 = [str(x) for x in (item.get("ipv4") or [])]
+    if mode in ("__ap", "ap"):
+        return "ap_web"
+    if any(x.startswith("172.16.0.1/") or x == "172.16.0.1" for x in ipv4):
+        return "ap_web"
+    if mode == "monitor":
+        return "scan"
+    if ipv4:
+        return "web"
+    if str(item.get("state") or "").strip().lower() in ("up", "unknown", "dormant"):
+        return "idle"
+    return "none"
+
 def _iface_options_snapshot() -> list[dict]:
-    out: list[dict] = []
     iftypes = _sniff_iface_candidates()
-    for name, mode in iftypes.items():
+    names: set[str] = set(iftypes.keys())
+    link_json = _ip_json_snapshot(["-details", "link", "show"])
+    addr_json = _ip_json_snapshot(["addr", "show"])
+    names.update([x for x in link_json.keys() if x])
+    names.update([x for x in addr_json.keys() if x])
+    try:
+        for name in os.listdir("/sys/class/net"):
+            if name:
+                names.add(str(name))
+    except Exception:
+        pass
+    if not names:
+        ip_out = run_cmd("ip -o link show", timeout=4)
+        for line in (ip_out or "").splitlines():
+            m = re.match(r"\d+:\s+([^:@]+)", line)
+            if m:
+                names.add(m.group(1))
+    out: list[dict] = []
+    for name in names:
+        link_item = link_json.get(name) or {}
+        addr_item = addr_json.get(name) or {}
+        mode = iftypes.get(name, "")
+        if not mode:
+            linkinfo = link_item.get("linkinfo") if isinstance(link_item.get("linkinfo"), dict) else {}
+            info_kind = str(linkinfo.get("info_kind") or "").strip()
+            if info_kind:
+                mode = info_kind
         try:
             supports_5g = bool(detect_5g(name))
         except Exception:
             supports_5g = False
-        out.append({
+        is_wireless = bool(mode)
+        try:
+            is_wireless = is_wireless or os.path.isdir(os.path.join("/sys/class/net", name, "wireless"))
+        except Exception:
+            pass
+        mac = ""
+        state = ""
+        try:
+            with open(os.path.join("/sys/class/net", name, "address"), "r", encoding="utf-8", errors="ignore") as f:
+                mac = f.read().strip()
+        except Exception:
+            mac = ""
+        try:
+            with open(os.path.join("/sys/class/net", name, "operstate"), "r", encoding="utf-8", errors="ignore") as f:
+                state = f.read().strip()
+        except Exception:
+            state = str(link_item.get("operstate") or "")
+        flags_raw = _iface_sysfs_flags(name)
+        flags = list(link_item.get("flags") or []) if isinstance(link_item.get("flags"), list) else []
+        admin_up = None
+        if flags_raw is not None:
+            admin_up = bool(flags_raw & 0x1)
+        elif flags:
+            admin_up = "UP" in [str(x).upper() for x in flags]
+        ipv4, ipv6 = _iface_addr_lists(name, addr_item)
+        device = _iface_device_model(name)
+        item = {
             "name": str(name),
             "mode": str(mode or ""),
             "is_monitor": (str(mode or "") == "monitor"),
+            "is_wireless": bool(is_wireless),
+            "is_loopback": str(name) == "lo",
+            "state": state,
+            "admin_up": admin_up,
+            "flags": flags,
+            "mac": mac,
+            "ipv4": ipv4,
+            "ipv6": ipv6,
             "supports_5g": supports_5g,
-        })
-    out.sort(key=lambda x: (0 if x.get("is_monitor") else 1, x.get("name") or ""))
+            "model": device.get("model") or "",
+            "driver": device.get("driver") or "",
+            "bus": device.get("bus") or "",
+            "vendor_id": device.get("vendor_id") or "",
+            "product_id": device.get("product_id") or "",
+        }
+        item["detected_role"] = _iface_detected_role(item)
+        out.append(item)
+    out.sort(key=lambda x: (
+        1 if x.get("is_loopback") else 0,
+        1 if x.get("detected_role") == "disabled" else 0,
+        0 if x.get("is_wireless") else 1,
+        0 if x.get("is_monitor") else 1,
+        x.get("name") or "",
+    ))
     return out
 
 def _cfg_preferred_iface() -> str | None:

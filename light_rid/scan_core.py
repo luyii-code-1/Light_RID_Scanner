@@ -126,12 +126,6 @@ def decode_location(msg25: bytes) -> dict | None:
 
         b1 = msg25[1]
         speed_mult = b1 & 0x01
-        ew_direction = (b1 >> 1) & 0x01
-
-        dir_enc = int(msg25[2])
-        direction = float(dir_enc + (180 if ew_direction else 0))
-        if direction >= 360.0:
-            direction -= 360.0
 
         spd_enc = int(msg25[3])
         if speed_mult:
@@ -170,7 +164,8 @@ def decode_location(msg25: bytes) -> dict | None:
             "alt_geodetic": (alt_geo if alt_geo is not None else alt_baro),
             "speed_ms": speed,
             "vspeed_ms": vspeed,
-            "direction_deg": direction,
+            # Heading is derived locally from consecutive valid coordinates.
+            "direction_deg": None,
         }
     except Exception:
         return None
@@ -384,6 +379,39 @@ def _new_fw_decode_coord_pair(buf: bytes, off: int) -> dict | None:
         "_coord_off": off,
     }
 
+def _new_fw_decode_coord_pair_at(buf: bytes, lon_off: int, lat_off: int) -> dict | None:
+    if lon_off < 0 or lat_off < 0 or lon_off + 4 > len(buf) or lat_off + 4 > len(buf):
+        return None
+    lon_b = bytes(buf[lon_off:lon_off + 4])
+    lat_b = bytes(buf[lat_off:lat_off + 4])
+    if _coord_raw_bytes_invalid(lon_b) or _coord_raw_bytes_invalid(lat_b):
+        return None
+    try:
+        lon_raw = struct.unpack_from("<i", buf, lon_off)[0]
+        lat_raw = struct.unpack_from("<i", buf, lat_off)[0]
+    except Exception:
+        return None
+    if _coord_raw_invalid(lon_raw) or _coord_raw_invalid(lat_raw):
+        return None
+    lon = float(lon_raw) * 1e-7
+    lat = float(lat_raw) * 1e-7
+    if not _coord_pair_valid(lat, lon):
+        return None
+    return {
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "_coord_off": min(lon_off, lat_off),
+    }
+
+def _new_fw_decode_altitude(buf: bytes, off: int) -> float | None:
+    if off < 0 or off + 2 > len(buf):
+        return None
+    try:
+        raw = struct.unpack_from("<H", buf, off)[0]
+    except Exception:
+        return None
+    return round(float(raw) * 0.5 - 1000.0, 1)
+
 def _new_fw_coord_rank(coord: dict) -> tuple[int, int]:
     try:
         lat = float(coord.get("lat"))
@@ -427,54 +455,46 @@ def _new_fw_payload_sig(body: bytes) -> int:
     return zlib.crc32(head) & 0xFFFFFFFF
 
 def decode_new_firmware_payload(buf: bytes, ssid_sn: str | None = None) -> dict | None:
-    """Decode DJI's newer Beacon Vendor IE body after FA:0B:BC:0D.
+    """Decode DJI's newer Beacon vendor body starting at FA:0B:BC:0D.
 
     This path is intentionally separate from the standard ODID decoder. The new
-    layout is keyed by the 20-byte RID copied from the SSID, followed by an
-    8-byte ASCII UAS ID and little-endian int32 coordinate groups.
+    layout uses fixed vendor-body offsets for RID, UAS ID, aircraft position,
+    altitude, and pilot position.
     """
     if not buf or len(buf) < RID_NEW_FW_BODY_MIN:
         return None
     ssid_rid = _new_fw_ssid_rid(ssid_sn)
-    if not ssid_rid:
+    rid = _new_fw_read_rid_at(buf, RID_NEW_FW_SN_OFF)
+    if not rid:
         return None
-    rid_bytes = ssid_rid.encode("ascii", errors="ignore")
-    pos = bytes(buf).find(rid_bytes)
-    while pos >= 0:
-        rid = _new_fw_read_rid_at(buf, pos)
-        if rid == ssid_rid:
-            uas_off = pos + RID_NEW_FW_SN_LEN
-            if uas_off + RID_NEW_FW_UAS_LEN > len(buf):
-                return None
-            uas_id = _new_fw_read_uas_id(buf, uas_off)
-            coord_start = uas_off + RID_NEW_FW_UAS_LEN
-            drone_coord, second_coord = _new_fw_find_coord_groups(buf, coord_start)
-            loc = None
-            if drone_coord:
-                loc = {
-                    "lat": drone_coord["lat"],
-                    "lon": drone_coord["lon"],
-                    "alt_geodetic": None,
-                    "speed_ms": None,
-                    "vspeed_ms": None,
-                    "direction_deg": None,
-                }
-            system = None
-            if second_coord:
-                system = {
-                    "pilot_lat": second_coord["lat"],
-                    "pilot_lon": second_coord["lon"],
-                    "pilot_loc_type": None,
-                    "pilot_loc_type_text": "new_fw_coord_2",
-                }
-            return {
-                "basic_id": {"uas_id": rid, "id_type": "Serial"},
-                "uas_id": uas_id,
-                "location": loc,
-                "system": system,
-            }
-        pos = bytes(buf).find(rid_bytes, pos + 1)
-    return None
+    if ssid_rid and rid != ssid_rid:
+        return None
+    uas_id = _new_fw_read_uas_id(buf, RID_NEW_FW_UAS_OFF)
+    drone_coord = _new_fw_decode_coord_pair_at(buf, RID_NEW_FW_DRONE_LON_OFF, RID_NEW_FW_DRONE_LAT_OFF)
+    pilot_coord = _new_fw_decode_coord_pair_at(buf, RID_NEW_FW_PILOT_LON_OFF, RID_NEW_FW_PILOT_LAT_OFF)
+    alt = _new_fw_decode_altitude(buf, RID_NEW_FW_ALT_OFF)
+    loc = {
+        "lat": drone_coord["lat"] if drone_coord else None,
+        "lon": drone_coord["lon"] if drone_coord else None,
+        "alt_geodetic": alt,
+        "speed_ms": None,
+        "vspeed_ms": None,
+        "direction_deg": None,
+    }
+    system = None
+    if pilot_coord:
+        system = {
+            "pilot_lat": pilot_coord["lat"],
+            "pilot_lon": pilot_coord["lon"],
+            "pilot_loc_type": None,
+            "pilot_loc_type_text": "new_fw_fixed",
+        }
+    return {
+        "basic_id": {"uas_id": rid, "id_type": "Serial"},
+        "uas_id": uas_id,
+        "location": loc,
+        "system": system,
+    }
 
 def _append_new_firmware_result(results: list[tuple[bytes, dict]], dedup: set[int], body: bytes, ssid_sn: str | None) -> None:
     decoded = decode_new_firmware_payload(body, ssid_sn=ssid_sn)
@@ -556,8 +576,8 @@ def extract_new_firmware_from_ies(pkt, ssid_sn: str | None = None) -> list[tuple
                 pos = info.find(DJI_RID_VENDOR_PREFIX, idx)
                 if pos < 0:
                     break
-                if pos + 4 < len(info):
-                    _append_new_firmware_result(results, dedup, info[pos + 4:], ssid_sn)
+                if pos < len(info):
+                    _append_new_firmware_result(results, dedup, info[pos:], ssid_sn)
                 idx = pos + 1
         try:
             nxt = elt.payload
@@ -581,8 +601,8 @@ def extract_new_firmware_from_raw(pkt, ssid_sn: str | None = None) -> list[tuple
         pos = raw.find(DJI_RID_VENDOR_PREFIX, idx)
         if pos < 0:
             break
-        if pos + 4 < len(raw):
-            _append_new_firmware_result(results, dedup, raw[pos + 4:pos + 4 + RID_NEW_FW_SIG_BYTES], ssid_sn)
+        if pos < len(raw):
+            _append_new_firmware_result(results, dedup, raw[pos:pos + RID_NEW_FW_SIG_BYTES], ssid_sn)
         idx = pos + 1
     return results
 

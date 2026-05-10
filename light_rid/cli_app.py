@@ -49,6 +49,7 @@ def parse_frame(pkt) -> None:
         payloads = extract_from_ies(pkt)
         ssid_rid = _ssid_to_sn(ssid or "")
         new_fw_payloads = extract_new_firmware_from_ies(pkt, ssid_rid) if d11.subtype == 8 else []
+        new_fw_frame = bool(new_fw_payloads)
         if d11.subtype in (13, 5, 8):   # Extra: also scan raw payload for all mgmt subtypes
             raw_p = extract_from_raw(pkt)
             # 去重
@@ -64,15 +65,16 @@ def parse_frame(pkt) -> None:
                     if sig not in new_sigs:
                         new_sigs.add(sig)
                         new_fw_payloads.append(p)
-        if new_fw_payloads and payloads:
-            # New-firmware bodies can contain legacy-looking ODID fragments;
-            # drop the overlapping legacy payloads so one beacon is not counted
-            # twice by the old/new parser paths.
-            new_bodies = [bytes(body or b"") for body, _decoded in new_fw_payloads]
-            payloads = [
-                p for p in payloads
-                if not any(p and (bytes(p) == body or body.startswith(bytes(p)) or bytes(p) in body) for body in new_bodies)
-            ]
+                if ssid_rid:
+                    try:
+                        new_fw_frame = bool(new_fw_payloads or (DJI_RID_VENDOR_PREFIX in bytes(pkt)))
+                    except Exception:
+                        new_fw_frame = bool(new_fw_payloads)
+        if new_fw_frame and payloads:
+            # New-firmware DJI Beacon vendor bodies contain byte sequences that
+            # can look like legacy ODID fragments. Keep both parser paths
+            # separate so those fragments cannot create fake positions.
+            payloads = []
 
         # Debug scan logs
         if DEBUG_MODE:
@@ -163,8 +165,9 @@ def parse_frame(pkt) -> None:
                 b = decoded.get("basic_id")
                 l = decoded.get("location")
                 if b: _scan(f"  -> NewFW BasicID: {b}")
-                if l: _scan(f"  -> NewFW Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
-                            f"alt={l.get('alt_geodetic')}m dir={l.get('direction_deg')}")
+                if l and l.get("lat") is not None and l.get("lon") is not None:
+                    _scan(f"  -> NewFW Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
+                          f"alt={l.get('alt_geodetic')}m")
     except Exception as ex:
         if DEBUG_MODE:
             _scan(f"[ERR] parse_frame: {ex}")
@@ -376,6 +379,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="heartbeat interval seconds (default 2.0)")
     parser.add_argument("--min-gap",      default=DEFAULT_MIN_GAP, type=float,
                         help="minimum output gap for same SN (default 1.0)")
+    parser.add_argument("--lost-timeout", default=DEFAULT_LOST_TIMEOUT, type=float,
+                        help="aircraft offline threshold seconds (default 15)")
     parser.add_argument("--rssi-delta",   default=3, type=int)
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
@@ -392,6 +397,7 @@ _BASIC_CFG_ARG_DESTS = {
     "iface", "channel", "hop", "hop_5g", "scan_wifi_fast",
     "dwell_2g", "dwell_5g", "settle", "dwell_on_hit", "hit_cap",
     "time", "min_gap", "rssi_delta",
+    "lost_timeout",
     "change_on_rssi", "change_on_payload",
     "model_map", "history_file",
     "no_tui", "debug",
@@ -520,7 +526,7 @@ def _schedule_self_restart(tokens: list[str]) -> tuple[bool, str]:
     return True, "restarting"
 
 def main() -> None:
-    global PRINT_INTERVAL, MIN_GAP, CHANGE_ON_RSSI, CHANGE_ON_PL
+    global PRINT_INTERVAL, MIN_GAP, LOST_TIMEOUT, CHANGE_ON_RSSI, CHANGE_ON_PL
     global RSSI_DELTA, NO_TUI, DEBUG_MODE, current_channel, HISTORY_STORE_PATH, APP_CONFIG
     global APP_CONFIG_PATH, APP_CONFIG_PATH_IS_DEFAULT, APP_START_CWD
     global sniff_iface_name
@@ -549,6 +555,8 @@ def main() -> None:
                         help="heartbeat interval seconds (default 2.0)")
     parser.add_argument("--min-gap",      default=DEFAULT_MIN_GAP, type=float,
                         help="minimum output gap for same SN (default 1.0)")
+    parser.add_argument("--lost-timeout", default=DEFAULT_LOST_TIMEOUT, type=float,
+                        help="aircraft offline threshold seconds (default 15)")
     parser.add_argument("--rssi-delta",   default=3, type=int)
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
@@ -572,6 +580,7 @@ def main() -> None:
 
     PRINT_INTERVAL  = max(0.2, float(args.time))
     MIN_GAP         = max(0.0, float(args.min_gap))
+    LOST_TIMEOUT    = max(3.0, min(3600.0, float(args.lost_timeout)))
     CHANGE_ON_RSSI  = bool(args.change_on_rssi)
     CHANGE_ON_PL    = bool(args.change_on_payload)
     RSSI_DELTA      = max(1, int(args.rssi_delta))
@@ -595,6 +604,7 @@ def main() -> None:
     init_config_update_from_config(APP_CONFIG)
     init_app_update_from_config(APP_CONFIG)
     init_metrics_from_config(APP_CONFIG)
+    init_network_bindings_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
     init_api_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)

@@ -281,6 +281,7 @@ def _oobe_status_payload() -> dict:
         "config_path": APP_CONFIG_PATH or "",
         "interfaces": _iface_options_snapshot(),
         "selected_iface": _cfg_preferred_iface_from_cfg(cfg),
+        "network_bindings": _network_bindings_visual_payload(cfg),
         "channel": basic.get("channel"),
         "base_name": str(web.get("base_name") or "基站"),
         "base_lat": web.get("base_lat"),
@@ -318,6 +319,16 @@ def _oobe_save_config(body: dict | None) -> dict:
     basic["channel"] = channel
     basic["no_tui"] = True
     basic["auto_self_heal"] = True
+    nb_payload = payload.get("network_bindings") if isinstance(payload.get("network_bindings"), dict) else {}
+    if nb_payload:
+        cfg, bind_err = _network_bindings_apply_visual(cfg, nb_payload)
+        if bind_err:
+            return {"ok": False, "error": bind_err}
+    else:
+        cfg["network_bindings"] = _normalize_network_bindings_cfg({
+            "basic": basic,
+            "network_bindings": cfg.get("network_bindings") if isinstance(cfg.get("network_bindings"), dict) else {},
+        })
     web["base_name"] = str(payload.get("base_name") or web.get("base_name") or "基站").strip() or "基站"
     for k, lo, hi in (("base_lat", -90.0, 90.0), ("base_lon", -180.0, 180.0)):
         raw_v = payload.get(k)

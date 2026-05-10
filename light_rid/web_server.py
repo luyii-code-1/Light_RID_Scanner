@@ -4561,7 +4561,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
   <div class="topbar">
     <div>
       <div class="title">硬件配置助手</div>
-      <div class="sub">网卡、信道、采集恢复。</div>
+      <div class="sub">查看网卡硬件信息，切换工作模式，并处理采集异常。</div>
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回设置</button>
@@ -4572,7 +4572,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
   <div class="layout">
     <div class="stack">
       <div class="card">
-        <h2>当前状态</h2>
+        <h2>采集状态</h2>
         <div class="status-grid">
           <div class="status-tile"><div class="k">采集状态</div><div class="v" id="tile-state">-</div><div class="s" id="tile-msg">-</div></div>
           <div class="status-tile"><div class="k">当前网卡</div><div class="v" id="tile-active-iface">-</div><div class="s" id="tile-selected-iface">默认/未设置</div></div>
@@ -4581,7 +4581,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
         <div id="status" class="status-line" style="margin-top:12px">-</div>
       </div>
       <div class="card">
-        <h2>控制面板</h2>
+        <h2>网卡控制</h2>
         <div class="grid">
           <div class="field"><label for="iface">目标网卡</label><select id="iface"><option value="">请选择默认网卡</option></select></div>
           <div class="field"><label for="channel">目标信道</label><input id="channel" type="number" min="1" max="196" value="6"></div>
@@ -4618,6 +4618,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
 </div>
 <script>
 function qs(id){ return document.getElementById(id); }
+function esc(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function showStatus(s){ qs('status').textContent = String(s||'-'); }
 function showOut(t){ qs('output').textContent = String(t||'-'); }
 function loadTheme(){
@@ -4690,10 +4691,13 @@ function renderIfaceGrid(items){
     const mode = String(it.mode || '-');
     const band = it.supports_5g ? '2.4G / 5G' : '2.4G';
     const monitor = mode.toLowerCase().indexOf('monitor') >= 0;
+    const model = String(it.model || it.driver || '未知型号');
+    const driver = String(it.driver || '-');
+    const state = (it.admin_up === false ? '已禁用' : String(it.state || '-'));
     return '<div class="iface-card">'
-      +'<div class="iface-name">'+String(it.name || '-').replace(/</g,'&lt;')+'</div>'
+      +'<div class="iface-name">'+esc(it.name || '-')+'</div>'
       +'<div style="margin-top:10px"><span class="tag '+(monitor ? 'ok' : 'warn')+'">'+(monitor ? '监控模式' : '非监控模式')+'</span></div>'
-      +'<div class="iface-meta">模式: '+mode+'<br>频段: '+band+'<br>5G 支持: '+(it.supports_5g ? '是' : '否')+'</div>'
+      +'<div class="iface-meta">型号: '+esc(model)+'<br>驱动: '+esc(driver)+'<br>状态: '+esc(state)+'<br>模式: '+esc(mode)+'<br>频段: '+esc(band)+'<br>5G: '+(it.supports_5g ? '支持' : '未检测到')+'</div>'
       +'</div>';
   }).join('');
 }
@@ -4706,8 +4710,9 @@ async function refreshStatus(){
     sel.innerHTML = '<option value="">请选择固定网卡</option>' + items.map(it=>{
       const n = String(it.name||'');
       const m = String(it.mode||'');
+      const model = String(it.model || it.driver || '');
       const g = it.supports_5g ? '5G' : '2.4G';
-      return `<option value="${n}">${n} [${m}] ${g}</option>`;
+      return `<option value="${esc(n)}">${esc(n)} [${esc(m || 'net')}] ${esc(model || g)}</option>`;
     }).join('');
     if(old) sel.value = old;
     const snf = d.sniff_state || {};
@@ -4767,7 +4772,7 @@ header.app-shell-header{
   align-items:center;
   gap:10px;
   flex-wrap:nowrap;
-  overflow-x:auto;
+  overflow-x:visible;
   overflow-y:visible;
   white-space:nowrap;
   background:var(--panel);
@@ -4780,8 +4785,8 @@ header.app-shell-header::-webkit-scrollbar{height:6px}
   display:flex;
   align-items:center;
   gap:10px;
-  flex:1 0 auto;
-  min-width:max-content;
+  flex:1 1 auto;
+  min-width:0;
 }
 .main-title-block{
   min-width:0;
@@ -4806,13 +4811,14 @@ header.app-shell-header h1{
   gap:8px;
   justify-content:flex-end;
   min-width:0;
-  flex:1 0 auto;
+  flex:1 1 auto;
 }
 .main-menu-actions{
   display:flex;
   gap:8px;
   flex-wrap:nowrap;
   justify-content:flex-end;
+  position:relative;
 }
 .main-live-stats{
   display:flex;
@@ -4833,10 +4839,14 @@ header.app-shell-header h1{
 .main-live-stats .stat b{font-weight:700}
 .app-tab-nav{
   display:inline-grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;padding:3px;
-  width:auto;min-width:300px;margin:0;
+  width:auto;min-width:188px;margin:0;
   border:1px solid var(--border);background:var(--panel2);border-radius:4px;
   box-shadow:0 1px 2px rgba(0,0,0,.05)
 }
+.main-more-menu{position:relative;display:inline-flex}
+.main-more-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;min-width:150px;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--panel);box-shadow:0 14px 28px rgba(0,0,0,.22);z-index:45}
+.main-more-menu.open .main-more-pop{display:grid;gap:6px}
+.main-more-pop .header-link-btn{width:100%;text-align:left;box-shadow:none}
 .app-tab-btn,.header-link-btn,.btn-mini,.icon-btn,.info-card-close{
   border:1px solid var(--border);
   background:var(--panel2);
@@ -5012,7 +5022,7 @@ body.zone-alert-active header.app-shell-header,body.zone-alert-active header{box
 @keyframes officeFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @media (max-width: 960px){
   header.app-shell-header{gap:8px}
-  .app-tab-nav{min-width:286px}
+  .app-tab-nav{min-width:188px}
   .live-layout{grid-template-columns:1fr;height:auto}
   .live-card-panel{max-height:40vh}
   .history-layout{grid-template-rows:minmax(220px,1fr) minmax(300px,1fr);height:auto}
@@ -5061,7 +5071,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     el = document.createElement('div');
     el.id = 'zone-alarm';
     el.className = 'zone-alarm';
-    el.innerHTML = '<div class="zone-alarm-card"><div class="zone-alarm-title">区域告警</div><div id="zone-alarm-text" class="zone-alarm-text">检测到目标进入报警区域</div></div>';
+    el.innerHTML = '<div class="zone-alarm-card"><div class="zone-alarm-title">当前有飞机侵入报警区域</div><div id="zone-alarm-text" class="zone-alarm-text">请查看地图和列表中的报警标记</div></div>';
     document.body.appendChild(el);
     return el;
   }
@@ -5200,26 +5210,31 @@ _MAIN_PAGE_PATCH_JS = r"""
         if(!btn) return;
         navSet(btn.getAttribute('data-page') || 'live');
       });
-      header.appendChild(nav);
+      (qs('main-head-side') || header).appendChild(nav);
     }
     var clearBtn = qs('btn-clear-history');
-    if(clearBtn && !qs('btn-settings')){
-      var btn = document.createElement('button');
-      btn.id = 'btn-settings';
-      btn.className = 'btn-mini header-link-btn';
-      btn.type = 'button';
-      btn.textContent = '设置';
-      btn.addEventListener('click', function(){ location.href = '/settings'; });
-      clearBtn.parentNode.insertBefore(btn, clearBtn);
-    }
-    if(clearBtn && !qs('btn-logs')){
-      var logBtn = document.createElement('button');
-      logBtn.id = 'btn-logs';
-      logBtn.className = 'btn-mini header-link-btn';
-      logBtn.type = 'button';
-      logBtn.textContent = '日志';
-      logBtn.addEventListener('click', function(){ location.href = '/logs'; });
-      clearBtn.parentNode.insertBefore(logBtn, clearBtn);
+    var actions = qs('main-menu-actions') || (clearBtn ? clearBtn.parentNode : null);
+    if(actions && !qs('main-more-menu')){
+      var menu = document.createElement('div');
+      menu.id = 'main-more-menu';
+      menu.className = 'main-more-menu';
+      menu.innerHTML = '<button class="btn-mini header-link-btn" id="btn-main-more" type="button">更多</button><div class="main-more-pop" id="main-more-pop"></div>';
+      actions.appendChild(menu);
+      var pop = qs('main-more-pop');
+      [['btn-settings','设置','/settings'], ['btn-logs','日志','/logs']].forEach(function(item){
+        var b = document.createElement('button');
+        b.id = item[0];
+        b.className = 'btn-mini header-link-btn';
+        b.type = 'button';
+        b.textContent = item[1];
+        b.addEventListener('click', function(){ location.href = item[2]; });
+        pop.appendChild(b);
+      });
+      qs('btn-main-more').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        menu.classList.toggle('open');
+      });
+      document.addEventListener('click', function(){ menu.classList.remove('open'); });
     }
     ['btn-freeze','btn-web-notify','btn-clear-history'].forEach(function(id){
       var node = qs(id);
@@ -5599,12 +5614,12 @@ _MAIN_PAGE_PATCH_JS = r"""
     });
     var sig = sigParts.sort().join(' || ');
     var lineText = lines.join(' / ');
-    qs('zone-alarm-text').textContent = '检测到目标进入自定义报警区域：' + lineText;
+    qs('zone-alarm-text').textContent = lineText ? ('侵入目标：' + lineText) : '请查看地图和列表中的报警标记';
     overlay.classList.add('show');
     if(sig !== alarmLastSig){
-      showBanner('区域告警：' + lineText, 'warn', 5200, {persist:false});
+      showBanner('当前有飞机侵入报警区域：' + lineText, 'warn', 5200, {persist:false});
       if(webNotifyEnabled && window.Notification && Notification.permission === 'granted'){
-        try{ new Notification('Light RID Scanner 区域告警', {body:lineText}); }catch(_e){}
+        try{ new Notification('当前有飞机侵入报警区域', {body:lineText}); }catch(_e){}
       }
       alarmLastSig = sig;
     }
@@ -6128,13 +6143,17 @@ input,select{height:42px;border:1px solid var(--border);background:var(--card2);
   <div class="field"><label>网页登录账号</label><input id="username" autocomplete="username" placeholder="可选"></div>
   <div class="field"><label>网页登录密码</label><input id="password" type="password" autocomplete="new-password" placeholder="可选"></div>
 </div>
-<div class="actions"><button class="btn" id="btn-refresh" type="button">刷新网卡</button><button class="btn" id="btn-location" type="button">读取浏览器位置</button><button class="btn primary" id="btn-save" type="button">保存并进入系统</button></div>
+<div class="actions"><button class="btn" id="btn-refresh" type="button">刷新网卡</button><button class="btn" id="btn-custom-bind" type="button">自定义网卡绑定</button><button class="btn" id="btn-location" type="button">读取浏览器位置</button><button class="btn primary" id="btn-save" type="button">保存并进入系统</button></div>
+<div class="field full" id="bind-panel" style="display:none;margin-top:14px"><label>网卡用途</label><div id="bind-list" class="grid"></div><div class="micro">“扫描”会同步为默认网卡；“AP热点网页服务”使用 172.16.0.1/24、内置 DHCP 和 172.16.0.1:80。</div></div>
 <div id="status" class="status">-</div>
 </main><script>
-function qs(id){return document.getElementById(id)}function pageHeaders(extra){var h={'X-LightRID-Page':'1'};if(extra){Object.keys(extra).forEach(function(k){h[k]=extra[k]})}return h}function setStatus(t,e){qs('status').textContent=t||'-';qs('status').classList.toggle('err',!!e)}function enc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}var authRedirecting=false;function authExpired(r,d){var e=String((d&&d.error)||'');return r&&r.status===401&&((d&&d.auth_expired)||e==='login required'||e==='auth required')}function redirectLogin(){if(authRedirecting)return;authRedirecting=true;location.href='/login?next=/'}
-async function loadStatus(){const r=await fetch('/api/oobe/status',{cache:'no-store',headers:pageHeaders()});const d=await r.json().catch(()=>({}));if(authExpired(r,d)){redirectLogin();throw new Error('login required')}if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));qs('reason').textContent=(d.oobe&&d.oobe.reason)||'需要完成基础配置。';var opts=['<option value="">请选择默认网卡</option>'];(d.interfaces||[]).forEach(function(it){var name=String(it.name||'');if(name)opts.push('<option value="'+enc(name)+'">'+enc(name+' ['+(it.mode||'')+'] '+(it.supports_5g?'5G':'2.4G'))+'</option>')});qs('iface').innerHTML=opts.join('');qs('iface').value=d.selected_iface||'';qs('channel').value=String(d.channel||6);qs('base-name').value=String(d.base_name||'基站');qs('base-lat').value=d.base_lat==null?'':String(d.base_lat);qs('base-lon').value=d.base_lon==null?'':String(d.base_lon);setStatus((d.interfaces||[]).length?'请选择网卡后保存。':'未检测到无线网卡。',!(d.interfaces||[]).length)}
-async function save(){var body={iface:qs('iface').value,channel:Number(qs('channel').value||6),base_name:qs('base-name').value,base_lat:qs('base-lat').value,base_lon:qs('base-lon').value,username:qs('username').value,password:qs('password').value};setStatus('正在保存...',false);const r=await fetch('/api/oobe/save',{method:'POST',headers:pageHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});const d=await r.json().catch(()=>({}));if(authExpired(r,d)){redirectLogin();throw new Error('login required')}if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));setStatus(d.login_required?'已保存，请先登录。':'已保存，正在进入系统...',false);setTimeout(function(){location.href=String(d.next||'/')},600)}
-qs('btn-refresh').addEventListener('click',function(){loadStatus().catch(e=>setStatus(e.message||String(e),true))});qs('btn-save').addEventListener('click',function(){save().catch(e=>setStatus(e.message||String(e),true))});qs('btn-location').addEventListener('click',function(){if(!navigator.geolocation){setStatus('浏览器不支持定位',true);return}navigator.geolocation.getCurrentPosition(function(pos){qs('base-lat').value=String(pos.coords.latitude||'');qs('base-lon').value=String(pos.coords.longitude||'');setStatus('已读取浏览器位置',false)},function(err){setStatus('定位失败: '+(err&&err.message?err.message:err),true)},{enableHighAccuracy:true,timeout:12000,maximumAge:0})});loadStatus().catch(e=>setStatus(e.message||String(e),true));
+function qs(id){return document.getElementById(id)}function pageHeaders(extra){var h={'X-LightRID-Page':'1'};if(extra){Object.keys(extra).forEach(function(k){h[k]=extra[k]})}return h}function setStatus(t,e){qs('status').textContent=t||'-';qs('status').classList.toggle('err',!!e)}function enc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}var authRedirecting=false;var oobeIfaces=[];var oobeBindings={items:[],ap:{}};function authExpired(r,d){var e=String((d&&d.error)||'');return r&&r.status===401&&((d&&d.auth_expired)||e==='login required'||e==='auth required')}function redirectLogin(){if(authRedirecting)return;authRedirecting=true;location.href='/login?next=/'}
+function roleOpts(sel){var roles=[['none','None'],['scan','扫描'],['web','网页服务'],['ap_web','AP热点网页服务'],['disabled','禁用'],['idle','闲置']];return roles.map(function(r){return '<option value="'+r[0]+'" '+(r[0]===sel?'selected':'')+'>'+r[1]+'</option>'}).join('')}
+function renderBindList(){var map={};(oobeBindings.items||[]).forEach(function(x){if(x&&x.iface)map[x.iface]=x.role||'none'});var selected=qs('iface').value||'';if(selected&&!map[selected])map[selected]='scan';qs('bind-list').innerHTML=(oobeIfaces||[]).map(function(it){var name=String(it.name||'');if(!name)return '';var role=map[name]||(name===selected?'scan':String(it.detected_role||'none'));var meta=(it.model?('型号 '+it.model+' | '):'')+(it.is_wireless?'无线 ':'有线 ')+(it.mode||'')+(it.admin_up===false?' | 已禁用':'')+(it.state?(' | '+it.state):'')+((it.ipv4&&it.ipv4.length)?(' | '+it.ipv4.join(',')):'');return '<div class="field"><label>'+enc(name)+'</label><select class="bind-role" data-iface="'+enc(name)+'">'+roleOpts(role)+'</select><div class="micro">'+enc(meta)+'</div></div>'}).join('')||'<div class="micro">未检测到网卡</div>'}
+function collectBindings(){var items=[].slice.call(document.querySelectorAll('.bind-role')).map(function(sel){return {iface:sel.getAttribute('data-iface')||'',role:sel.value||'none'}}).filter(function(x){return x.iface});if(!items.some(function(x){return x.role==='scan'})&&qs('iface').value)items.push({iface:qs('iface').value,role:'scan'});return {items:items,ap:Object.assign({ssid:'LightRID-HotSpot',password:'',channel:6,address:'172.16.0.1',cidr:'172.16.0.1/24',dhcp_start:'172.16.0.20',dhcp_end:'172.16.0.240',http_port:80},oobeBindings.ap||{})}}
+async function loadStatus(){const r=await fetch('/api/oobe/status',{cache:'no-store',headers:pageHeaders()});const d=await r.json().catch(()=>({}));if(authExpired(r,d)){redirectLogin();throw new Error('login required')}if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));qs('reason').textContent=(d.oobe&&d.oobe.reason)||'需要完成基础配置。';oobeIfaces=d.interfaces||[];oobeBindings=d.network_bindings||{items:[],ap:{}};var opts=['<option value="">请选择默认网卡</option>'];(oobeIfaces||[]).forEach(function(it){var name=String(it.name||'');var kind=it.is_wireless?((it.mode||'wireless')+' '+(it.supports_5g?'5G':'2.4G')):'LAN';if(it.admin_up===false)kind+=' disabled';if(name)opts.push('<option value="'+enc(name)+'">'+enc(name+' ['+kind+']')+'</option>')});qs('iface').innerHTML=opts.join('');qs('iface').value=d.selected_iface||'';qs('channel').value=String(d.channel||6);qs('base-name').value=String(d.base_name||'基站');qs('base-lat').value=d.base_lat==null?'':String(d.base_lat);qs('base-lon').value=d.base_lon==null?'':String(d.base_lon);renderBindList();setStatus((oobeIfaces||[]).length?'请选择网卡后保存。':'未检测到网卡。',!(oobeIfaces||[]).length)}
+async function save(){var body={iface:qs('iface').value,channel:Number(qs('channel').value||6),base_name:qs('base-name').value,base_lat:qs('base-lat').value,base_lon:qs('base-lon').value,username:qs('username').value,password:qs('password').value,network_bindings:collectBindings()};setStatus('正在保存...',false);const r=await fetch('/api/oobe/save',{method:'POST',headers:pageHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});const d=await r.json().catch(()=>({}));if(authExpired(r,d)){redirectLogin();throw new Error('login required')}if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));setStatus(d.login_required?'已保存，请先登录。':'已保存，正在进入系统...',false);setTimeout(function(){location.href=String(d.next||'/')},600)}
+qs('btn-refresh').addEventListener('click',function(){loadStatus().catch(e=>setStatus(e.message||String(e),true))});qs('btn-custom-bind').addEventListener('click',function(){var p=qs('bind-panel');p.style.display=p.style.display==='none'?'block':'none';renderBindList()});qs('iface').addEventListener('change',renderBindList);qs('btn-save').addEventListener('click',function(){save().catch(e=>setStatus(e.message||String(e),true))});qs('btn-location').addEventListener('click',function(){if(!navigator.geolocation){setStatus('浏览器不支持定位',true);return}navigator.geolocation.getCurrentPosition(function(pos){qs('base-lat').value=String(pos.coords.latitude||'');qs('base-lon').value=String(pos.coords.longitude||'');setStatus('已读取浏览器位置',false)},function(err){setStatus('定位失败: '+(err&&err.message?err.message:err),true)},{enableHighAccuracy:true,timeout:12000,maximumAge:0})});loadStatus().catch(e=>setStatus(e.message||String(e),true));
 </script></body></html>"""
 
 def _build_settings_html() -> str:
@@ -6179,6 +6198,9 @@ body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--
 .tab.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 12%, var(--card2));box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent)}
 body.theme-light .tabs{background:var(--card2)}
 body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(--card2));border-color:var(--blue)}
+.settings-jump{display:flex;gap:8px;overflow-x:auto;padding:0 2px 12px;margin:0 auto;max-width:980px;scrollbar-width:thin}
+.settings-jump{justify-content:center}
+.settings-jump .btn{flex:0 0 auto;padding:8px 11px}
 .panel{display:none}.panel.active{display:block}
 .raw-layout{display:grid;grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr);gap:12px;min-width:0}
 .raw-pane{min-width:0;display:grid;gap:10px;align-content:start}
@@ -6365,7 +6387,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   <div class="topbar">
     <div>
       <div class="title">设置</div>
-      <div class="sub">扫描采集、地图、通知、访问控制和运行工具集中在本页。</div>
+      <div class="sub">常用运行项在配置面板；文件级修改放在原始配置。</div>
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
@@ -6378,7 +6400,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
   <div class="draft-bar">
     <div class="draft-copy">
       <div class="draft-title" id="draft-title">当前没有未保存修改</div>
-      <div class="draft-meta" id="draft-meta">未保存改动按配置分组标记；测试结果独立于配置文件。</div>
+      <div class="draft-meta" id="draft-meta">修改会先进入草稿；保存前可测试，或直接写入配置。</div>
     </div>
     <div class="draft-actions">
       <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
@@ -6390,20 +6412,28 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     <button class="tab active" data-tab="visual" type="button">配置面板</button>
     <button class="tab" data-tab="raw" type="button">原始配置</button>
   </div>
+  <div class="settings-jump" aria-label="设置分组导航">
+    <button class="btn ghost" data-jump="settings-capture" type="button">采集</button>
+    <button class="btn ghost" data-jump="settings-map" type="button">地图</button>
+    <button class="btn ghost" data-jump="settings-access" type="button">访问</button>
+    <button class="btn ghost" data-jump="settings-status" type="button">状态</button>
+    <button class="btn ghost" data-jump="settings-data" type="button">数据</button>
+    <button class="btn ghost" data-jump="settings-runtime" type="button">诊断</button>
+  </div>
   </div>
   <div class="panel active" data-tab="visual">
     <div class="visual-grid">
       <div class="stack">
-        <div class="stack-label">核心配置</div>
-        <div class="card" data-card-key="capture">
+        <div class="stack-label">采集与访问</div>
+        <div class="card" id="settings-capture" data-card-key="capture">
           <div class="section-head">
             <div>
               <h2>采集</h2>
-              <div class="section-copy">采集网卡、RID 信道、刷新节奏、历史缓存和识别库来源。</div>
+              <div class="section-copy">设置采集网卡、信道、离线判定和机型识别库。</div>
             </div>
           </div>
           <div class="grid" style="margin-top:14px">
-            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">未绑定</option></select></div>
+            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">未绑定</option></select><div class="micro"><button class="btn ghost" id="btn-network-bindings" type="button">自定义网卡绑定</button></div></div>
             <div class="field">
               <label>固定信道</label>
               <div class="field-inline">
@@ -6413,10 +6443,15 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               </div>
               <div class="micro" id="channel-hint" style="display:none"></div>
             </div>
-            <div class="field"><label>日志刷新间隔(s)</label><input id="cfg-time" type="number" step="0.1"></div>
-            <div class="field"><label>最短重复间隔(s)</label><input id="cfg-min-gap" type="number" step="0.1"></div>
-            <div class="field"><label>信号变化阈值</label><input id="cfg-rssi-delta" type="number"></div>
-            <div class="field full"><label>模型映射文件</label><input id="cfg-model-map" type="text"></div>
+            <div class="field"><label>飞机离线判定(s)</label><input id="cfg-lost-timeout" type="number" min="3" max="3600" step="1"></div>
+            <div class="field full"><label>机型识别库</label><input id="cfg-model-map" type="text"></div>
+            <div style="display:none">
+              <input id="cfg-time" type="number" step="0.1">
+              <input id="cfg-min-gap" type="number" step="0.1">
+              <input id="cfg-rssi-delta" type="number">
+              <input id="cfg-rssi-change" type="checkbox">
+              <input id="cfg-payload-change" type="checkbox">
+            </div>
             <div class="field full" data-card-key="capture">
               <label>识别库在线更新</label>
               <div class="model-update-row">
@@ -6424,7 +6459,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <input id="cfg-model-update-url" type="text" placeholder="留空使用官方源">
                 <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
               </div>
-              <div class="micro" id="model-update-state">本地识别库可从官方源或自定义地址同步。</div>
+              <div class="micro" id="model-update-state">识别库可从默认源或自定义地址同步。</div>
               <div class="model-update-row" style="margin-top:10px">
                 <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
                 <div class="micro" id="app-update-state">当前版本与最新版本尚未检查。</div>
@@ -6436,8 +6471,6 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           </div>
           <div class="checks" style="margin-top:14px">
             <label><input id="cfg-heal" type="checkbox"> 自愈恢复</label>
-            <label><input id="cfg-rssi-change" type="checkbox"> 信号变化时更新</label>
-            <label><input id="cfg-payload-change" type="checkbox"> 数据变化时更新</label>
             <label><input id="cfg-debug" type="checkbox"> 调试日志</label>
           </div>
           <details class="advanced" style="margin-top:14px">
@@ -6456,11 +6489,11 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             </div>
           </details>
         </div>
-        <div class="card" data-card-key="map">
+        <div class="card" id="settings-map" data-card-key="map">
           <div class="section-head">
             <div>
               <h2>地图与基站</h2>
-              <div class="section-copy">基站坐标、地图默认视角、航向参考和自动回中参数。</div>
+              <div class="section-copy">控制地图中心、基站坐标、默认缩放和航向参考。</div>
             </div>
           </div>
           <div class="grid">
@@ -6485,17 +6518,17 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="list-head">
             <div>
               <h2>报警区域</h2>
-              <div class="section-copy">矩形报警区域由 A/B 两组经纬度边界组成。</div>
+              <div class="section-copy">用两组经纬度边界定义矩形告警范围。</div>
             </div>
             <button class="btn" id="btn-zone-add" type="button">添加区域</button>
           </div>
           <div id="zone-list" class="list-wrap"></div>
         </div>
-        <div class="card access-group" data-card-key="access">
+        <div class="card access-group" id="settings-access" data-card-key="access">
           <div class="section-head">
             <div>
               <h2>通知与访问控制</h2>
-              <div class="section-copy">通知发送、网页会话、PassKey、外部 API Token 和访问白名单集中在这里。</div>
+              <div class="section-copy">管理通知、登录方式、API Token 和访问来源规则。</div>
             </div>
           </div>
           <div class="access-subgrid">
@@ -6639,12 +6672,12 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
         </div>
       </div>
       <div class="stack">
-        <div class="stack-label">运行与页面</div>
-        <div class="card">
+        <div class="stack-label">状态与维护</div>
+        <div class="card" id="settings-status">
           <div class="section-head">
             <div>
               <h2>主机状态</h2>
-              <div class="section-copy">当前资源占用、网络地址、默认网卡和采集状态。</div>
+              <div class="section-copy">查看主机负载、网络地址和当前采集状态。</div>
             </div>
             <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
           </div>
@@ -6655,11 +6688,11 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
           </div>
         </div>
-        <div class="card">
+        <div class="card" id="settings-data">
           <div class="section-head">
             <div>
               <h2>权限与 systemd 服务</h2>
-              <div class="section-copy">检查当前运行身份，使用 rid 专用账号运行服务，并保留采集所需的网络能力。</div>
+              <div class="section-copy">检查运行权限；需要修复时再写入 systemd 配置。</div>
             </div>
           </div>
           <div id="runtime-security-alert" class="security-alert">
@@ -6672,16 +6705,16 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="row-actions" style="margin-top:14px">
             <button class="btn ghost" id="btn-service-refresh" type="button">刷新服务状态</button>
             <button class="btn" id="btn-service-register" type="button">注册/更新服务</button>
-            <button class="btn" id="btn-iw-install" type="button">安装 iw</button>
+            <button class="btn" id="btn-iw-install" type="button">安装无线工具</button>
           </div>
-          <div class="micro" style="margin-top:10px">修复会创建/确认 rid 账号、授予配置与缓存写权限，并把服务注册为 rid + CAP_NET_ADMIN/CAP_NET_RAW；网页输入的 sudo 密码只用于本次请求，不会保存。</div>
+          <div class="micro" style="margin-top:10px">修复会创建运行账号、整理文件权限，并授予采集与热点所需能力；sudo 密码只用于本次操作。</div>
           <div id="status-system-service" class="status">正在读取服务状态...</div>
         </div>
         <div class="card" data-card-key="metrics">
           <div class="section-head">
             <div>
               <h2>节点负载</h2>
-              <div class="section-copy">CPU、内存、温度、系统负载和 AP 数的历史曲线。</div>
+              <div class="section-copy">记录 CPU、内存、温度、负载和 AP 数趋势。</div>
             </div>
           </div>
           <div class="metric-toolbar">
@@ -6718,7 +6751,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="section-head">
             <div>
               <h2>设置与扫描数据</h2>
-              <div class="section-copy">设置文件和扫描数据分开储存。这里可分别导出或导入；设置导入默认覆盖，扫描数据导入会先询问增量更新还是覆盖。</div>
+              <div class="section-copy">分别导入导出配置与扫描数据，避免两类文件混用。</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -6738,24 +6771,8 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
         <div class="card">
           <div class="section-head">
             <div>
-              <h2>主页工具</h2>
-              <div class="section-copy">主页列表冻结、浏览器通知、历史数据和初始化入口。</div>
-            </div>
-          </div>
-          <div class="row-actions" style="margin-top:14px">
-            <button class="btn" id="btn-home-freeze" type="button">返回主页并冻结列表</button>
-            <button class="btn" id="btn-settings-web-notify" type="button">网页通知</button>
-            <button class="btn warn" id="btn-settings-clear-history" type="button">清空历史</button>
-            <button class="btn" id="btn-oobe-simple" type="button">简化 OOBE</button>
-            <button class="btn" id="btn-oobe-full" type="button">完整 OOBE</button>
-          </div>
-          <div id="status-home-actions" class="status">-</div>
-        </div>
-        <div class="card">
-          <div class="section-head">
-            <div>
               <h2>许可协议</h2>
-              <div class="section-copy">查看当前 EULA 阅读确认状态；撤回后会重新进入首次运行许可确认。</div>
+              <div class="section-copy">查看或撤回 EULA 确认；撤回后会重新要求确认。</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -6768,7 +6785,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="section-head">
             <div>
               <h2>浏览器偏好</h2>
-              <div class="section-copy">新版固件解析显示偏好保存在当前浏览器。</div>
+              <div class="section-copy">仅影响当前浏览器的显示偏好。</div>
             </div>
           </div>
           <div class="checks pref-checks" style="margin-top:14px">
@@ -6776,11 +6793,11 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           </div>
           <div class="micro">只控制当前浏览器显示；后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
         </div>
-        <div class="card">
+        <div class="card" id="settings-runtime">
           <div class="section-head">
             <div>
               <h2>实时 AP</h2>
-              <div class="section-copy">附近 AP 列表和最近扫描日志，内容来自运行时缓存。</div>
+              <div class="section-copy">查看最近扫描到的 AP 和运行日志片段。</div>
             </div>
             <button class="btn ghost" id="btn-refresh-runtime" type="button">刷新</button>
           </div>
@@ -6840,6 +6857,30 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     </div>
   </div>
 <div id="settings-toast-stack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+<div class="modal-mask" id="network-bind-modal">
+  <div class="modal-card wide">
+    <h3>自定义网卡绑定</h3>
+    <div class="section-copy">按网卡现状分配用途。“扫描”会写回默认采集网卡；AP 热点使用 hostapd、内置 DHCP 和 172.16.0.1:80。</div>
+    <div class="model-editor">
+      <div class="model-editor-toolbar">
+        <button class="btn ghost" id="btn-network-bind-refresh" type="button">扫描网卡</button>
+        <button class="btn" id="btn-network-bind-save" type="button">写入草稿</button>
+        <button class="btn warn" id="btn-network-bind-apply" type="button">应用到系统</button>
+      </div>
+      <div class="grid">
+        <div class="field"><label>热点 SSID</label><input id="net-ap-ssid" type="text"></div>
+        <div class="field"><label>热点密码</label><input id="net-ap-password" type="password" placeholder="留空为开放热点"></div>
+        <div class="field"><label>热点信道</label><input id="net-ap-channel" type="number" min="1" max="196"></div>
+        <div class="field"><label>HTTP 监听</label><input id="net-ap-http" type="text" value="172.16.0.1:80" disabled></div>
+      </div>
+      <div id="network-bind-list" class="list-wrap"></div>
+      <div id="status-network-bind" class="status">-</div>
+    </div>
+    <div class="row-actions" style="margin-top:14px;justify-content:flex-end">
+      <button class="btn ghost" id="btn-network-bind-close" type="button">关闭</button>
+    </div>
+  </div>
+</div>
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
     <h3>再次验证</h3>
@@ -6891,7 +6932,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
         <button class="btn" id="btn-model-map-save" type="button">保存列表</button>
       </div>
       <div id="model-map-list" class="model-map-list"></div>
-      <div class="micro" id="model-map-editor-state">当前模型映射文件保存识别库条目。</div>
+      <div class="micro" id="model-map-editor-state">当前机型识别库保存识别条目。</div>
     </div>
     <div class="row-actions" style="margin-top:14px"><button class="btn ghost" id="btn-model-map-close" type="button">关闭</button></div>
   </div>
@@ -6917,7 +6958,7 @@ var lastSystemServiceStatus = null;
 var loginLinks = [];
 var modelMapRows = [];
 var modelMapPath = '';
-var settingsState = {visualLoaded:false, rawLoaded:false, rawUnlocked:false, rawRoot:'', rawTree:null, rawSelectedPath:'', rawSelectedRel:'', channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}, authConfigured:false};
+var settingsState = {visualLoaded:false, rawLoaded:false, rawUnlocked:false, rawRoot:'', rawTree:null, rawSelectedPath:'', rawSelectedRel:'', channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}, authConfigured:false, networkBindings:null, interfaceItems:[]};
 var metricsState = {window:'12h', zoom:1, panSec:0, hover:null, drag:null, chartMeta:{}, items:[]};
 var SETTINGS_DRAFT_SECTIONS = [
   {key:'capture', label:'采集'},
@@ -7258,63 +7299,6 @@ function saveBrowserPrefs(){
   }
   showNotice('页面偏好已保存到当前浏览器。', 'ok', 2200);
 }
-function notifySettingsButtonText(){
-  if(!('Notification' in window)) return '网页通知(不支持)';
-  if(Notification.permission === 'granted') return '网页通知(已开)';
-  if(Notification.permission === 'denied') return '网页通知(已拒绝)';
-  return '网页通知';
-}
-function updateHomeActionButtons(){
-  var notifyBtn = qs('btn-settings-web-notify');
-  if(notifyBtn){
-    notifyBtn.textContent = notifySettingsButtonText();
-    notifyBtn.disabled = !('Notification' in window) || Notification.permission === 'denied';
-  }
-}
-async function requestSettingsWebNotify(){
-  if(!('Notification' in window)){
-    setStatus('status-home-actions', '当前浏览器不支持网页通知。', true);
-    return;
-  }
-  try{
-    if(Notification.permission !== 'granted'){
-      await Notification.requestPermission();
-    }
-    updateHomeActionButtons();
-    if(Notification.permission === 'granted'){
-      try{ new Notification('Light RID Scanner 通知已启用', {body:'将推送飞机上下线事件'}); }catch(_e){}
-      setStatus('status-home-actions', '网页通知已启用。', false);
-      showNotice('网页通知已启用。', 'ok', 2400);
-    }else{
-      setStatus('status-home-actions', '网页通知未授权。', true);
-      showNotice('网页通知未授权。', 'warn', 3200);
-    }
-  }catch(e){
-    setStatus('status-home-actions', '网页通知申请失败: ' + (e.message || e), true);
-  }
-}
-function freezeHomeOnReturn(){
-  try{ localStorage.setItem(FREEZE_ON_HOME_KEY, '1'); }catch(_e){}
-  location.href = '/';
-}
-async function clearHistoryFromSettings(){
-  if(!confirm('清空历史无人机记录，并删除本地缓存文件？')) return;
-  var btn = qs('btn-settings-clear-history');
-  if(btn) btn.disabled = true;
-  setStatus('status-home-actions', '清空历史中...', false);
-  try{
-    const data = await postJson('/api/history/clear', {});
-    var msg = '历史已清空' + (typeof data.cleared === 'number' ? ('（' + data.cleared + '架）') : '') + '。';
-    setStatus('status-home-actions', msg, false);
-    showNotice(msg, 'ok', 2600);
-    await loadRuntimePanel().catch(function(){});
-  }catch(e){
-    setStatus('status-home-actions', '清空失败: ' + (e.message || e), true);
-    showNotice(e.message || e, 'warn', 3800);
-  }finally{
-    if(btn) btn.disabled = false;
-  }
-}
 function renderEulaState(eula){
   eula = eula || {};
   var status = qs('status-eula');
@@ -7467,20 +7451,10 @@ function renderSystemServiceStatus(data){
   data = data || {};
   lastSystemServiceStatus = data;
   var iw = data.iw || {};
+  var wirelessToolsMissing = !iw.available || !iw.hostapd_available;
   var sec = data.security || {};
   var lines = [];
   if(data.supported){
-    lines.push('服务: ' + String(data.service_name || 'light-rid-scanner.service'));
-    lines.push('注册: ' + (data.registered ? '已注册' : '未注册')
-      + ' | 开机自启: ' + String(data.enabled || 'unknown')
-      + ' | 运行状态: ' + String(data.active || 'unknown'));
-    lines.push('当前进程: ' + String(data.current_user || '-') + ' / uid=' + String(data.current_uid == null ? '-' : data.current_uid)
-      + (data.running_as_root ? ' | root 高权限运行' : ' | 非 root'));
-    lines.push('专用账号: ' + String(data.dedicated_user || 'rid') + (data.dedicated_user_exists ? ' 已存在' : ' 未创建')
-      + ' | 服务账号: ' + String(data.actual_service_user || '未声明'));
-    if(Array.isArray(data.service_capabilities) && data.service_capabilities.length) lines.push('采集能力: ' + data.service_capabilities.join(', '));
-    if(data.service_path) lines.push('服务文件: ' + String(data.service_path));
-    if(data.exec_start) lines.push('启动命令: ' + String(data.exec_start));
     if(data.registered && data.unit_matches === false) lines.push('当前服务文件与本页生成的启动参数不一致，可点击注册/更新服务。');
     if(data.running_as_root) lines.push('安全告警: 当前网页服务处于 root 权限，建议一键修复为 rid 专用账号运行。');
     if(data.registered && !data.service_uses_dedicated_user) lines.push('安全告警: 当前服务文件未声明 rid 专用账号。');
@@ -7488,17 +7462,16 @@ function renderSystemServiceStatus(data){
     lines.push('systemd: 不可用' + (data.reason ? ('，' + String(data.reason)) : ''));
     if(data.manual_hint) lines.push(String(data.manual_hint));
   }
-  lines.push('iw: ' + (iw.available ? ('可用 ' + String(iw.path || '')) : '未安装'));
-  if(iw.message && !iw.available) lines.push(String(iw.message));
-  if(iw.manual_hint && !iw.available) lines.push(String(iw.manual_hint));
+  if(iw.message && wirelessToolsMissing) lines.push(String(iw.message));
+  if(iw.manual_hint && wirelessToolsMissing) lines.push(String(iw.manual_hint));
   if(data.last_error) lines.push('状态读取错误: ' + String(data.last_error));
   var securityWarn = !!(data.running_as_root || (data.registered && !data.service_uses_dedicated_user) || !data.dedicated_user_exists);
-  setStatus('status-system-service', lines.join('\\n'), !iw.available || (!!data.supported && securityWarn));
+  setStatus('status-system-service', lines.join('\\n') || '-', wirelessToolsMissing || (!!data.supported && securityWarn));
   renderRuntimeSecurityAlert(data, sec);
   var regBtn = qs('btn-service-register');
   if(regBtn) regBtn.disabled = !data.supported || !data.can_elevate || !data.dedicated_user_exists;
   var iwBtn = qs('btn-iw-install');
-  if(iwBtn) iwBtn.disabled = !!iw.available || !iw.can_install;
+  if(iwBtn) iwBtn.disabled = (!!iw.available && !!iw.hostapd_available) || !iw.can_install;
   var repairBtn = qs('btn-security-repair');
   if(repairBtn) repairBtn.disabled = !data.supported || !data.can_elevate;
 }
@@ -7550,17 +7523,17 @@ async function registerSystemdServiceFromSettings(){
   }
 }
 async function installIwFromSettings(){
-  if(!confirm('将执行 apt-get update 和 apt-get install -y iw。继续？')) return;
+  if(!confirm('将执行 apt-get update，并安装 iw 与 hostapd。继续？')) return;
   var btn = qs('btn-iw-install');
   try{
     if(btn) btn.disabled = true;
-    setStatus('status-system-service', '正在安装 iw...', false);
-    const body = await privilegedBody({confirm:true}, '安装 iw 需要 root 权限。请输入 sudo 密码；密码只用于本次请求，不会保存。');
+    setStatus('status-system-service', '正在安装无线工具...', false);
+    const body = await privilegedBody({confirm:true}, '安装 iw 和 hostapd 需要 root 权限；密码只用于本次操作。');
     const data = await postJson('/api/settings/iw/install', body);
     if(data.status) renderSystemServiceStatus(data.status);
-    showNotice(data.message || 'iw 安装完成。', 'ok', 3600);
+    showNotice(data.message || '无线工具安装完成。', 'ok', 3600);
   }catch(e){
-    setStatus('status-system-service', 'iw 安装失败: ' + (e.message || e), true);
+    setStatus('status-system-service', '无线工具安装失败: ' + (e.message || e) + '\\n请手动执行: sudo apt-get update && sudo apt-get install -y iw hostapd', true);
     showNotice(e.message || e, 'warn', 4600);
   }finally{
     await loadSystemServiceStatus().catch(function(){});
@@ -8166,6 +8139,7 @@ function collectVisualPayload(){
       channel_use_default: !!settingsState.channelUseDefault,
       time: n('cfg-time'),
       min_gap: n('cfg-min-gap'),
+      lost_timeout: n('cfg-lost-timeout'),
       rssi_delta: n('cfg-rssi-delta'),
       model_map: v('cfg-model-map'),
       history_file: v('cfg-history-file'),
@@ -8228,13 +8202,14 @@ function collectVisualPayload(){
       enabled: check('cfg-metrics-enabled'),
       retention_days: n('cfg-metrics-retention'),
       temperature_source: v('cfg-metrics-temp-source') || 'auto'
-    }
+    },
+    network_bindings: collectNetworkBindings()
   };
 }
 function visualPayloadSections(payload){
   payload = payload || {};
   return {
-    capture: Object.assign({}, payload.basic || {}, {model_update: payload.model_update || {}, app_update: payload.app_update || {}}),
+    capture: Object.assign({}, payload.basic || {}, {model_update: payload.model_update || {}, app_update: payload.app_update || {}, network_bindings: payload.network_bindings || {}}),
     map: {
       dji_lookup_url: ((payload.web || {}).dji_lookup_url),
       base_name: ((payload.web || {}).base_name),
@@ -8740,10 +8715,176 @@ function fillIfaceOptions(items, selected){
   (Array.isArray(items)?items:[]).forEach(function(it){
     const name = String(it.name || '');
     if(!name) return;
-    opts.push('<option value="'+enc(name)+'">'+enc(name)+' ['+enc(String(it.mode||''))+'] '+(it.supports_5g ? '5G' : '2.4G')+'</option>');
+    var kind = it.is_wireless ? ((it.mode ? String(it.mode) : 'wireless') + ' ' + (it.supports_5g ? '5G' : '2.4G')) : 'LAN';
+    if(it.admin_up === false) kind += ' disabled';
+    var model = it.model ? (' ' + String(it.model)) : '';
+    opts.push('<option value="'+enc(name)+'">'+enc(name)+' ['+enc(kind + model)+']</option>');
   });
   sel.innerHTML = opts.join('');
   sel.value = selected || '';
+}
+function networkRoleOptions(selected){
+  var roles = (settingsState.networkBindings && Array.isArray(settingsState.networkBindings.roles)) ? settingsState.networkBindings.roles : [
+    {key:'none', label:'None'},
+    {key:'scan', label:'扫描'},
+    {key:'web', label:'网页服务'},
+    {key:'ap_web', label:'AP热点网页服务'},
+    {key:'disabled', label:'禁用'},
+    {key:'idle', label:'闲置'}
+  ];
+  return roles.map(function(role){
+    var key = String(role.key || 'none');
+    return '<option value="'+enc(key)+'" '+(key===selected?'selected':'')+'>'+enc(role.label || key)+'</option>';
+  }).join('');
+}
+function networkBindingRoleMap(){
+  var out = {};
+  var nb = settingsState.networkBindings || {};
+  (Array.isArray(nb.items) ? nb.items : []).forEach(function(item){
+    var iface = String((item && item.iface) || '');
+    if(iface) out[iface] = String(item.role || 'none');
+  });
+  var selected = v('cfg-iface') || '';
+  if(selected && !out[selected]) out[selected] = 'scan';
+  return out;
+}
+function ensureNetworkUplinkControl(){
+  if(qs('net-ap-uplink')) return qs('net-ap-uplink');
+  var http = qs('net-ap-http');
+  if(!http || !http.parentNode || !http.parentNode.parentNode) return null;
+  var field = document.createElement('div');
+  field.className = 'field';
+  field.innerHTML = '<label>桥接出口</label><select id="net-ap-uplink"></select><div class="micro">选择可访问 Internet 的网卡，热点客户端将通过该网卡出网。</div>';
+  http.parentNode.parentNode.appendChild(field);
+  return qs('net-ap-uplink');
+}
+function fillNetworkUplinkOptions(ap){
+  var sel = ensureNetworkUplinkControl();
+  if(!sel) return;
+  var current = String((ap && ap.uplink_iface) || '');
+  var opts = ['<option value="">不共享 Internet</option>'];
+  (Array.isArray(settingsState.interfaceItems) ? settingsState.interfaceItems : []).forEach(function(it){
+    var name = String(it.name || '');
+    if(!name) return;
+    var kind = it.is_wireless ? '无线' : '有线';
+    var ip = (Array.isArray(it.ipv4) && it.ipv4.length) ? (' | ' + it.ipv4.join(',')) : '';
+    opts.push('<option value="'+enc(name)+'">'+enc(name + ' [' + kind + ip + ']')+'</option>');
+  });
+  sel.innerHTML = opts.join('');
+  sel.value = current || '';
+  sel.onchange = updateVisualDraftState;
+}
+function collectNetworkBindings(){
+  var ap = (settingsState.networkBindings && settingsState.networkBindings.ap) ? Object.assign({}, settingsState.networkBindings.ap) : {};
+  if(qs('net-ap-ssid')) ap.ssid = v('net-ap-ssid') || 'LightRID-HotSpot';
+  if(qs('net-ap-password')) ap.password = v('net-ap-password');
+  if(qs('net-ap-channel')) ap.channel = n('net-ap-channel') || 6;
+  if(qs('net-ap-uplink')){
+    ap.uplink_iface = v('net-ap-uplink');
+    ap.internet_enabled = !!ap.uplink_iface;
+  }
+  ap.address = ap.address || '172.16.0.1';
+  ap.cidr = ap.cidr || '172.16.0.1/24';
+  ap.dhcp_start = ap.dhcp_start || '172.16.0.20';
+  ap.dhcp_end = ap.dhcp_end || '172.16.0.240';
+  ap.http_port = ap.http_port || 80;
+  var rows = qsa('.network-bind-row');
+  var items = rows.map(function(row){
+    var iface = row.getAttribute('data-iface') || '';
+    var roleSel = row.querySelector('.network-bind-role');
+    return {iface:iface, role:String((roleSel && roleSel.value) || 'none')};
+  }).filter(function(item){ return !!item.iface; });
+  if(!items.length && settingsState.networkBindings && Array.isArray(settingsState.networkBindings.items)){
+    items = settingsState.networkBindings.items.map(function(item){ return {iface:String(item.iface || ''), role:String(item.role || 'none')}; }).filter(function(item){ return !!item.iface; });
+  }
+  var selectedIface = v('cfg-iface') || '';
+  if(selectedIface){
+    var foundSelected = false;
+    items.forEach(function(item){
+      if(item.role === 'scan' && item.iface !== selectedIface) item.role = 'none';
+      if(item.iface === selectedIface){ item.role = 'scan'; foundSelected = true; }
+    });
+    if(!foundSelected) items.push({iface:selectedIface, role:'scan'});
+  }
+  return {items:items, ap:ap};
+}
+function renderNetworkBindings(){
+  var list = qs('network-bind-list');
+  if(!list) return;
+  var interfaces = Array.isArray(settingsState.interfaceItems) ? settingsState.interfaceItems : [];
+  var roleMap = networkBindingRoleMap();
+  var selected = v('cfg-iface') || '';
+  if(!interfaces.length){
+    list.innerHTML = '<div class="empty-state">未检测到网卡</div>';
+  }else{
+    list.innerHTML = interfaces.map(function(it){
+      var name = String(it.name || '');
+      var role = roleMap[name] || (name === selected ? 'scan' : String(it.detected_role || 'none'));
+      var meta = [];
+      if(it.model) meta.push('型号 ' + String(it.model));
+      if(it.driver) meta.push('驱动 ' + String(it.driver));
+      meta.push(it.is_wireless ? ('无线 ' + String(it.mode || '')) : '有线');
+      if(it.admin_up === false) meta.push('已禁用');
+      if(it.state) meta.push('状态 ' + String(it.state));
+      if(Array.isArray(it.ipv4) && it.ipv4.length) meta.push(it.ipv4.join(', '));
+      if(it.mac) meta.push(String(it.mac));
+      return '<div class="list-row network-bind-row" data-iface="'+enc(name)+'">'
+        + '<div class="model-map-row" style="grid-template-columns:minmax(120px,.35fr) minmax(0,1fr) minmax(180px,.35fr)">'
+        + '<input value="'+enc(name)+'" disabled>'
+        + '<input value="'+enc(meta.join(' | '))+'" disabled>'
+        + '<select class="network-bind-role">'+networkRoleOptions(role)+'</select>'
+        + '</div></div>';
+    }).join('');
+  }
+  var ap = (settingsState.networkBindings && settingsState.networkBindings.ap) || {};
+  if(qs('net-ap-ssid')) qs('net-ap-ssid').value = String(ap.ssid || 'LightRID-HotSpot');
+  if(qs('net-ap-password')) qs('net-ap-password').value = String(ap.password || '');
+  if(qs('net-ap-channel')) qs('net-ap-channel').value = String(ap.channel || 6);
+  if(qs('net-ap-http')) qs('net-ap-http').value = String(ap.address || '172.16.0.1') + ':' + String(ap.http_port || 80);
+  fillNetworkUplinkOptions(ap);
+}
+async function refreshNetworkBindings(){
+  const data = await getJson('/api/network-bindings/status');
+  settingsState.interfaceItems = Array.isArray(data.interfaces) ? data.interfaces : [];
+  settingsState.networkBindings = data.bindings || settingsState.networkBindings || {items:[], ap:{}};
+  fillIfaceOptions(settingsState.interfaceItems, data.selected_iface || v('cfg-iface'));
+  renderNetworkBindings();
+  setStatus('status-network-bind', '已扫描 ' + String(settingsState.interfaceItems.length) + ' 张网卡。', false);
+  return data;
+}
+function openNetworkBindings(){
+  if(qs('network-bind-modal')) qs('network-bind-modal').classList.add('show');
+  renderNetworkBindings();
+  refreshNetworkBindings().catch(function(e){ setStatus('status-network-bind', e.message || e, true); });
+}
+function closeNetworkBindings(){
+  if(qs('network-bind-modal')) qs('network-bind-modal').classList.remove('show');
+}
+function saveNetworkBindingsToDraft(){
+  var nb = collectNetworkBindings();
+  var scan = (nb.items || []).filter(function(item){ return item.role === 'scan'; });
+  if(scan.length > 1){
+    setStatus('status-network-bind', '只能设置一张网卡为扫描。', true);
+    return;
+  }
+  settingsState.networkBindings = Object.assign({}, settingsState.networkBindings || {}, nb);
+  if(scan.length && qs('cfg-iface')) qs('cfg-iface').value = scan[0].iface;
+  updateVisualDraftState();
+  setStatus('status-network-bind', '网卡绑定已写入当前设置草稿，保存设置后生效。', false);
+}
+async function applyNetworkBindings(){
+  if(settingsState.visualDirty){
+    throw new Error('请先保存当前设置，再应用网卡绑定到系统。');
+  }
+  if(!confirm('将按已保存配置调整网卡状态、AP 地址、hostapd 和内置 DHCP。继续？')) return;
+  const body = await privilegedBody({confirm:true}, '应用网卡绑定需要 root 权限；sudo 密码只用于本次请求，不会保存。');
+  const data = await postJson('/api/network-bindings/apply', body);
+  var lines = [];
+  (Array.isArray(data.steps) ? data.steps : []).forEach(function(step){
+    lines.push((step.ok ? 'OK ' : 'FAIL ') + String(step.label || '') + (step.output ? (' | ' + String(step.output)) : ''));
+  });
+  setStatus('status-network-bind', lines.join('\\n') || '已应用网卡绑定。', !data.ok);
+  showNotice(data.ok ? '网卡绑定已应用。' : '部分网卡绑定步骤失败。', data.ok ? 'ok' : 'warn', 4200);
 }
 function renderHookRows(items){
   var root = qs('wecom-list');
@@ -8945,13 +9086,16 @@ async function loadVisual(){
   const data = await getJson('/api/settings/view');
   const s = data.visual || {};
   const b = s.basic || {}, w = s.web || {}, nt = s.notify || {}, api = s.api || {}, auth = s.auth || {}, mu = s.model_update || {}, au = s.app_update || {}, mc = s.metrics || {};
-  fillIfaceOptions(data.interfaces || [], b.iface || '');
+  settingsState.interfaceItems = Array.isArray(data.interfaces) ? data.interfaces : [];
+  settingsState.networkBindings = s.network_bindings || {items:[], ap:{}};
+  fillIfaceOptions(settingsState.interfaceItems, b.iface || '');
   settingsState.visualLoaded = true;
   settingsState.channelUseDefault = !b.channel_custom;
   qs('cfg-channel').value = String(b.channel_effective == null ? 6 : b.channel_effective);
   setChannelUi(false);
   qs('cfg-time').value = String(b.time ?? '');
   qs('cfg-min-gap').value = String(b.min_gap ?? '');
+  qs('cfg-lost-timeout').value = String(b.lost_timeout ?? 15);
   qs('cfg-rssi-delta').value = String(b.rssi_delta ?? '');
   qs('cfg-model-map').value = String(b.model_map || '');
   qs('cfg-model-update-enabled').checked = mu.enabled !== false;
@@ -9100,6 +9244,12 @@ function bindShellActions(){
   on('btn-reload-view', 'click', function(){
     guarded(loadVisual, 'status-visual', '设置已重新读取。', 2200);
   });
+  qsa('.settings-jump [data-jump]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var target = qs(btn.getAttribute('data-jump') || '');
+      if(target && target.scrollIntoView) target.scrollIntoView({behavior:'smooth', block:'start'});
+    });
+  });
 }
 function bindModelEditorActions(){
   on('btn-model-map-open', 'click', function(){
@@ -9167,16 +9317,21 @@ function bindDataTransferActions(){
     guarded(function(){ return importScanDataFileFromFile(file); }, 'status-data-transfer', '', 0, 4200);
   });
 }
-function bindHomeToolActions(){
-  on('btn-home-freeze', 'click', freezeHomeOnReturn);
-  on('btn-settings-web-notify', 'click', requestSettingsWebNotify);
-  on('btn-settings-clear-history', 'click', clearHistoryFromSettings);
-  on('btn-oobe-simple', 'click', function(){ location.href = '/oobe?manual=1&mode=simple'; });
-  on('btn-oobe-full', 'click', function(){ location.href = '/settings?oobe=full'; showNotice('完整 OOBE 可直接在本页完成所有配置。', 'ok', 2600); });
+function bindEulaActions(){
   on('btn-eula-view', 'click', function(){ location.href = '/eula?next=/settings'; });
   on('btn-eula-revoke', 'click', revokeEulaAcceptance);
 }
 function bindCaptureActions(){
+  on('btn-network-bindings', 'click', openNetworkBindings);
+  on('btn-network-bind-refresh', 'click', function(){ guarded(refreshNetworkBindings, 'status-network-bind', '网卡列表已刷新。', 1800, 3600); });
+  on('btn-network-bind-save', 'click', saveNetworkBindingsToDraft);
+  on('btn-network-bind-apply', 'click', function(){ guarded(applyNetworkBindings, 'status-network-bind', '网卡绑定已应用。', 2600, 5200); });
+  on('btn-network-bind-close', 'click', closeNetworkBindings);
+  on('network-bind-modal', 'click', function(ev){ if(ev.target === qs('network-bind-modal')) closeNetworkBindings(); });
+  on('network-bind-list', 'change', updateVisualDraftState);
+  on('net-ap-ssid', 'input', updateVisualDraftState);
+  on('net-ap-password', 'input', updateVisualDraftState);
+  on('net-ap-channel', 'input', updateVisualDraftState);
   on('btn-channel-edit', 'click', function(){
     setChannelUi(!settingsState.channelEditing);
   });
@@ -9388,7 +9543,7 @@ function initializeSettingsPage(){
   bindModelEditorActions();
   bindMetricActions();
   bindDataTransferActions();
-  bindHomeToolActions();
+  bindEulaActions();
   bindAccessActions();
   bindSystemServiceActions();
   bindRawActions();
@@ -9400,7 +9555,6 @@ function initializeSettingsPage(){
   applyTheme(loadTheme());
   applyTabs();
   bindVisualDraftTracking();
-  updateHomeActionButtons();
   syncSettingsViewport();
   loadBrowserPrefs();
   loadVisual().catch(function(e){ setStatus('status-visual', e.message || e, true); showNotice(e.message || e, 'warn', 3800); });
@@ -9700,11 +9854,39 @@ def http_server_thread() -> None:
                 return self._require_api_token(query)
             return self._require_page_api()
 
+        def _send_captive_portal_page(self) -> None:
+            host = str(globals().get("AP_WEB_ADDRESS_DEFAULT", "172.16.0.1") or "172.16.0.1")
+            target = f"http://{host}/"
+            body = (
+                "<!doctype html><html><head><meta charset=\"utf-8\">"
+                f"<meta http-equiv=\"refresh\" content=\"0;url={target}\">"
+                "<title>Light RID Scanner</title></head>"
+                f"<body><p>正在打开 Light RID Scanner 页面。<a href=\"{target}\">立即打开</a></p></body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             from urllib.parse import urlparse, parse_qs, quote, unquote
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
+            if path in (
+                "/generate_204",
+                "/gen_204",
+                "/hotspot-detect.html",
+                "/library/test/success.html",
+                "/connecttest.txt",
+                "/ncsi.txt",
+                "/canonical.html",
+                "/success.txt",
+            ):
+                self._send_captive_portal_page()
+                return
             if path == "/favicon.ico":
                 self.send_response(204)
                 self.send_header("Cache-Control", "max-age=86400")
@@ -10166,6 +10348,11 @@ def http_server_thread() -> None:
                         "selected_iface": (None if basic.get("iface") in (None, "") else str(basic.get("iface"))),
                         "scan_wifi_fast": bool(basic.get("scan_wifi_fast")),
                     }, 200)
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 500)
+            elif path == "/api/network-bindings/status":
+                try:
+                    self._send_json(_network_bindings_status_payload(), 200)
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/hw/status":
@@ -10760,6 +10947,16 @@ def http_server_thread() -> None:
                 self._read_json_body()
                 rsp = _check_app_update_once(manual=True)
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/network-bindings/save":
+                body = self._read_json_body()
+                rsp = _network_bindings_save_payload(body)
+                _op_log("network-bindings-save", str(rsp.get("error") or rsp.get("reload_msg") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+            elif path == "/api/network-bindings/apply":
+                body = self._read_json_body()
+                rsp = _network_bindings_apply_payload(body)
+                _op_log("network-bindings-apply", str(rsp.get("error") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, 200 if rsp.get("ok") else 500)
             elif path == "/api/settings/systemd/register":
                 body = self._read_json_body()
                 if not bool(body.get("confirm")):
@@ -10782,7 +10979,7 @@ def http_server_thread() -> None:
                 status = _systemd_service_status_payload()
                 payload = dict(rsp)
                 payload["status"] = status
-                payload["message"] = "iw 已安装并可用。" if rsp.get("ok") else str(rsp.get("error") or "iw 安装失败")
+                payload["message"] = "无线工具已安装并可用。" if rsp.get("ok") else str(rsp.get("error") or "无线工具安装失败")
                 _op_log("iw-install", payload.get("message") or "", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 if rsp.get("ok"):
                     self._send_json(payload, 200)
@@ -11046,6 +11243,8 @@ def http_server_thread() -> None:
         return
 
     _threading.Thread(target=_ws_push_loop, daemon=True).start()
+    start_bound_http_servers(ThreadingHTTPServer, Handler)
+    start_network_binding_services()
     _log(f"[INFO] HTTP+WS service started: http://0.0.0.0:{HTTP_PORT}/")
     if not _auth_enabled():
         _log("[WARN] Web auth disabled: Web UI is exposed to LAN; enable auth in config for safety")

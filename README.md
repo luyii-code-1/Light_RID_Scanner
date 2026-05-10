@@ -37,26 +37,27 @@ Recommended environment:
 - 64-bit OS for the `linux-arm64` release artifact
 - Wireless NIC with monitor mode support
 - Root privileges for monitor mode / channel switching
+- `iw` and `hostapd` when using NIC binding with AP hotspot mode
 
 Deploy the Linux binary:
 
 ```bash
-install -m 0755 light_rid_scanner-linux-arm64 /home/luyii/rid/light_rid_scanner
+install -m 0755 light_rid_scanner-linux-arm64 /opt/light-rid/light_rid_scanner
 ```
 
 The runtime directory should keep the binary and runtime data together:
 
 ```text
-/home/luyii/rid/light_rid_scanner
-/home/luyii/rid/rid_config.json
-/home/luyii/rid/rid_models.json
-/home/luyii/rid/EULA.md
+/opt/light-rid/light_rid_scanner
+/opt/light-rid/rid_config.json
+/opt/light-rid/rid_models.json
+/opt/light-rid/EULA.md
 ```
 
 Systemd should execute the binary directly:
 
 ```ini
-ExecStart=/home/luyii/rid/light_rid_scanner --config /home/luyii/rid/rid_config.json --no-tui
+ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.json --no-tui
 ```
 
 Default web URL:
@@ -67,16 +68,15 @@ Default web URL:
 
 - The scanner no longer auto-rotates across NICs.
 - `basic.iface` is treated as a fixed binding. If that NIC is missing, the service stays alive in degraded mode and shows a configuration warning instead of silently switching to another adapter.
+- `basic.lost_timeout` controls aircraft offline detection in seconds. The default is 15 seconds.
+- Settings and OOBE include a **Custom NIC Binding** flow. Each detected NIC can be assigned to `scan`, `web`, `ap_web`, `disabled`, `idle`, or `none`; the `scan` role is synchronized back to `basic.iface`.
+- The `ap_web` role configures an AP hotspot profile through `hostapd`, starts the built-in DHCP server on `172.16.0.0/24`, and exposes the web UI at `172.16.0.1:80` when the service has the required Linux capabilities.
 - If `rid_config.json` is missing, broken, or still has no bound NIC, the web UI enters the OOBE flow at `/oobe`.
 - OOBE is used to finish the minimum required setup:
   - choose the default wireless NIC
   - set the RID channel
   - optionally set base-station coordinates
   - optionally set the web login account/password
-- The Settings page can manually enter either:
-  - Simplified OOBE, for the minimum setup flow
-  - Full OOBE, by staying in Settings and editing the full configuration surface
-
 Operationally, this makes multi-NIC deployments much safer: the scanner keeps using the intended adapter, and startup problems are surfaced as configuration work rather than hidden auto-fallback.
 
 ## Main Pages
@@ -206,7 +206,7 @@ The external API can only be enabled when all three conditions are true:
     "whitelist_enabled": true,
     "whitelist": [
       "127.0.0.1",
-      "192.168.1.0/24"
+      "<trusted-lan-cidr>"
     ]
   }
 }
@@ -407,7 +407,6 @@ It supports:
 - optional host load trend cards for CPU, memory, temperature, load, and AP count
 - selectable host-metrics windows: 12 hours, 24 hours, and 7 days
 - configurable host-metrics retention, defaulting to 7 days
-- manual entry into Simplified OOBE and Full OOBE
 - managed SSO login link generation and deletion after username/password re-check
 - passkey registration/deletion for browser login
 - raw config tree browsing/edit/save/delete after password re-check
@@ -436,7 +435,7 @@ Behavior:
 
 - Passkeys are bootstrapped from the existing web username/password once, then stored inside `auth.passkeys`.
 - Raw config editing is limited to files inside the active config root and requires a short-lived secondary unlock from the current browser session.
-- The runtime repair card can create/confirm the dedicated `rid` service user, grant capture capabilities, install `iw`, and register/update `light-rid-scanner.service`.
+- The runtime repair card can create/confirm the dedicated `rid` service user, grant capture/hotspot capabilities, install wireless tools, and register/update `light-rid-scanner.service`.
 - Binary deployments should keep the systemd unit pointed at the installed `light_rid_scanner` binary, current config path, and `--no-tui` service mode.
 
 ### Host load trends

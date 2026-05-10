@@ -13,6 +13,7 @@ DEFAULT_CHUNK_FILES: tuple[str, ...] = (
     "scan_core.py",
     "process_core.py",
     "auth_core.py",
+    "network_binding_core.py",
     "web_server.py",
     "cli_app.py",
 )

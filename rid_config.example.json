@@ -13,6 +13,7 @@
     "hit_cap": 6000,
     "time": 1.0,
     "min_gap": 0.5,
+    "lost_timeout": 15,
     "rssi_delta": 3,
     "change_on_rssi": false,
     "change_on_payload": false,
@@ -110,5 +111,23 @@
   "metrics": {
     "enabled": false,
     "retention_days": 7
+  },
+  "network_bindings": {
+    "items": [
+      {
+        "iface": "wlan0",
+        "role": "scan"
+      }
+    ],
+    "ap": {
+      "ssid": "LightRID-HotSpot",
+      "password": "",
+      "channel": 6,
+      "address": "172.16.0.1",
+      "cidr": "172.16.0.1/24",
+      "dhcp_start": "172.16.0.20",
+      "dhcp_end": "172.16.0.240",
+      "http_port": 80
+    }
   }
 }

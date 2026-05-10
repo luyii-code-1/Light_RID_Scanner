@@ -1,4 +1,7 @@
 from __future__ import annotations
+# pylint: disable=unused-import
+# This file is the first legacy runtime chunk. Several imports below seed the
+# shared exec() namespace for later chunks until they become normal modules.
 import argparse
 import base64
 import difflib
@@ -36,7 +39,9 @@ except ImportError:
     curses = None
 
 try:
-    from scapy.all import Dot11, Dot11Elt, Dot11Beacon, RadioTap, sniff, conf
+    from scapy.config import conf
+    from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
+    from scapy.sendrecv import sniff
     conf.verb = 0
 except ImportError:
     sys.exit("[FATAL] scapy not installed. Run: pip3 install scapy")
@@ -53,9 +58,16 @@ ODID_MSG_SIZE        = 25
 ODID_PROTOCOL_MAX    = 2
 DJI_RID_VENDOR_TYPE  = 0x0D
 DJI_RID_VENDOR_PREFIX = ODID_OUI + bytes([DJI_RID_VENDOR_TYPE])
-RID_NEW_FW_BODY_MIN  = 28
+RID_NEW_FW_BODY_MIN  = 60
 RID_NEW_FW_SN_LEN    = 20
 RID_NEW_FW_UAS_LEN   = 8
+RID_NEW_FW_SN_OFF    = 11
+RID_NEW_FW_UAS_OFF   = 31
+RID_NEW_FW_DRONE_LON_OFF = 42
+RID_NEW_FW_DRONE_LAT_OFF = 46
+RID_NEW_FW_ALT_OFF   = 50
+RID_NEW_FW_PILOT_LON_OFF = 52
+RID_NEW_FW_PILOT_LAT_OFF = 56
 RID_NEW_FW_COORD_SEARCH_MAX = 80
 RID_NEW_FW_SIG_BYTES = 160
 
@@ -69,7 +81,8 @@ LOC_ENDIAN       = "<"
 
 DEFAULT_PRINT_INTERVAL = 2.0
 DEFAULT_MIN_GAP        = 1.0
-LOST_TIMEOUT           = 15.0
+DEFAULT_LOST_TIMEOUT   = 15.0
+LOST_TIMEOUT           = DEFAULT_LOST_TIMEOUT
 PURGE_TIMEOUT          = 300.0
 
 CHANNELS_2G         = [1, 6, 11]
@@ -95,7 +108,7 @@ SYSTEMD_SERVICE_PATH = "/etc/systemd/system/" + SYSTEMD_SERVICE_NAME
 IW_PACKAGE_NAME = "iw"
 RUNTIME_SERVICE_USER = "rid"
 RUNTIME_SERVICE_HOME = "/var/lib/light-rid"
-RUNTIME_SERVICE_CAPABILITIES = ("CAP_NET_ADMIN", "CAP_NET_RAW")
+RUNTIME_SERVICE_CAPABILITIES = ("CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_NET_BIND_SERVICE")
 HISTORY_SAVE_INTERVAL = 5.0
 HTTP_JSON_MAX_BYTES = 1024 * 1024
 API_NAME = "Light RID Scanner API"
@@ -1177,6 +1190,7 @@ def default_app_config() -> dict:
             "hit_cap": 6000,
             "time": DEFAULT_PRINT_INTERVAL,
             "min_gap": DEFAULT_MIN_GAP,
+            "lost_timeout": DEFAULT_LOST_TIMEOUT,
             "rssi_delta": 3,
             "change_on_rssi": False,
             "change_on_payload": False,
@@ -1262,6 +1276,21 @@ def default_app_config() -> dict:
             "whitelist_mode": "allow",
             "whitelist": [],
         },
+        "network_bindings": {
+            "items": [],
+            "ap": {
+                "ssid": "LightRID-HotSpot",
+                "password": "",
+                "channel": 6,
+                "address": "172.16.0.1",
+                "cidr": "172.16.0.1/24",
+                "dhcp_start": "172.16.0.20",
+                "dhcp_end": "172.16.0.240",
+                "http_port": 80,
+                "internet_enabled": False,
+                "uplink_iface": "",
+            },
+        },
     }
 
 def ensure_config_file(path: str) -> None:
@@ -1306,12 +1335,22 @@ def _cfg_preferred_iface_from_cfg(cfg: dict | None) -> str | None:
     try:
         basic = cfg.get("basic") if isinstance(cfg, dict) else {}
         if not isinstance(basic, dict):
-            return None
+            basic = {}
         v = basic.get("iface")
-        if v in (None, ""):
-            return None
-        s = str(v).strip()
-        return s or None
+        if v not in (None, ""):
+            s = str(v).strip()
+            if s:
+                return s
+        nb = cfg.get("network_bindings") if isinstance(cfg, dict) else {}
+        items = nb.get("items") if isinstance(nb, dict) else []
+        if isinstance(items, list):
+            for item in items:
+                role = str((item or {}).get("role") or "").strip().lower().replace("-", "_") if isinstance(item, dict) else ""
+                if role in ("scan", "scanner", "capture"):
+                    s = str(item.get("iface") or "").strip()
+                    if s:
+                        return s
+        return None
     except Exception:
         return None
 
@@ -1740,6 +1779,7 @@ def _settings_view_payload() -> dict:
                 "hit_cap": basic.get("hit_cap", 6000),
                 "time": basic.get("time", DEFAULT_PRINT_INTERVAL),
                 "min_gap": basic.get("min_gap", DEFAULT_MIN_GAP),
+                "lost_timeout": basic.get("lost_timeout", basic.get("offline_timeout", DEFAULT_LOST_TIMEOUT)),
                 "rssi_delta": basic.get("rssi_delta", 3),
                 "change_on_rssi": bool(basic.get("change_on_rssi")),
                 "change_on_payload": bool(basic.get("change_on_payload")),
@@ -1818,6 +1858,7 @@ def _settings_view_payload() -> dict:
                 "store_path": HOST_METRICS_PATH,
                 "sample_interval_sec": int(HOST_METRICS_SAMPLE_SEC),
             },
+            "network_bindings": _network_bindings_visual_payload(cfg),
         },
         "host": host,
         "interfaces": interfaces,
@@ -1857,6 +1898,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     p_model_update = payload.get("model_update") if isinstance(payload.get("model_update"), dict) else {}
     p_app_update = payload.get("app_update") if isinstance(payload.get("app_update"), dict) else {}
     p_metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    p_network_bindings = payload.get("network_bindings") if isinstance(payload.get("network_bindings"), dict) else {}
 
     iface_raw = p_basic.get("iface")
     iface = None if iface_raw in (None, "") else str(iface_raw).strip()
@@ -1880,6 +1922,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     for k, default_v in (
         ("time", DEFAULT_PRINT_INTERVAL),
         ("min_gap", DEFAULT_MIN_GAP),
+        ("lost_timeout", DEFAULT_LOST_TIMEOUT),
         ("dwell_2g", DWELL_2G_DEFAULT),
         ("dwell_5g", DWELL_5G_DEFAULT),
         ("settle", SETTLE_DEFAULT),
@@ -2094,6 +2137,11 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
             metrics["temperature_source"] = str(p_metrics.get("temperature_source") or "auto")
         cfg["metrics"] = _normalize_metrics_cfg({"metrics": metrics})
 
+    if p_network_bindings:
+        cfg, bind_err = _network_bindings_apply_visual(cfg, p_network_bindings)
+        if bind_err:
+            return None, bind_err
+
     cfg, guard_err = _prepare_security_cfg_for_save(cfg)
     if guard_err:
         return None, guard_err
@@ -2241,6 +2289,7 @@ def apply_config_to_args(parser: argparse.ArgumentParser, args, cfg: dict) -> No
         "iface", "channel", "hop", "hop_5g", "scan_wifi_fast",
         "dwell_2g", "dwell_5g", "settle", "dwell_on_hit", "hit_cap",
         "time", "min_gap", "rssi_delta",
+        "lost_timeout",
         "change_on_rssi", "change_on_payload",
         "model_map", "history_file",
         "no_tui", "debug",
@@ -3246,7 +3295,7 @@ def init_notify_from_config(cfg: dict | None) -> None:
         _log("[INFO] notify disabled (missing key or disabled)")
 
 def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
-    global APP_CONFIG, PRINT_INTERVAL, MIN_GAP, CHANGE_ON_RSSI, CHANGE_ON_PL, RSSI_DELTA, DEBUG_MODE
+    global APP_CONFIG, PRINT_INTERVAL, MIN_GAP, LOST_TIMEOUT, CHANGE_ON_RSSI, CHANGE_ON_PL, RSSI_DELTA, DEBUG_MODE
     if not isinstance(cfg, dict):
         return False, "invalid config root"
     APP_CONFIG = _deep_merge_dict(default_app_config(), cfg)
@@ -3256,6 +3305,7 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
     init_config_update_from_config(APP_CONFIG)
     init_app_update_from_config(APP_CONFIG)
     init_metrics_from_config(APP_CONFIG)
+    init_network_bindings_from_config(APP_CONFIG)
     init_auth_from_config(APP_CONFIG)
     init_api_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)
@@ -3269,6 +3319,10 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
         pass
     try:
         MIN_GAP = max(0.0, float(basic.get("min_gap", MIN_GAP)))
+    except Exception:
+        pass
+    try:
+        LOST_TIMEOUT = max(3.0, min(3600.0, float(basic.get("lost_timeout", basic.get("offline_timeout", LOST_TIMEOUT)))))
     except Exception:
         pass
     try:

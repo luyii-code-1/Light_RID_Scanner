@@ -33,12 +33,9 @@ disable=
     superfluous-parens,
     multiple-statements,
     missing-function-docstring,
-    unused-import,
     import-outside-toplevel,
     too-many-positional-arguments,
-    exec-used,
-    no-name-in-module,
-    import-error
+    exec-used
 
 [FORMAT]
 max-line-length=140

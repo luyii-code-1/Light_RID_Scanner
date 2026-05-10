@@ -9564,6 +9564,10 @@ function initializeSettingsPage(){
 initializeSettingsPage();
 </script></body></html>"""
 
+def sanitize_http_header_value(value, fallback: str = "") -> str:
+    raw = value if value not in (None, "") else fallback
+    return str(raw).replace("\r", "").replace("\n", "")
+
 def http_server_thread() -> None:
     import socket as _socket
     import threading as _threading
@@ -9583,13 +9587,17 @@ def http_server_thread() -> None:
             if set_tok:
                 self.send_header(
                     "Set-Cookie",
-                    f"{AUTH_SESSION_COOKIE}={set_tok}; Max-Age={int(AUTH_SESSION_TTL_SEC)}; Path=/; HttpOnly; SameSite=Lax",
+                    sanitize_http_header_value(
+                        f"{AUTH_SESSION_COOKIE}={set_tok}; Max-Age={int(AUTH_SESSION_TTL_SEC)}; Path=/; HttpOnly; SameSite=Lax"
+                    ),
                 )
                 self._auth_set_cookie_token = ""
             if getattr(self, "_auth_clear_cookie", False):
                 self.send_header(
                     "Set-Cookie",
-                    f"{AUTH_SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+                    sanitize_http_header_value(
+                        f"{AUTH_SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+                    ),
                 )
                 self._auth_clear_cookie = False
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -9634,11 +9642,20 @@ def http_server_thread() -> None:
         def _send_bytes(self, body: bytes, content_type: str, filename: str | None = None, code: int = 200):
             body = bytes(body or b"")
             self.send_response(code)
-            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self.send_header(
+                "Content-Type",
+                sanitize_http_header_value(content_type, "application/octet-stream"),
+            )
             self.send_header("Cache-Control", "no-store")
             if filename:
-                safe = re.sub(r'[^A-Za-z0-9._-]+', '_', str(filename or "download.bin")).strip("._") or "download.bin"
-                self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+                safe = (
+                    re.sub(r'[^A-Za-z0-9._-]+', '_', str(filename or "download.bin")).strip("._")
+                    or "download.bin"
+                )
+                self.send_header(
+                    "Content-Disposition",
+                    sanitize_http_header_value(f'attachment; filename="{safe}"'),
+                )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
@@ -9649,7 +9666,7 @@ def http_server_thread() -> None:
 
         def _redirect(self, location: str, code: int = 302):
             self.send_response(code)
-            self.send_header("Location", str(location or "/"))
+            self.send_header("Location", sanitize_http_header_value(location, "/"))
             self.send_header("Content-Length", "0")
             self.end_headers()
 

@@ -737,7 +737,7 @@ def _fallback_private_commit() -> str:
         path = os.path.abspath(_runtime_entrypoint_path())
         st = os.stat(path)
         raw = f"{path}|{st.st_size}|{int(st.st_mtime)}".encode("utf-8", errors="replace")
-        return hashlib.sha1(raw).hexdigest()[:7]
+        return hashlib.sha256(raw).hexdigest()[:7]
     except Exception:
         return "local"
 

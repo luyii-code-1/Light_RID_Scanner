@@ -2530,23 +2530,11 @@ def _verify_password_hash(value: str, stored: str) -> bool:
     except Exception:
         return False
 
-def _legacy_sha256_auth_secret_matches(value: str, stored: str) -> bool:
-    legacy = str(stored or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", legacy or ""):
-        return False
-    # Legacy fallback for existing SHA-256 config entries only; new auth secrets use PBKDF2.
-    actual = hashlib.sha256(  # lgtm[py/weak-sensitive-data-hashing]
-        str(value or "").encode("utf-8", errors="ignore")
-    ).hexdigest().lower()
-    return secrets.compare_digest(actual, legacy)
-
 def _normalize_auth_secret_hash(stored: str | None) -> str:
     raw = str(stored or "").strip()
-    if re.fullmatch(r"[0-9a-fA-F]{64}", raw or ""):
-        return raw.lower()
     try:
         alg, rounds_text, salt, expected = raw.split("$", 3)
-        if alg == "pbkdf2_sha256" and int(rounds_text) > 0 and salt and expected:
+        if alg == "pbkdf2_sha256" and int(rounds_text) >= 200_000 and salt and expected:
             return raw
     except Exception:
         pass
@@ -2556,10 +2544,7 @@ def _verify_auth_secret(value: str, stored: str) -> bool:
     normalized = _normalize_auth_secret_hash(stored)
     if not normalized:
         return False
-    return bool(
-        _verify_password_hash(value, normalized)
-        or _legacy_sha256_auth_secret_matches(value, normalized)
-    )
+    return _verify_password_hash(value, normalized)
 
 def _stored_auth_secret_matches(candidate: str, stored: str) -> bool:
     candidate_norm = _normalize_auth_secret_hash(candidate)
@@ -2755,8 +2740,6 @@ def _api_token_id_from_hash(token_hash: str | None, idx: int = 1) -> str:
     raw = str(token_hash or "").strip()
     if re.fullmatch(r"[0-9a-f]{64}", raw or ""):
         return "tok_" + raw[:12]
-    if raw:
-        return "tok_" + _sha256_hex(raw)[:12]
     return "tok_" + secrets.token_urlsafe(8).replace("-", "_")[:12]
 
 def _api_token_expiry_from_row(row: dict | None, now_wall: float | None = None, fallback: float = 0.0) -> tuple[float, str | None]:

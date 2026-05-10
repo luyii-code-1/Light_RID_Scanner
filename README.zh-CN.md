@@ -1,4 +1,4 @@
-﻿# Light RID Scanner
+# Light RID Scanner
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
@@ -46,13 +46,10 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 install -m 0755 light_rid_scanner-linux-arm64 /opt/light-rid/light_rid_scanner
 ```
 
-运行目录需要放置二进制文件和运行数据：
+首次启动只需要放置二进制文件。`rid_config.json` 和 `rid_models.json` 不存在时，程序会在启动时按内置默认值自动创建。
 
 ```text
 /opt/light-rid/light_rid_scanner
-/opt/light-rid/rid_config.json
-/opt/light-rid/rid_models.json
-/opt/light-rid/EULA.md
 ```
 
 systemd 应直接执行二进制文件：
@@ -197,13 +194,13 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 {
   "auth": {
     "enabled": true,
-    "username_sha256": "<sha256(username)>",
-    "password_sha256": "<sha256(password)>"
+    "username_hash": "<scrypt(username)>",
+    "password_hash": "<scrypt(password)>"
   },
   "api": {
     "enabled": true,
     "token": "YOUR_TOKEN_HERE",
-    "token_sha256": "<sha256(token)>",
+    "token_hash": "<scrypt(token)>",
     "whitelist_enabled": true,
     "whitelist": [
       "127.0.0.1",
@@ -213,23 +210,28 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 }
 ```
 
-生成哈希的方法：
+生成和程序一致的 scrypt 哈希：
 
 ```bash
 python3 - <<'PY'
-import hashlib
-print(hashlib.sha256(b"YOUR_TOKEN_HERE").hexdigest())
+import base64, hashlib, secrets
+salt = secrets.token_bytes(16)
+digest = hashlib.scrypt(b"YOUR_TOKEN_HERE", salt=salt, n=2**14, r=8, p=1, dklen=32)
+print("scrypt$16384$8$1$%s$%s" % (
+    base64.urlsafe_b64encode(salt).decode().rstrip("="),
+    base64.urlsafe_b64encode(digest).decode().rstrip("="),
+))
 PY
 ```
 
-如果你只保留 `api.token_sha256`，外部 API 仍然可用，但设置页面将无法显示或复制当前 Token，因为系统只拿到了哈希。
+如果你只保留 `api.token_hash`，外部 API 仍然可用，但设置页面将无法显示或复制当前 Token，因为系统只拿到了哈希。
 
 ### 推荐使用方式
 
 建议这样做：
 
 - 在本地生成一个随机 Token
-- 如果希望后续能在设置页里再次显示/复制 Token，就让 `api.token` 和 `api.token_sha256` 一起保存并保持一致
+- 如果希望后续能在设置页里再次显示/复制 Token，就让 `api.token` 和 `api.token_hash` 一起保存并保持一致
 - 如果调用端 IP 范围固定，建议打开白名单模式
 - 明文 Token 只保留在脚本、客户端、密码管理器或密钥管理系统里
 - 不要把真实 Token 提交到 Git
@@ -258,37 +260,44 @@ PY
 {
   "auth": {
     "enabled": true,
-    "username_sha256": "<sha256(username)>",
-    "password_sha256": "<sha256(password)>",
+    "username_hash": "<scrypt(username)>",
+    "password_hash": "<scrypt(password)>",
     "session_ttl_min": 30,
     "realm": "Light RID Scanner"
   }
 }
 ```
 
-生成用户名 / 密码哈希：
+生成和程序一致的用户名 / 密码 scrypt 哈希：
 
 ```bash
 python3 - <<'PY'
-import hashlib
-print("user:", hashlib.sha256("your_user".encode()).hexdigest())
-print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
+import base64, hashlib, secrets
+def hash_secret(text):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(text.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+    return "scrypt$16384$8$1$%s$%s" % (
+        base64.urlsafe_b64encode(salt).decode().rstrip("="),
+        base64.urlsafe_b64encode(digest).decode().rstrip("="),
+    )
+print("user:", hash_secret("your_user"))
+print("pass:", hash_secret("your_pass"))
 PY
 ```
 
-受信任的外部启动器可以使用 SSO 形式登录。URL 使用当前配置里的用户名 / 密码 SHA-256，再加一个服务端保存的 `check` 校验码：
+受信任的外部启动器可以使用 SSO 形式登录。URL 只使用服务端保存的 `check` 校验码：
 
 ```text
-/login?user=<sha256(username)>&password=<sha256(password)>&check=<server-check-code>
+/login?check=<server-check-code>
 ```
 
 设置页负责生成和保存 `check` 校验码。从设置页列表中删除该项后，对应链接立即失效。
 
-旧快捷方式如果写成下面两种形式也能解析，但仍必须带有效的 `check`：
+旧快捷方式如果仍带有 `user` 或 `password` 参数，这些值会被当作普通字符串忽略；真正校验的只有 `check`：
 
 ```text
-/login?user=<sha256(username)>,password=<sha256(password)>&check=<server-check-code>
-/login?user=<sha256(username)>?password=<sha256(password)>?check=<server-check-code>
+/login?user=<ignored>&password=<ignored>&check=<server-check-code>
+/login?user=<ignored>?password=<ignored>?check=<server-check-code>
 ```
 
 设置页会在再次验证账号和密码后生成 SSO 登录链接。该链接可直接加入外部 SSO 启动器，并一直有效，直到对应 `check` 被删除。

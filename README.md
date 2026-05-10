@@ -1,4 +1,4 @@
-﻿# Light RID Scanner
+# Light RID Scanner
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
@@ -45,13 +45,10 @@ Deploy the Linux binary:
 install -m 0755 light_rid_scanner-linux-arm64 /opt/light-rid/light_rid_scanner
 ```
 
-The runtime directory should keep the binary and runtime data together:
+Only the binary is required for a first start. If `rid_config.json` or `rid_models.json` does not exist, the program creates them from built-in defaults during startup.
 
 ```text
 /opt/light-rid/light_rid_scanner
-/opt/light-rid/rid_config.json
-/opt/light-rid/rid_models.json
-/opt/light-rid/EULA.md
 ```
 
 Systemd should execute the binary directly:
@@ -196,13 +193,13 @@ The external API can only be enabled when all three conditions are true:
 {
   "auth": {
     "enabled": true,
-    "username_sha256": "<sha256(username)>",
-    "password_sha256": "<sha256(password)>"
+    "username_hash": "<scrypt(username)>",
+    "password_hash": "<scrypt(password)>"
   },
   "api": {
     "enabled": true,
     "token": "YOUR_TOKEN_HERE",
-    "token_sha256": "<sha256(token)>",
+    "token_hash": "<scrypt(token)>",
     "whitelist_enabled": true,
     "whitelist": [
       "127.0.0.1",
@@ -212,21 +209,26 @@ The external API can only be enabled when all three conditions are true:
 }
 ```
 
-Generate a token hash:
+Generate a token hash with the same scrypt format used by the app:
 
 ```bash
 python3 - <<'PY'
-import hashlib
-print(hashlib.sha256(b"YOUR_TOKEN_HERE").hexdigest())
+import base64, hashlib, secrets
+salt = secrets.token_bytes(16)
+digest = hashlib.scrypt(b"YOUR_TOKEN_HERE", salt=salt, n=2**14, r=8, p=1, dklen=32)
+print("scrypt$16384$8$1$%s$%s" % (
+    base64.urlsafe_b64encode(salt).decode().rstrip("="),
+    base64.urlsafe_b64encode(digest).decode().rstrip("="),
+))
 PY
 ```
 
-If you only keep `api.token_sha256`, the external API still works, but the Settings page cannot reveal/copy the current token because only the hash is stored.
+If you only keep `api.token_hash`, the external API still works, but the Settings page cannot reveal/copy the current token because only the hash is stored.
 
 ### Recommended token workflow
 
 - Generate a random token locally
-- Keep `api.token` and `api.token_sha256` in sync if you want Settings to reveal/copy the token later
+- Keep `api.token` and `api.token_hash` in sync if you want Settings to reveal/copy the token later
 - Use whitelist mode if the caller IP range is predictable
 - Keep the plain token in your API client, script, secret manager, or password manager
 - Never commit the real token to Git
@@ -255,37 +257,44 @@ Config example:
 {
   "auth": {
     "enabled": true,
-    "username_sha256": "<sha256(username)>",
-    "password_sha256": "<sha256(password)>",
+    "username_hash": "<scrypt(username)>",
+    "password_hash": "<scrypt(password)>",
     "session_ttl_min": 30,
     "realm": "Light RID Scanner"
   }
 }
 ```
 
-Generate username/password hashes:
+Generate username/password hashes with the same scrypt format used by the app:
 
 ```bash
 python3 - <<'PY'
-import hashlib
-print("user:", hashlib.sha256("your_user".encode()).hexdigest())
-print("pass:", hashlib.sha256("your_pass".encode()).hexdigest())
+import base64, hashlib, secrets
+def hash_secret(text):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(text.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+    return "scrypt$16384$8$1$%s$%s" % (
+        base64.urlsafe_b64encode(salt).decode().rstrip("="),
+        base64.urlsafe_b64encode(digest).decode().rstrip("="),
+    )
+print("user:", hash_secret("your_user"))
+print("pass:", hash_secret("your_pass"))
 PY
 ```
 
-SSO-style login is available for trusted launchers. The URL uses the configured username/password SHA-256 hashes plus a server-side `check` code:
+SSO-style login is available for trusted launchers. The URL uses only a server-side `check` code:
 
 ```text
-/login?user=<sha256(username)>&password=<sha256(password)>&check=<server-check-code>
+/login?check=<server-check-code>
 ```
 
 The Settings page generates and stores the `check` code. Deleting that item from the Settings list invalidates the link immediately.
 
-For compatibility with old local shortcuts, the password separator can also be parsed from these forms, but a valid `check` code is still required:
+Old local shortcuts that still include `user` or `password` query parts are tolerated as inert strings, but only `check` is validated.
 
 ```text
-/login?user=<sha256(username)>,password=<sha256(password)>&check=<server-check-code>
-/login?user=<sha256(username)>?password=<sha256(password)>?check=<server-check-code>
+/login?user=<ignored>&password=<ignored>&check=<server-check-code>
+/login?user=<ignored>?password=<ignored>?check=<server-check-code>
 ```
 
 Settings generates SSO links after a fresh username/password check. The generated URL can be used by an external SSO launcher and remains valid until its `check` code is deleted from the list.

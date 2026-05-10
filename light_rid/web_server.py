@@ -6284,6 +6284,10 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .access-subcard{border:1px solid var(--border);border-radius:4px;background:var(--card2);padding:12px;display:grid;gap:12px;min-width:0}
 .access-subcard.full{grid-column:1/-1}
 .access-subhead{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.access-subcard.collapsible>.access-subhead{cursor:pointer;user-select:none}
+.access-subcard.collapsible>.access-subhead::after{content:'收起';font:700 12px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:5px 7px;background:var(--card)}
+.access-subcard.collapsible.collapsed>.access-subhead::after{content:'展开'}
+.access-subcard.collapsible.collapsed>:not(.access-subhead){display:none}
 .access-subtitle{font:700 15px/1.2 var(--font-ui);color:var(--txt)}
 .access-subcopy{margin-top:4px;color:var(--muted);font-size:12px;line-height:1.5}
 .access-subcard .list-row,.access-subcard .empty-state{background:var(--card)}
@@ -6550,7 +6554,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <label><input id="cfg-notify-reonline" type="checkbox"> 允许重上线通知</label>
               </div>
             </div>
-            <div class="access-subcard full">
+            <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">网页登录</div>
@@ -6572,7 +6576,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               </div>
               <div class="micro" id="auth-method-state">至少保留一种网页登录方式；关闭账号密码直接登录后，账号密码仍用于设置页二次确认。</div>
             </div>
-            <div class="access-subcard full">
+            <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">通行密钥登录</div>
@@ -6588,7 +6592,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <div class="micro" id="passkey-state">完成网页登录账号和密码配置后，可在这里添加通行密钥。</div>
               <div id="passkey-list" class="passkey-list"></div>
             </div>
-            <div class="access-subcard full">
+            <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">SSO 登录链接</div>
@@ -6613,7 +6617,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制；命中有效 SSO 链接时优先于其它网页登录方式。</div>
               <div id="login-link-list" class="list-wrap sso-link-list"></div>
             </div>
-            <div class="access-subcard full">
+            <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">API Token</div>
@@ -6638,7 +6642,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <label><input id="cfg-api-enabled" type="checkbox"> 启用外部 API</label>
               </div>
             </div>
-            <div class="access-subcard full">
+            <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">API 白名单</div>
@@ -6653,7 +6657,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
                 <div class="field full"><label>地址列表</label><textarea id="cfg-api-whitelist" spellcheck="false" style="min-height:140px"></textarea><div class="micro">每行一个 IP 或 CIDR。</div></div>
               </div>
             </div>
-            <div class="access-subcard full">
+            <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">网页访问规则</div>
@@ -6975,6 +6979,23 @@ function on(id, type, handler){
   var el = qs(id);
   if(el) el.addEventListener(type, handler);
   return el;
+}
+function bindAccessCollapsibles(){
+  qsa('.access-subcard.collapsible > .access-subhead').forEach(function(head){
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    function toggle(){
+      var card = head.closest('.access-subcard');
+      if(card) card.classList.toggle('collapsed');
+    }
+    head.addEventListener('click', toggle);
+    head.addEventListener('keydown', function(ev){
+      if(ev.key === 'Enter' || ev.key === ' '){
+        ev.preventDefault();
+        toggle();
+      }
+    });
+  });
 }
 async function guarded(action, statusId, okText, okMs, warnMs){
   try{
@@ -9544,6 +9565,7 @@ function initializeSettingsPage(){
   bindMetricActions();
   bindDataTransferActions();
   bindEulaActions();
+  bindAccessCollapsibles();
   bindAccessActions();
   bindSystemServiceActions();
   bindRawActions();
@@ -10025,23 +10047,23 @@ def http_server_thread() -> None:
                 if not _auth_enabled():
                     self._redirect(next_path)
                     return
-                user_hash = str((query.get("user") or [""])[0] or "")
-                pass_hash = str((query.get("password") or [""])[0] or "")
+                user_value = str((query.get("user") or [""])[0] or "")
+                pass_value = str((query.get("password") or [""])[0] or "")
                 check_code = str((query.get("check") or [""])[0] or "")
-                if user_hash and not pass_hash and ",password=" in user_hash:
-                    user_hash, pass_hash = user_hash.split(",password=", 1)
-                if user_hash and not pass_hash and "?password=" in user_hash:
-                    user_hash, pass_hash = user_hash.split("?password=", 1)
-                if pass_hash and not check_code and "?check=" in pass_hash:
-                    pass_hash, check_code = pass_hash.split("?check=", 1)
-                if user_hash and pass_hash:
+                if user_value and not pass_value and ",password=" in user_value:
+                    _ignored_user, pass_value = user_value.split(",password=", 1)
+                if user_value and not pass_value and "?password=" in user_value:
+                    _ignored_user, pass_value = user_value.split("?password=", 1)
+                if pass_value and not check_code and "?check=" in pass_value:
+                    _ignored_pass, check_code = pass_value.split("?check=", 1)
+                if check_code:
                     ip = _client_ip_from_handler(self)
-                    subject = (user_hash[:12] + ":" + check_code[:12])
+                    subject = check_code[:12]
                     limited, retry_after = _rate_limited("login-sso", ip, subject, limit=8, window_sec=300, block_sec=900)
                     if limited:
                         self._rate_limit_fail(retry_after)
                         return
-                    sso_item = _auth_check_sso_link(user_hash, pass_hash, check_code)
+                    sso_item = _auth_check_sso_link(check_code)
                     ok_login = bool(sso_item)
                     _rate_note("login-sso", ip, subject, success=ok_login, limit=8, window_sec=300, block_sec=900)
                     _op_log("login-sso", "next=" + next_path, actor=subject, ip=ip, ok=ok_login)

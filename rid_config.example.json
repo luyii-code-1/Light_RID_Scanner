@@ -1,4 +1,4 @@
-﻿{
+{
   "basic": {
     "iface": null,
     "channel": null,
@@ -78,20 +78,21 @@
   },
   "auth": {
     "enabled": false,
-    "username_sha256": "",
-    "password_sha256": "",
+    "username_hash": "",
+    "password_hash": "",
     "realm": "Light RID Scanner",
     "session_ttl_min": 30,
     "login_methods": [
       "password",
       "passkey"
     ],
+    "sso_links": [],
     "passkeys": []
   },
   "api": {
     "enabled": false,
     "token": "",
-    "token_sha256": "",
+    "token_hash": "",
     "tokens": [],
     "whitelist_enabled": false,
     "whitelist": []

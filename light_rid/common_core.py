@@ -58,16 +58,25 @@ ODID_MSG_SIZE        = 25
 ODID_PROTOCOL_MAX    = 2
 DJI_RID_VENDOR_TYPE  = 0x0D
 DJI_RID_VENDOR_PREFIX = ODID_OUI + bytes([DJI_RID_VENDOR_TYPE])
-RID_NEW_FW_BODY_MIN  = 60
+RID_NEW_FW_BODY_MIN  = 83
 RID_NEW_FW_SN_LEN    = 20
 RID_NEW_FW_UAS_LEN   = 8
+RID_NEW_FW_GB_OFF    = 5
+RID_NEW_FW_GB_MIN    = 78
+RID_NEW_FW_ALL_IDENTIFIERS = b"\xff\xff\xfe"
 RID_NEW_FW_SN_OFF    = 11
 RID_NEW_FW_UAS_OFF   = 31
-RID_NEW_FW_DRONE_LON_OFF = 42
-RID_NEW_FW_DRONE_LAT_OFF = 46
-RID_NEW_FW_ALT_OFF   = 50
-RID_NEW_FW_PILOT_LON_OFF = 52
-RID_NEW_FW_PILOT_LAT_OFF = 56
+RID_NEW_FW_PILOT_LON_OFF = 42
+RID_NEW_FW_PILOT_LAT_OFF = 46
+RID_NEW_FW_PILOT_ALT_OFF = 50
+RID_NEW_FW_DRONE_LON_OFF = 52
+RID_NEW_FW_DRONE_LAT_OFF = 56
+RID_NEW_FW_TRACK_OFF = 60
+RID_NEW_FW_GROUND_SPEED_OFF = 62
+RID_NEW_FW_REL_ALT_OFF = 64
+RID_NEW_FW_VSPEED_OFF = 66
+RID_NEW_FW_GEOID_ALT_OFF = 67
+RID_NEW_FW_BARO_ALT_OFF = 69
 RID_NEW_FW_COORD_SEARCH_MAX = 80
 RID_NEW_FW_SIG_BYTES = 160
 
@@ -951,6 +960,15 @@ def clear_track_store(sn: str | None = None) -> int:
 HISTORY_DETAIL_KEYS = (
     "src_mac","id_type","uas_id","model","last_ch","ch_assumed","lat","lon",
     "alt","speed","vspeed","pilot_lat","pilot_lon","pilot_loc_type","pilot_loc_type_text",
+    "gb_version","gb_identifiers",
+    "operation_category","operation_category_text",
+    "aircraft_category","aircraft_category_text",
+    "pilot_alt","track_deg","ground_speed","vertical_speed",
+    "alt_relative","alt_geoid","alt_baro",
+    "operation_state","operation_state_text",
+    "coord_sys","coord_sys_text",
+    "horizontal_accuracy","vertical_accuracy","speed_accuracy",
+    "timestamp_ms","timestamp_accuracy","timestamp_accuracy_text",
     "rssi","move_dir","ssid",
     "capture_type","firmware_type","last_capture_wall_ts","raw_packets",
     "scan_type","track","track_updated_wall_ts",

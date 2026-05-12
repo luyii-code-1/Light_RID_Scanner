@@ -351,8 +351,19 @@ def _new_fw_read_uas_id(buf: bytes, off: int) -> str:
     raw = bytes(buf[off:off + RID_NEW_FW_UAS_LEN])
     if raw == b"\xff" * RID_NEW_FW_UAS_LEN:
         return ""
-    s = _new_fw_ascii_printable(raw)
+    s = _new_fw_ascii_printable(raw).rstrip("\x00").strip()
     return s[:RID_NEW_FW_UAS_LEN]
+
+def _new_fw_read_ascii(buf: bytes, off: int, ln: int) -> str:
+    if off < 0 or ln <= 0 or off + ln > len(buf):
+        return ""
+    raw = bytes(buf[off:off + ln])
+    if raw == b"\xff" * ln:
+        return ""
+    try:
+        return raw.decode("ascii", errors="ignore").rstrip("\x00").strip()
+    except Exception:
+        return ""
 
 def _new_fw_decode_coord_pair(buf: bytes, off: int) -> dict | None:
     if off < 0 or off + 8 > len(buf):
@@ -412,6 +423,190 @@ def _new_fw_decode_altitude(buf: bytes, off: int) -> float | None:
         return None
     return round(float(raw) * 0.5 - 1000.0, 1)
 
+def _new_fw_decode_u16_scaled(buf: bytes, off: int, scale: float, offset: float,
+                              invalid: int | None = None) -> float | None:
+    if off < 0 or off + 2 > len(buf):
+        return None
+    try:
+        raw = struct.unpack_from("<H", buf, off)[0]
+    except Exception:
+        return None
+    if invalid is not None and raw == invalid:
+        return None
+    return round(float(raw) * float(scale) + float(offset), 1)
+
+def _new_fw_decode_track_deg(buf: bytes, off: int) -> float | None:
+    if off < 0 or off + 2 > len(buf):
+        return None
+    try:
+        raw = struct.unpack_from("<H", buf, off)[0]
+    except Exception:
+        return None
+    if raw == 0xFFFF or raw > 3599:
+        return None
+    return round(float(raw) / 10.0, 1)
+
+def _new_fw_decode_ground_speed(buf: bytes, off: int) -> float | None:
+    return _new_fw_decode_u16_scaled(buf, off, 0.1, 0.0, invalid=0xFFFF)
+
+def _new_fw_decode_vertical_speed(buf: bytes, off: int) -> float | None:
+    if off < 0 or off >= len(buf):
+        return None
+    raw = int(buf[off])
+    if raw == 0xFF:
+        return None
+    speed = float(raw & 0x7F) / 2.0
+    if raw & 0x80:
+        speed = -speed
+    return round(speed, 1)
+
+def _new_fw_decode_uint48_le(buf: bytes, off: int) -> int | None:
+    if off < 0 or off + 6 > len(buf):
+        return None
+    raw = bytes(buf[off:off + 6])
+    if raw == b"\x00" * 6:
+        return None
+    return int.from_bytes(raw, "little", signed=False)
+
+def _new_fw_identifier_present(identifiers: bytes, index: int) -> bool:
+    if index < 1 or index > 21 or len(identifiers) != 3:
+        return False
+    bits = int.from_bytes(identifiers, "big")
+    return bool(bits & (1 << (24 - index)))
+
+RID_NEW_FW_GB_FIELDS = [
+    (1, "sn", 20),
+    (2, "uas_id", 8),
+    (3, "operation_category", 1),
+    (4, "aircraft_category", 1),
+    (5, "pilot_loc_type", 1),
+    (6, "pilot_coord", 8),
+    (7, "pilot_alt", 2),
+    (8, "drone_coord", 8),
+    (9, "track_deg", 2),
+    (10, "ground_speed", 2),
+    (11, "relative_alt", 2),
+    (12, "vertical_speed", 1),
+    (13, "geoid_alt", 2),
+    (14, "baro_alt", 2),
+    (15, "operation_state", 1),
+    (16, "coord_sys", 1),
+    (17, "horizontal_accuracy", 1),
+    (18, "vertical_accuracy", 1),
+    (19, "speed_accuracy", 1),
+    (20, "timestamp_ms", 6),
+    (21, "timestamp_accuracy", 1),
+]
+
+RID_NEW_FW_OPERATION_CATEGORY = {0: "未定义", 1: "开放类", 2: "特定类", 3: "审定类"}
+RID_NEW_FW_AIRCRAFT_CATEGORY = {0: "微型", 1: "轻型", 2: "小型", 3: "中型", 4: "大型"}
+RID_NEW_FW_PILOT_LOC_TYPE = {0: "起飞点位置", 1: "遥控站位置"}
+RID_NEW_FW_OPERATION_STATE = {
+    0: "未报告",
+    1: "地面",
+    2: "空中",
+    3: "紧急",
+    4: "运行识别失效/非紧急",
+    5: "运行识别失效/紧急",
+}
+RID_NEW_FW_COORD_SYS = {0: "WGS-84", 1: "CGCS2000"}
+RID_NEW_FW_TS_ACCURACY = {
+    0: ">0.5s 或未知",
+    1: "<=0.5s",
+    2: "<=0.4s",
+    3: "<=0.3s",
+    4: "<=0.2s",
+    5: "<=0.1s",
+    6: "<=50ms",
+    7: "<=20ms",
+    8: "<=10ms",
+}
+
+def _new_fw_label(mapping: dict, value) -> str:
+    try:
+        v = int(value)
+    except Exception:
+        return ""
+    return str(mapping.get(v, v))
+
+def _decode_new_fw_gb_items(vendor: bytes) -> dict | None:
+    if len(vendor) < RID_NEW_FW_BODY_MIN:
+        return None
+    if vendor[0:3] != ODID_OUI or int(vendor[3]) != DJI_RID_VENDOR_TYPE:
+        return None
+    gb = bytes(vendor[RID_NEW_FW_GB_OFF:])
+    if len(gb) < 6 or int(gb[0]) != 0xFF:
+        return None
+    data_len = int(gb[2])
+    identifiers = bytes(gb[3:6])
+    cursor = RID_NEW_FW_GB_OFF + 6
+    data_end = min(len(vendor), cursor + data_len)
+    fields: dict = {
+        "dji_prefix": vendor[0:5].hex(" "),
+        "gb_data_type": int(gb[0]),
+        "gb_version_raw": int(gb[1]),
+        "gb_version": f"V{int(gb[1]) >> 5}.{int(gb[1]) & 0x1F}",
+        "gb_data_len": data_len,
+        "gb_identifiers": identifiers.hex(" "),
+    }
+    for index, name, ln in RID_NEW_FW_GB_FIELDS:
+        if not _new_fw_identifier_present(identifiers, index):
+            continue
+        if cursor + ln > len(vendor) or cursor + ln > data_end:
+            return None
+        off = cursor
+        raw = bytes(vendor[off:off + ln])
+        cursor += ln
+        if name == "sn":
+            fields["sn"] = _new_fw_read_ascii(vendor, off, ln)
+        elif name == "uas_id":
+            fields["uas_id"] = _new_fw_read_ascii(vendor, off, ln)
+        elif name == "operation_category":
+            fields["operation_category"] = int(raw[0])
+            fields["operation_category_text"] = _new_fw_label(RID_NEW_FW_OPERATION_CATEGORY, raw[0])
+        elif name == "aircraft_category":
+            fields["aircraft_category"] = int(raw[0])
+            fields["aircraft_category_text"] = _new_fw_label(RID_NEW_FW_AIRCRAFT_CATEGORY, raw[0])
+        elif name == "pilot_loc_type":
+            fields["pilot_loc_type"] = int(raw[0])
+            fields["pilot_loc_type_text"] = _new_fw_label(RID_NEW_FW_PILOT_LOC_TYPE, raw[0])
+        elif name == "pilot_coord":
+            fields["pilot_coord"] = _new_fw_decode_coord_pair(vendor, off)
+        elif name == "pilot_alt":
+            fields["pilot_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0)
+        elif name == "drone_coord":
+            fields["drone_coord"] = _new_fw_decode_coord_pair(vendor, off)
+        elif name == "track_deg":
+            fields["track_deg"] = _new_fw_decode_track_deg(vendor, off)
+        elif name == "ground_speed":
+            fields["ground_speed"] = _new_fw_decode_ground_speed(vendor, off)
+        elif name == "relative_alt":
+            fields["relative_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -9000.0, invalid=0)
+        elif name == "vertical_speed":
+            fields["vertical_speed"] = _new_fw_decode_vertical_speed(vendor, off)
+        elif name == "geoid_alt":
+            fields["geoid_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0)
+        elif name == "baro_alt":
+            fields["baro_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0)
+        elif name == "operation_state":
+            fields["operation_state"] = int(raw[0])
+            fields["operation_state_text"] = _new_fw_label(RID_NEW_FW_OPERATION_STATE, raw[0])
+        elif name == "coord_sys":
+            fields["coord_sys"] = int(raw[0])
+            fields["coord_sys_text"] = _new_fw_label(RID_NEW_FW_COORD_SYS, raw[0])
+        elif name == "horizontal_accuracy":
+            fields["horizontal_accuracy"] = int(raw[0])
+        elif name == "vertical_accuracy":
+            fields["vertical_accuracy"] = int(raw[0])
+        elif name == "speed_accuracy":
+            fields["speed_accuracy"] = int(raw[0])
+        elif name == "timestamp_ms":
+            fields["timestamp_ms"] = _new_fw_decode_uint48_le(vendor, off)
+        elif name == "timestamp_accuracy":
+            fields["timestamp_accuracy"] = int(raw[0])
+            fields["timestamp_accuracy_text"] = _new_fw_label(RID_NEW_FW_TS_ACCURACY, raw[0])
+    return fields
+
 def _new_fw_coord_rank(coord: dict) -> tuple[int, int]:
     try:
         lat = float(coord.get("lat"))
@@ -457,28 +652,39 @@ def _new_fw_payload_sig(body: bytes) -> int:
 def decode_new_firmware_payload(buf: bytes, ssid_sn: str | None = None) -> dict | None:
     """Decode DJI's newer Beacon vendor body starting at FA:0B:BC:0D.
 
-    This path is intentionally separate from the standard ODID decoder. The new
-    layout uses fixed vendor-body offsets for RID, UAS ID, aircraft position,
-    altitude, and pilot position.
+    This path is intentionally separate from the standard ODID decoder. DJI's
+    subtype 0x0d Beacon carries a GB 46750-2025 field bitmap at vendor[5:11];
+    fields are read in GB item order 001..021, advancing the cursor by each
+    present field's fixed size.
     """
     if not buf or len(buf) < RID_NEW_FW_BODY_MIN:
         return None
+    vendor = bytes(buf)
+    fields = _decode_new_fw_gb_items(vendor)
+    if not fields:
+        return None
     ssid_rid = _new_fw_ssid_rid(ssid_sn)
-    rid = _new_fw_read_rid_at(buf, RID_NEW_FW_SN_OFF)
+    rid = str(fields.get("sn") or "")
     if not rid:
         return None
     if ssid_rid and rid != ssid_rid:
         return None
-    uas_id = _new_fw_read_uas_id(buf, RID_NEW_FW_UAS_OFF)
-    drone_coord = _new_fw_decode_coord_pair_at(buf, RID_NEW_FW_DRONE_LON_OFF, RID_NEW_FW_DRONE_LAT_OFF)
-    pilot_coord = _new_fw_decode_coord_pair_at(buf, RID_NEW_FW_PILOT_LON_OFF, RID_NEW_FW_PILOT_LAT_OFF)
-    alt = _new_fw_decode_altitude(buf, RID_NEW_FW_ALT_OFF)
+    uas_id = str(fields.get("uas_id") or "")
+    drone_coord = fields.get("drone_coord") if isinstance(fields.get("drone_coord"), dict) else None
+    pilot_coord = fields.get("pilot_coord") if isinstance(fields.get("pilot_coord"), dict) else None
+    alt_geoid = fields.get("geoid_alt")
+    alt_rel = fields.get("relative_alt")
+    alt_baro = fields.get("baro_alt")
+    alt_primary = alt_geoid if alt_geoid is not None else (alt_rel if alt_rel is not None else alt_baro)
     loc = {
         "lat": drone_coord["lat"] if drone_coord else None,
         "lon": drone_coord["lon"] if drone_coord else None,
-        "alt_geodetic": alt,
-        "speed_ms": None,
-        "vspeed_ms": None,
+        "alt_geodetic": alt_primary,
+        "alt_relative": alt_rel,
+        "alt_geoid": alt_geoid,
+        "alt_baro": alt_baro,
+        "speed_ms": fields.get("ground_speed"),
+        "vspeed_ms": fields.get("vertical_speed"),
         "direction_deg": None,
     }
     system = None
@@ -486,14 +692,41 @@ def decode_new_firmware_payload(buf: bytes, ssid_sn: str | None = None) -> dict 
         system = {
             "pilot_lat": pilot_coord["lat"],
             "pilot_lon": pilot_coord["lon"],
-            "pilot_loc_type": None,
-            "pilot_loc_type_text": "new_fw_fixed",
+            "pilot_alt": fields.get("pilot_alt"),
+            "pilot_loc_type": fields.get("pilot_loc_type"),
+            "pilot_loc_type_text": str(fields.get("pilot_loc_type_text") or "遥控站位置"),
         }
+    metadata = {
+        "gb_version": fields.get("gb_version"),
+        "gb_identifiers": fields.get("gb_identifiers"),
+        "operation_category": fields.get("operation_category"),
+        "operation_category_text": fields.get("operation_category_text"),
+        "aircraft_category": fields.get("aircraft_category"),
+        "aircraft_category_text": fields.get("aircraft_category_text"),
+        "track_deg": fields.get("track_deg"),
+        "ground_speed": fields.get("ground_speed"),
+        "vertical_speed": fields.get("vertical_speed"),
+        "alt_relative": alt_rel,
+        "alt_geoid": alt_geoid,
+        "alt_baro": alt_baro,
+        "pilot_alt": fields.get("pilot_alt"),
+        "operation_state": fields.get("operation_state"),
+        "operation_state_text": fields.get("operation_state_text"),
+        "coord_sys": fields.get("coord_sys"),
+        "coord_sys_text": fields.get("coord_sys_text"),
+        "horizontal_accuracy": fields.get("horizontal_accuracy"),
+        "vertical_accuracy": fields.get("vertical_accuracy"),
+        "speed_accuracy": fields.get("speed_accuracy"),
+        "timestamp_ms": fields.get("timestamp_ms"),
+        "timestamp_accuracy": fields.get("timestamp_accuracy"),
+        "timestamp_accuracy_text": fields.get("timestamp_accuracy_text"),
+    }
     return {
         "basic_id": {"uas_id": rid, "id_type": "Serial"},
         "uas_id": uas_id,
         "location": loc,
         "system": system,
+        "metadata": metadata,
     }
 
 def _append_new_firmware_result(results: list[tuple[bytes, dict]], dedup: set[int], body: bytes, ssid_sn: str | None) -> None:

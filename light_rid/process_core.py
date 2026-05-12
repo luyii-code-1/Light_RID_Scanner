@@ -5,6 +5,25 @@ def _snap(e: dict) -> dict:
     if CHANGE_ON_PL:   s["pl_sig"] = e.get("pl_sig")
     return s
 
+NEW_FW_DETAIL_KEYS = (
+    "gb_version", "gb_identifiers",
+    "operation_category", "operation_category_text",
+    "aircraft_category", "aircraft_category_text",
+    "pilot_alt", "track_deg", "ground_speed", "vertical_speed",
+    "alt_relative", "alt_geoid", "alt_baro",
+    "operation_state", "operation_state_text",
+    "coord_sys", "coord_sys_text",
+    "horizontal_accuracy", "vertical_accuracy", "speed_accuracy",
+    "timestamp_ms", "timestamp_accuracy", "timestamp_accuracy_text",
+)
+
+def _copy_new_fw_detail(dst: dict, src: dict | None) -> None:
+    if not isinstance(src, dict):
+        return
+    for key in NEW_FW_DETAIL_KEYS:
+        if key in src:
+            dst[key] = src.get(key)
+
 def _history_merge(dst: dict, src: dict) -> None:
     if not src:
         return
@@ -48,6 +67,7 @@ def _history_merge(dst: dict, src: dict) -> None:
         dst["pilot_lon"] = src.get("pilot_lon")
         dst["pilot_loc_type"] = src.get("pilot_loc_type")
         dst["pilot_loc_type_text"] = src.get("pilot_loc_type_text")
+    _copy_new_fw_detail(dst, src)
     src_cap_ts = src.get("last_capture_wall_ts")
     dst_cap_ts = dst.get("last_capture_wall_ts")
     if src_cap_ts is not None and (dst_cap_ts is None or float(src_cap_ts) > float(dst_cap_ts)):
@@ -93,6 +113,7 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
             "pilot_lon": e.get("pilot_lon"),
             "pilot_loc_type": e.get("pilot_loc_type"),
             "pilot_loc_type_text": e.get("pilot_loc_type_text"),
+            "pilot_alt": e.get("pilot_alt"),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
             "raw_packets": list(e.get("raw_packets") or [])[-3:],
             "scan_type": _scan_type_key(e.get("scan_type")),
@@ -115,6 +136,7 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h["pilot_lon"] = e.get("pilot_lon")
     h["pilot_loc_type"] = e.get("pilot_loc_type")
     h["pilot_loc_type_text"] = e.get("pilot_loc_type_text")
+    _copy_new_fw_detail(h, e)
     h["rssi"] = e.get("rssi")
     h["move_dir"] = e.get("move_dir")
     h["ssid"] = e.get("ssid")
@@ -137,6 +159,7 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h.setdefault("pilot_lon", e.get("pilot_lon"))
     h.setdefault("pilot_loc_type", e.get("pilot_loc_type"))
     h.setdefault("pilot_loc_type_text", e.get("pilot_loc_type_text"))
+    h.setdefault("pilot_alt", e.get("pilot_alt"))
     h.setdefault("raw_packets", list(e.get("raw_packets") or [])[-3:])
     h.setdefault("scan_type", _scan_type_key(e.get("scan_type")))
     h.setdefault("uas_id", _uas_id_clean(e.get("uas_id")))
@@ -153,6 +176,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
     basic = decoded.get("basic_id")
     loc   = decoded.get("location")
     sys_loc = decoded.get("system")
+    meta = decoded.get("metadata") if isinstance(decoded, dict) else None
     uas_id_value = _uas_id_clean(decoded.get("uas_id"))
 
     if basic and basic.get("uas_id"):
@@ -206,6 +230,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 "pl_sig":None, "rssi":None, "last_ch":None, "ch_assumed":False,
                 "lat":None, "lon":None, "alt":None, "speed":None, "vspeed":None,
                 "pilot_lat":None, "pilot_lon":None,
+                "pilot_alt":None,
                 "pilot_loc_type":None, "pilot_loc_type_text":"",
                 "scan_type":scan_type_key,
                 "firmware_type":firmware_type_key,
@@ -245,6 +270,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             e["firmware_type"] = firmware_type_key
         if uas_id_value:
             e["uas_id"] = uas_id_value
+        if firmware_type_key == "new":
+            _copy_new_fw_detail(e, meta)
         if ssid is not None:
             e["ssid"] = str(ssid)
         e["capture_type"] = str(capture_type or e.get("capture_type") or "")
@@ -328,6 +355,14 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 e["alt"]    = loc.get("alt_geodetic")
                 e["speed"]  = loc.get("speed_ms")
                 e["vspeed"] = loc.get("vspeed_ms")
+                if firmware_type_key == "new":
+                    for key, src_key in (
+                        ("alt_relative", "alt_relative"),
+                        ("alt_geoid", "alt_geoid"),
+                        ("alt_baro", "alt_baro"),
+                    ):
+                        if loc.get(src_key) is not None:
+                            e[key] = loc.get(src_key)
                 if e.get("lat") is not None and e.get("lon") is not None:
                     _track_append_point(e, float(e.get("lat")), float(e.get("lon")), float(now_wall))
 
@@ -347,6 +382,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 if (-90.0 <= plat <= 90.0) and (-180.0 <= plon <= 180.0):
                     e["pilot_lat"] = plat
                     e["pilot_lon"] = plon
+                    e["pilot_alt"] = sys_loc.get("pilot_alt")
                     e["pilot_loc_type"] = sys_loc.get("pilot_loc_type")
                     e["pilot_loc_type_text"] = str(sys_loc.get("pilot_loc_type_text") or "")
             except Exception:
@@ -621,8 +657,31 @@ def _state_snapshot() -> dict:
                 "vspd": cur.get("vspeed", hist.get("vspeed")),
                 "pilot_lat": cur.get("pilot_lat", hist.get("pilot_lat")),
                 "pilot_lon": cur.get("pilot_lon", hist.get("pilot_lon")),
+                "pilot_alt": cur.get("pilot_alt", hist.get("pilot_alt")),
                 "pilot_loc_type": cur.get("pilot_loc_type", hist.get("pilot_loc_type")),
                 "pilot_loc_type_text": cur.get("pilot_loc_type_text", hist.get("pilot_loc_type_text","")) or "",
+                "gb_version": cur.get("gb_version", hist.get("gb_version")),
+                "gb_identifiers": cur.get("gb_identifiers", hist.get("gb_identifiers")),
+                "operation_category": cur.get("operation_category", hist.get("operation_category")),
+                "operation_category_text": cur.get("operation_category_text", hist.get("operation_category_text")),
+                "aircraft_category": cur.get("aircraft_category", hist.get("aircraft_category")),
+                "aircraft_category_text": cur.get("aircraft_category_text", hist.get("aircraft_category_text")),
+                "track_deg": cur.get("track_deg", hist.get("track_deg")),
+                "ground_speed": cur.get("ground_speed", hist.get("ground_speed")),
+                "vertical_speed": cur.get("vertical_speed", hist.get("vertical_speed")),
+                "alt_relative": cur.get("alt_relative", hist.get("alt_relative")),
+                "alt_geoid": cur.get("alt_geoid", hist.get("alt_geoid")),
+                "alt_baro": cur.get("alt_baro", hist.get("alt_baro")),
+                "operation_state": cur.get("operation_state", hist.get("operation_state")),
+                "operation_state_text": cur.get("operation_state_text", hist.get("operation_state_text")),
+                "coord_sys": cur.get("coord_sys", hist.get("coord_sys")),
+                "coord_sys_text": cur.get("coord_sys_text", hist.get("coord_sys_text")),
+                "horizontal_accuracy": cur.get("horizontal_accuracy", hist.get("horizontal_accuracy")),
+                "vertical_accuracy": cur.get("vertical_accuracy", hist.get("vertical_accuracy")),
+                "speed_accuracy": cur.get("speed_accuracy", hist.get("speed_accuracy")),
+                "timestamp_ms": cur.get("timestamp_ms", hist.get("timestamp_ms")),
+                "timestamp_accuracy": cur.get("timestamp_accuracy", hist.get("timestamp_accuracy")),
+                "timestamp_accuracy_text": cur.get("timestamp_accuracy_text", hist.get("timestamp_accuracy_text")),
                 "rssi": cur.get("rssi", hist.get("rssi")),
                 "pkts": hist.get("pkt_count_total", cur.get("pkt_count",0)),
                 "dir": cur.get("move_dir", hist.get("move_dir")) or "-",

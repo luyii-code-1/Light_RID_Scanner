@@ -2,11 +2,11 @@ _PAGE_HTML = """<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Light RID Scanner</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="/assets/leaflet/leaflet.css"/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/assets/leaflet/leaflet.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -352,6 +352,20 @@ body.bottom-all-collapsed{
 
 /* -- Leaflet Map -- */
 #map{flex:1;width:100%;min-height:0}
+.offline-map-tile{
+  display:flex;align-items:flex-start;justify-content:flex-start;
+  width:256px;height:256px;padding:8px;
+  background:
+    linear-gradient(to right, color-mix(in srgb,var(--border) 58%,transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb,var(--border) 58%,transparent) 1px, transparent 1px),
+    color-mix(in srgb,var(--panel) 92%, black);
+  background-size:64px 64px;
+  color:var(--dim);font:700 11px/1 var(--font-ui);
+}
+.offline-map-badge{
+  padding:4px 6px;border:1px solid var(--border);border-radius:4px;
+  background:color-mix(in srgb,var(--panel) 88%,transparent);
+}
 .rid-drone-icon{background:transparent;border:0}
 .drone-pin{position:relative;width:74px;height:58px;pointer-events:none;opacity:var(--drone-op,1)}
 .drone-symbol{
@@ -631,9 +645,7 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 <header>
   <h1>✈ Light RID Scanner</h1><code class="app-version-label">__APP_VERSION_LABEL__</code>
   <div class="head-stats">
-  <span class="stat">在线 <b id="n-live">-</b></span>
-  <span class="stat ls">离线 <b id="n-lost">-</b></span>
-  <span class="stat cs">信道 <b id="cur-ch">-</b></span>
+  <span class="stat">全部/在线 <b id="n-total">-</b>/<b id="n-live">-</b></span>
   <span class="stat ts">更新 <b id="cur-ts">-</b></span>
   <span class="stat"><span id="dot-ws"></span><span id="ws-status">连接中</span></span>
   <button class="btn-mini" id="btn-clear-history" type="button">清空历史</button>
@@ -989,7 +1001,6 @@ function buildInfoHtml(e){
   html += infoRowHtml('最后数据包', String(e.last_pkt_time || e.capture_time || '-'));
   html += infoRowHtml('ID类型', String(e.id_type || '-'));
   html += infoRowHtml('信号', e.rssi==null ? 'N/A' : (e.rssi + 'dBm'));
-  html += infoRowHtml('信道', String(e.ch || '?') + (e.ch_assumed ? ' (assumed)' : ''));
   html += infoRowHtml('包数', String(e.pkts==null?0:e.pkts));
   html += infoRowHtml('纬度', fmt(e.lat,6,''));
   html += infoRowHtml('经度', fmt(e.lon,6,''));
@@ -997,8 +1008,16 @@ function buildInfoHtml(e){
   html += infoRowHtml('飞手经度', fmt(e.pilot_lon,6,''));
   html += infoRowHtml('飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-'));
   html += infoRowHtml('高度', fmt(e.alt,1,'m'));
+  html += infoRowHtml('相对高度', fmt(e.alt_relative,1,'m'));
+  html += infoRowHtml('大地高度', fmt(e.alt_geoid,1,'m'));
+  html += infoRowHtml('气压高度', fmt(e.alt_baro,1,'m'));
   html += infoRowHtml('速度', fmt(e.spd,2,'m/s'));
   html += infoRowHtml('垂直速度', fmt(e.vspd,2,'m/s'));
+  html += infoRowHtml('报送速度', fmt(e.track_deg,1,'°') + ' / ' + fmt(e.ground_speed,2,'m/s') + ' / ' + fmt(e.vertical_speed,2,'m/s'));
+  html += infoRowHtml('水平/垂直/速度精度', String(e.horizontal_accuracy ?? '-') + ' / ' + String(e.vertical_accuracy ?? '-') + ' / ' + String(e.speed_accuracy ?? '-'));
+  html += infoRowHtml('坐标系', String(e.coord_sys_text || e.coord_sys || '-'));
+  html += infoRowHtml('运行类别/分类', String(e.operation_category_text || e.operation_category || '-') + ' / ' + String(e.aircraft_category_text || e.aircraft_category || '-'));
+  html += infoRowHtml('运行状态', String(e.operation_state_text || e.operation_state || '-'));
   html += infoRowHtml('方向', String(e.dir || '-'));
   html += infoRowHtml('首次上线', String(e.first_seen || '-'));
   html += infoRowHtml('最后上线', String(e.last_seen || '-'));
@@ -2198,7 +2217,7 @@ function buildExtraUi(){
     sniffStat.innerHTML = '采集 <b id="sniff-state" class="warn">-</b>';
     clearBtn.parentNode.insertBefore(sniffStat, clearBtn);
   }
-  if(clearBtn && !qs('btn-theme')){
+  if(false && clearBtn && !qs('btn-theme')){
     var themeBtn = document.createElement('button');
     themeBtn.className = 'btn-mini';
     themeBtn.id = 'btn-theme';
@@ -2384,7 +2403,7 @@ function buildExtraUi(){
     restoreBtn.addEventListener('click', function(){
       setMapPanelCollapsed(false);
       setLogPanelCollapsed(false);
-      setApPanelCollapsed(false);
+      setApPanelCollapsed(true);
       syncBottomPanelLayout();
     });
     document.body.appendChild(restoreBtn);
@@ -2487,7 +2506,7 @@ function buildExtraUi(){
   syncBottomPanelLayout();
 
   if(qs('btn-clear-history')) qs('btn-clear-history').addEventListener('click', clearHistory);
-  if(qs('btn-theme')) qs('btn-theme').addEventListener('click', toggleTheme);
+  if(qs('btn-theme')) qs('btn-theme').style.display = 'none';
   if(qs('btn-dji-lookup')) qs('btn-dji-lookup').addEventListener('click', openDjiLookup);
   if(qs('btn-freeze')) qs('btn-freeze').addEventListener('click', toggleFreeze);
   if(qs('btn-web-notify')) qs('btn-web-notify').addEventListener('click', requestWebNotifyPermission);
@@ -3272,11 +3291,12 @@ function onData(d){
   buildExtraUi();
   applyMeta((d && d.meta) || {});
   qs('cur-ts').textContent = d.ts;
-  qs('cur-ch').textContent = d.ch;
+  if(qs('cur-ch')) qs('cur-ch').textContent = d.ch;
   var list = (Array.isArray(d.drones) ? d.drones : []).filter(includeDroneByFirmware);
   var live = list.filter(function(x){ return x && !x.lost; }).length;
+  if(qs('n-total')) qs('n-total').textContent = String(list.length);
   qs('n-live').textContent = live;
-  qs('n-lost').textContent = list.length - live;
+  if(qs('n-lost')) qs('n-lost').textContent = list.length - live;
   syncFieldHighlights(list);
   handleDroneNotifications(list);
   latestDroneMap = {};
@@ -3634,12 +3654,35 @@ function flushTrackLayerRenderQueue(){
 function initMap(){
   if(map) return;
   map = L.map('map', {zoomControl:true, attributionControl:true, maxZoom:30});
-  L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
+  var offlineLayer = null;
+  function ensureOfflineLayer(){
+    if(offlineLayer){
+      if(!map.hasLayer(offlineLayer)) offlineLayer.addTo(map);
+      return;
+    }
+    var OfflineGrid = L.GridLayer.extend({
+      createTile: function(coords){
+        var tile = L.DomUtil.create('div', 'offline-map-tile');
+        tile.innerHTML = '<span class="offline-map-badge">离线地图</span>';
+        return tile;
+      }
+    });
+    offlineLayer = new OfflineGrid({tileSize:256, maxZoom:30, attribution:'本地离线底图'});
+    offlineLayer.addTo(map);
+    showBanner('当前客户端无法加载在线底图，已切换为本地离线地图。飞机、轨迹和报警区域仍可显示。', 'warn', 5200, {persist:false});
+  }
+  var onlineLayer = L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
     subdomains:['1','2','3','4'],
     maxZoom:30,
     maxNativeZoom:18,
     attribution:'&copy; 高德地图'
-  }).addTo(map);
+  });
+  var tileErrors = 0;
+  onlineLayer.on('tileerror', function(){
+    tileErrors += 1;
+    if(tileErrors >= 2) ensureOfflineLayer();
+  });
+  onlineLayer.addTo(map);
   var b = baseFromMeta(metaState);
   if(b.ok) map.setView([b.lat, b.lon], b.zoom);
   else map.setView([30, 114], 5);
@@ -4565,7 +4608,7 @@ pre{margin:0;min-height:360px;max-height:60vh;overflow:auto;background:var(--car
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回设置</button>
-      <button class="btn" id="btn-theme" type="button">浅色</button>
+      <button class="btn" id="btn-theme" type="button" style="display:none">浅色</button>
       <button class="btn" id="btn-refresh" type="button">刷新状态</button>
     </div>
   </div>
@@ -5479,7 +5522,6 @@ _MAIN_PAGE_PATCH_JS = r"""
         ['捕获时间', String(e.capture_time || '-')],
         ['最后数据包', String(e.last_pkt_time || e.capture_time || '-')],
         ['信号', e.rssi==null ? 'N/A' : (e.rssi + 'dBm')],
-        ['信道', String(e.ch || '?') + (e.ch_assumed ? ' (assumed)' : '')],
         ['包数', String(e.pkts==null?0:e.pkts)],
         ['数据更新时间', String(e.age_text || fmtAge(e.age))],
         ['在线时长', fmtDurSec(e.online_dur)],
@@ -5490,14 +5532,19 @@ _MAIN_PAGE_PATCH_JS = r"""
       var dronePos = [
         ['纬度', fmt(e.lat,6,'')],
         ['经度', fmt(e.lon,6,'')],
-        ['高度', fmt(e.alt,1,'m')],
-        ['速度', fmt(e.spd,2,'m/s')],
-        ['垂直速度', fmt(e.vspd,2,'m/s')],
+        ['当前高度', fmt(e.alt,1,'m')],
+        ['相对/大地/气压高度', fmt(e.alt_relative,1,'m') + ' / ' + fmt(e.alt_geoid,1,'m') + ' / ' + fmt(e.alt_baro,1,'m')],
+        ['报送 速度/地速垂速', fmt(e.track_deg,1,'°') + ' / ' + fmt(e.ground_speed,2,'m/s') + ' / ' + fmt(e.vertical_speed,2,'m/s')],
+        ['水平/垂直/速度 精度', String(e.horizontal_accuracy ?? '-') + ' / ' + String(e.vertical_accuracy ?? '-') + ' / ' + String(e.speed_accuracy ?? '-')],
+        ['坐标系', String(e.coord_sys_text || e.coord_sys || '-')],
+        ['运行类别/分类', String(e.operation_category_text || e.operation_category || '-') + ' / ' + String(e.aircraft_category_text || e.aircraft_category || '-')],
+        ['运行状态', String(e.operation_state_text || e.operation_state || '-')],
         ['方向', String(e.dir || '-')]
       ];
       var pilotPos = [
         ['飞手纬度', fmt(e.pilot_lat,6,'')],
         ['飞手经度', fmt(e.pilot_lon,6,'')],
+        ['飞手高度', fmt(e.pilot_alt,1,'m')],
         ['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]
       ];
       var actionSn = String(e.sn || '');
@@ -6041,7 +6088,7 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
       <button class="btn" id="btn-settings" type="button">设置</button>
-      <button class="btn" id="btn-theme" type="button">浅色</button>
+      <button class="btn" id="btn-theme" type="button" style="display:none">浅色</button>
     </div>
   </div>
   <div class="panel">
@@ -6238,6 +6285,10 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .card.dirty{border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 22%, transparent),0 8px 18px var(--glow)}
 .card.dirty h2{color:var(--blue)}
 .card h2{margin:0;font:600 18px/1 var(--font-ui);letter-spacing:.01em}
+.card.settings-collapsible>.section-head{cursor:pointer;user-select:none}
+.card.settings-collapsible>.section-head::after{content:'收起';font:700 12px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:5px 7px;background:var(--card)}
+.card.settings-collapsible.collapsed>.section-head::after{content:'展开'}
+.card.settings-collapsible.collapsed>:not(.section-head){display:none}
 .hint{color:var(--muted);font-size:13px;line-height:1.6}
 .section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
 .section-copy{margin-top:4px;color:var(--muted);font-size:13px;line-height:1.45;max-width:58ch}
@@ -6397,7 +6448,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
       <button class="btn" id="btn-back" type="button">返回主页</button>
       <button class="btn" id="btn-logs" type="button">日志</button>
       <button class="btn ghost" id="btn-logout" type="button">登出</button>
-      <button class="btn" id="btn-theme" type="button">浅色</button>
+      <button class="btn" id="btn-theme" type="button" style="display:none">浅色</button>
       <button class="btn" id="btn-reload-view" type="button">刷新</button>
     </div>
   </div>
@@ -6692,7 +6743,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
             <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
           </div>
         </div>
-        <div class="card" id="settings-data">
+        <div class="card settings-collapsible collapsed" id="settings-data">
           <div class="section-head">
             <div>
               <h2>权限与 systemd 服务</h2>
@@ -6797,7 +6848,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           </div>
           <div class="micro">只控制当前浏览器显示；后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
         </div>
-        <div class="card" id="settings-runtime">
+        <div class="card settings-collapsible collapsed" id="settings-runtime">
           <div class="section-head">
             <div>
               <h2>实时 AP</h2>
@@ -6989,6 +7040,27 @@ function bindAccessCollapsibles(){
       if(card) card.classList.toggle('collapsed');
     }
     head.addEventListener('click', toggle);
+    head.addEventListener('keydown', function(ev){
+      if(ev.key === 'Enter' || ev.key === ' '){
+        ev.preventDefault();
+        toggle();
+      }
+    });
+  });
+}
+function bindSettingsCardCollapsibles(){
+  qsa('.card.settings-collapsible > .section-head').forEach(function(head){
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    function toggle(){
+      var card = head.closest('.card.settings-collapsible');
+      if(card) card.classList.toggle('collapsed');
+    }
+    head.addEventListener('click', function(ev){
+      var t = ev.target;
+      if(t && t.closest && t.closest('button,input,label,a,select,textarea')) return;
+      toggle();
+    });
     head.addEventListener('keydown', function(ev){
       if(ev.key === 'Enter' || ev.key === ' '){
         ev.preventDefault();
@@ -9566,6 +9638,7 @@ function initializeSettingsPage(){
   bindDataTransferActions();
   bindEulaActions();
   bindAccessCollapsibles();
+  bindSettingsCardCollapsibles();
   bindAccessActions();
   bindSystemServiceActions();
   bindRawActions();
@@ -9909,11 +9982,52 @@ def http_server_thread() -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_asset_file(self, path: str) -> bool:
+            from urllib.parse import unquote
+            rel = unquote(str(path or "")[len("/assets/"):]).replace("\\", "/")
+            parts = [p for p in rel.split("/") if p and p not in (".", "..")]
+            if not parts or "/".join(parts) != rel:
+                self._send_json({"ok": False, "error": "invalid asset path"}, 400)
+                return True
+            try:
+                package_dir = getattr(globals().get("RUNTIME_CONTEXT"), "package_dir", None)
+                base_dir = os.path.join(str(package_dir or os.path.dirname(__file__)), "assets")
+                full = os.path.abspath(os.path.join(base_dir, *parts))
+                base_abs = os.path.abspath(base_dir)
+                if not (full == base_abs or full.startswith(base_abs + os.sep)) or not os.path.isfile(full):
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return True
+                ext = os.path.splitext(full)[1].lower()
+                ctype = {
+                    ".css": "text/css; charset=utf-8",
+                    ".js": "application/javascript; charset=utf-8",
+                    ".png": "image/png",
+                    ".svg": "image/svg+xml; charset=utf-8",
+                    ".map": "application/json; charset=utf-8",
+                }.get(ext, "application/octet-stream")
+                with open(full, "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return True
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
+                return True
+
         def do_GET(self):
             from urllib.parse import urlparse, parse_qs, quote, unquote
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query or "")
+            if path.startswith("/assets/"):
+                self._send_asset_file(path)
+                return
             if path in (
                 "/generate_204",
                 "/gen_204",

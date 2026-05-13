@@ -364,7 +364,7 @@ def _draw_buf(stdscr, h, w, buf: deque, offset: int, title: str, hint_extra: str
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="OpenDroneID RID WLAN listener")
     parser.add_argument("--config", default=os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT),
-                        help="config file path (default: rid_config.json)")
+                        help="config file path (default: config.json)")
     parser.add_argument("--iface",        default=None)
     parser.add_argument("--channel",      default=None, type=int)
     parser.add_argument("--hop",          action="store_true")
@@ -384,9 +384,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rssi-delta",   default=3, type=int)
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
-    parser.add_argument("--model-map", default=os.path.join(os.getcwd(),"rid_models.json"))
+    parser.add_argument("--model-map", default=os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT))
     parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-                        help="history cache file (default rid_history_cache.json)")
+                        help="history cache file (default history-cache.json)")
     parser.add_argument("--no-tui",   action="store_true", default=True, help="禁用 TUI，纯文本输出")
     parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
@@ -528,7 +528,7 @@ def _schedule_self_restart(tokens: list[str]) -> tuple[bool, str]:
 def main() -> None:
     global PRINT_INTERVAL, MIN_GAP, LOST_TIMEOUT, CHANGE_ON_RSSI, CHANGE_ON_PL
     global RSSI_DELTA, NO_TUI, DEBUG_MODE, current_channel, HISTORY_STORE_PATH, APP_CONFIG
-    global APP_CONFIG_PATH, APP_CONFIG_PATH_IS_DEFAULT, APP_START_CWD
+    global APP_CONFIG_PATH, APP_CONFIG_PATH_IS_DEFAULT, APP_CONFIG_PATH_LOCKED, APP_START_CWD
     global sniff_iface_name
     global SCAN_WIFI_FAST, WIFI_FAST_SUPPORTED, WIFI_FAST_SUPPORT_MSG
 
@@ -540,7 +540,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="OpenDroneID RID WLAN listener")
     parser.add_argument("--config", default=os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT),
-                        help="config file path (default: rid_config.json)")
+                        help="config file path (default: config.json)")
     parser.add_argument("--iface",        default=None)
     parser.add_argument("--channel",      default=None, type=int)
     parser.add_argument("--hop",          action="store_true")
@@ -560,9 +560,9 @@ def main() -> None:
     parser.add_argument("--rssi-delta",   default=3, type=int)
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
-    parser.add_argument("--model-map", default=os.path.join(os.getcwd(),"rid_models.json"))
+    parser.add_argument("--model-map", default=os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT))
     parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-                        help="history cache file (default: rid_history_cache.json)")
+                        help="history cache file (default: history-cache.json)")
     parser.add_argument("--no-tui",   action="store_true", default=True, help="禁用 TUI，纯文本输出")
     parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
@@ -573,10 +573,17 @@ def main() -> None:
     cfg_path = os.path.abspath(str(args.config)) if args.config else None
     APP_CONFIG_PATH = cfg_path
     APP_CONFIG_PATH_IS_DEFAULT = (cfg_path == os.path.abspath(os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT))) if cfg_path else True
+    APP_CONFIG_PATH_LOCKED = any(str(t).split("=", 1)[0] == "--config" for t in sys.argv[1:])
+    hist_path = os.path.abspath(str(args.history_file)) if args.history_file else None
+    model_path = os.path.abspath(str(args.model_map)) if args.model_map else None
+    _ensure_runtime_json_files(cfg_path, hist_path, config_locked=APP_CONFIG_PATH_LOCKED)
     APP_CONFIG = load_app_config(cfg_path)
     if not _eula_accepted():
         _log(f"[INFO] EULA pending: open /eula to accept ({_eula_set_path()})")
     apply_config_to_args(parser, args, APP_CONFIG)
+    hist_path = os.path.abspath(str(args.history_file)) if args.history_file else None
+    model_path = os.path.abspath(str(args.model_map)) if args.model_map else None
+    _ensure_runtime_json_files(None, hist_path, config_locked=True)
 
     PRINT_INTERVAL  = max(0.2, float(args.time))
     MIN_GAP         = max(0.0, float(args.min_gap))
@@ -609,6 +616,7 @@ def main() -> None:
     init_api_from_config(APP_CONFIG)
     init_notify_from_config(APP_CONFIG)
     start_oui_loader()
+    ensure_model_map_file(model_path or args.model_map)
     load_model_map(args.model_map)
     load_history_store(HISTORY_STORE_PATH)
 

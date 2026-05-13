@@ -1,4 +1,4 @@
-"""Portable edition entrypoint for Light RID Scanner."""
+"""Station edition entrypoint for Light RID Scanner."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from portable_edition.bootstrap import main
+from station_edition.light_rid.app import main
 
 
 if __name__ == "__main__":

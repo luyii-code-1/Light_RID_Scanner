@@ -12,7 +12,11 @@ release/
 *.spec
 # Runtime config (contains secrets)
 rid_config.json
+config.json
+station_edition/config.json
 rid_config.json.rollback
+config.json.rollback
+station_edition/config.json.rollback
 *.rollback
 *.rollback.*
 rid_config.local.json
@@ -21,6 +25,8 @@ EULA.set
 tools
 # Runtime data
 rid_history_cache.json
+history-cache.json
+station_edition/history-cache.json
 *_history_cache.json
 host_metrics.jsonl
 host_metrics.jsonl.tmp

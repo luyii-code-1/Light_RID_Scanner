@@ -45,7 +45,7 @@ def _packager_import_anchor() -> None:
     import zlib
     from collections import deque
     from threading import Lock, Thread
-    from light_rid import platform_compat
+    from station_edition.light_rid import platform_compat
     from scapy.config import conf
     from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
     from scapy.sendrecv import sniff

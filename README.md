@@ -4,6 +4,19 @@
 
 Light RID Scanner is a fixed-station Remote ID / OpenDroneID Wi-Fi monitor designed for Raspberry Pi and other Linux-based capture nodes.
 
+## Editions
+
+- `station_edition/`
+  Full fixed-station build. It contains the source runtime, web UI, security/auth controls, systemd/AP maintenance, and Raspberry Pi deployment defaults.
+- `portable_edition/`
+  Minimal mobile deployment entrypoint. It reuses the scanner and web core but forces web login, API tokens, SSO links, passkeys, host monitoring, and Enterprise WeCom notifications off.
+- Root `run.py`
+  Compatibility wrapper for `station_edition/run.py`.
+- Root `rid-models.json`
+  Public GitHub Raw model map. Binaries also embed this file and restore it if runtime download fails.
+
+Each edition is meant to be usable from its own directory. Runtime files such as `config.json`, `history-cache.json`, and `rid-models.json` are resolved relative to the current working directory unless explicit paths are passed.
+
 ## Highlights
 
 - Modern LAN web UI
@@ -34,27 +47,47 @@ Recommended environment:
 
 - Linux
 - Raspberry Pi OS recommended
-- 64-bit OS for the `linux-arm64` release artifact
+- 64-bit OS for the `arm64` release artifacts
 - Wireless NIC with monitor mode support
 - Root privileges for monitor mode / channel switching
 - `iw` and `hostapd` when using NIC binding with AP hotspot mode
 
-Deploy the Linux binary:
+Run the station edition from source:
 
 ```bash
-install -m 0755 light_rid_scanner-linux-arm64 /opt/light-rid/light_rid_scanner
+cd station_edition
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r ../requirements.txt
+python run.py --no-tui
 ```
 
-Only the binary is required for a first start. If `rid_config.json` or `rid_models.json` does not exist, the program creates them from built-in defaults during startup.
+Run the portable edition from source:
+
+```bash
+cd portable_edition
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r ../requirements.txt
+python pe.py --no-tui
+```
+
+Deploy a station Linux binary:
+
+```bash
+install -m 0755 light_rid_station-arm64 /opt/light-rid/light_rid_station-arm64
+```
+
+Only the binary is required for a first start. Startup checks the runtime directory for `config.json`, `history-cache.json`, and `rid-models.json`. When `--config` is not explicitly supplied, missing config/history files are created as empty runtime JSON files. If `rid-models.json` is missing, the program downloads the GitHub Raw model map first and falls back to the embedded binary resource if the network is unavailable.
 
 ```text
-/opt/light-rid/light_rid_scanner
+/opt/light-rid/light_rid_station-arm64
 ```
 
 Systemd should execute the binary directly:
 
 ```ini
-ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.json --no-tui
+ExecStart=/opt/light-rid/light_rid_station-arm64 --config /opt/light-rid/config.json --no-tui
 ```
 
 Default web URL:
@@ -68,7 +101,7 @@ Default web URL:
 - `basic.lost_timeout` controls aircraft offline detection in seconds. The default is 15 seconds.
 - Settings and OOBE include a **Custom NIC Binding** flow. Each detected NIC can be assigned to `scan`, `web`, `ap_web`, `disabled`, `idle`, or `none`; the `scan` role is synchronized back to `basic.iface`.
 - The `ap_web` role configures an AP hotspot profile through `hostapd`, starts the built-in DHCP server on `172.16.0.0/24`, and exposes the web UI at `172.16.0.1:80` when the service has the required Linux capabilities.
-- If `rid_config.json` is missing, broken, or still has no bound NIC, the web UI enters the OOBE flow at `/oobe`.
+- If `config.json` is missing, broken, or still has no bound NIC, the web UI enters the OOBE flow at `/oobe`.
 - OOBE is used to finish the minimum required setup:
   - choose the default wireless NIC
   - set the RID channel
@@ -88,22 +121,24 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
 ## Important Files
 
 - `run.py`
-  Thin source/build entry point.
-- `light_rid/`
+  Compatibility wrapper for the station edition.
+- `station_edition/run.py`
+  Station edition source/build entry point.
+- `station_edition/light_rid/`
   Split scanner, parser, HTTP/WS server, embedded pages, API handlers, settings, auth, hardware, and CLI/TUI modules.
-- `light_rid_scanner`
-  Installed Linux one-file runtime binary on deployment targets.
-- `rid_models.json`
-  Model prefix mapping.
-- `rid_config.example.json`
+- `portable_edition/pe.py`
+  Portable edition source/build entry point.
+- `rid-models.json`
+  GitHub Raw model prefix mapping and source for the embedded binary resource.
+- `station_edition/config.example.json`
   Safe Git-tracked example config.
-- `rid_config.json`
+- `config.json`
   Real runtime config. Do not commit it.
 - `EULA.md`
   Source text shown by the built-in EULA acceptance flow.
-- `rid_history_cache.json`
+- `history-cache.json`
   Runtime-generated history / track cache.
-- `rid_config.json.rollback`
+- `config.json.rollback`
   Rollback copy for config recovery.
 - `rid_build_info.json`
   Local build marker used for the UI version string, for example `commit:ba15d57#3`.
@@ -137,7 +172,7 @@ The runtime config is split into these top-level sections:
 
 Example file:
 
-- `rid_config.example.json`
+- `station_edition/config.example.json`
 
 ## Token API
 
@@ -424,10 +459,10 @@ It supports:
 
 ### Online model-map updates
 
-The Settings page can update `rid_models.json` from a remote JSON file. The default URL is:
+The Settings page can update `rid-models.json` from a remote JSON file. The default URL is:
 
 ```text
-https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid-models.json
 ```
 
 Behavior:
@@ -436,7 +471,7 @@ Behavior:
 - manual update uses the same URL field
 - the URL must start with `http://` or `https://`
 - successful and failed update attempts are written to the operation log and notification center
-- the same Settings card can edit `rid_models.json` as a prefix/model list
+- the same Settings card can edit `rid-models.json` as a prefix/model list
 - N/A aircraft detail cards can add a local mapping or open a prefilled GitHub Issue / PR edit page
 
 
@@ -445,7 +480,7 @@ Behavior:
 - Passkeys are bootstrapped from the existing web username/password once, then stored inside `auth.passkeys`.
 - Raw config editing is limited to files inside the active config root and requires a short-lived secondary unlock from the current browser session.
 - The runtime repair card can create/confirm the dedicated `rid` service user, grant capture/hotspot capabilities, install wireless tools, and register/update `light-rid-scanner.service`.
-- Binary deployments should keep the systemd unit pointed at the installed `light_rid_scanner` binary, current config path, and `--no-tui` service mode.
+- Binary deployments should keep the systemd unit pointed at the installed station binary, current config path, and `--no-tui` service mode.
 
 ### Host load trends
 
@@ -467,7 +502,16 @@ The UI version string is shown as:
 commit:<git-short-commit>#<local-build-number>
 ```
 
-`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces one-file Linux artifacts for deployment, including `light_rid_scanner-linux-arm64` for 64-bit Raspberry Pi OS.
+`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces 4 one-file Linux artifacts: station and portable editions for `x86_64` and `arm64`.
+
+Local builds can use either the shared root entrypoint or an edition-local wrapper:
+
+```bash
+python pytools/build_release.py --edition station --target arm64
+python pytools/build_release.py --edition portable --target x86_64
+cd station_edition
+python pytools/build.py --target arm64
+```
 
 The Settings page can manually compare the local app commit with the upstream Git commit. This check only reports whether a newer commit exists; it does not download, apply, or restart code automatically.
 
@@ -602,11 +646,11 @@ Useful helper APIs from the built-in UI:
 
 Before pushing to GitHub:
 
-- do not commit `rid_config.json`
+- do not commit `config.json`
 - do not commit real webhook keys
 - do not commit real API tokens
 - do not commit runtime-generated history/cache files
-- commit `rid_config.example.json` only
+- commit `station_edition/config.example.json` only
 
 ## Notes
 

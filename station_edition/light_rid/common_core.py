@@ -110,8 +110,10 @@ SSID_SN_RE          = re.compile(r"\bRID-([A-Za-z0-9]{4,64})\b")
 
 LOG_BUF_SIZE = 4000   # Log ring buffer size
 TUI_REFRESH  = 0.5    # Forced TUI refresh interval (seconds)
-CONFIG_FILE_DEFAULT = "rid_config.json"
-HISTORY_STORE_DEFAULT = "rid_history_cache.json"
+CONFIG_FILE_DEFAULT = "config.json"
+HISTORY_STORE_DEFAULT = "history-cache.json"
+MODEL_MAP_FILE_DEFAULT = "rid-models.json"
+MODEL_MAP_LEGACY_FILE = "rid_models.json"
 SYSTEMD_SERVICE_NAME = "light-rid-scanner.service"
 SYSTEMD_SERVICE_PATH = "/etc/systemd/system/" + SYSTEMD_SERVICE_NAME
 IW_PACKAGE_NAME = "iw"
@@ -131,7 +133,7 @@ EULA_MARKDOWN_FILE = "EULA.md"
 EULA_URL = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/EULA.md"
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
-RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
+RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid-models.json"
 APP_UPDATE_COMMIT_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
 MODEL_UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
 HOST_METRICS_DIR_DEFAULT = os.path.join(tempfile.gettempdir(), "light_rid_scanner")
@@ -184,6 +186,8 @@ history_io_lock = Lock()
 APP_CONFIG: dict = {}
 APP_CONFIG_PATH: str | None = None
 APP_CONFIG_PATH_IS_DEFAULT: bool = True
+APP_CONFIG_PATH_LOCKED: bool = False
+APP_EDITION: str = os.environ.get("LIGHT_RID_EDITION", "station").strip().lower() or "station"
 OOBE_REQUIRED: bool = False
 OOBE_REASON: str = ""
 OOBE_LOCK = Lock()
@@ -1212,7 +1216,7 @@ def default_app_config() -> dict:
             "rssi_delta": 3,
             "change_on_rssi": False,
             "change_on_payload": False,
-            "model_map": os.path.join(os.getcwd(), "rid_models.json"),
+            "model_map": os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT),
             "history_file": os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
             "no_tui": True,
             "debug": False,
@@ -1312,13 +1316,58 @@ def default_app_config() -> dict:
         },
     }
 
+def _portable_edition_enabled() -> bool:
+    return APP_EDITION in ("portable", "pe", "mobile")
+
+def _runtime_resource_path(*parts: str) -> str:
+    ctx = globals().get("RUNTIME_CONTEXT")
+    base = getattr(ctx, "package_dir", None)
+    if base:
+        return os.path.abspath(os.path.join(str(base), "resources", *parts))
+    return os.path.abspath(os.path.join(os.getcwd(), "resources", *parts))
+
+def _write_json_file(path: str, payload: dict) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+def _ensure_runtime_json_files(config_path: str | None, history_path: str | None, *, config_locked: bool) -> None:
+    if config_path and (not os.path.exists(config_path)) and (not config_locked):
+        _write_json_file(config_path, {})
+        _log(f"[INFO] config file created: {config_path}")
+    if history_path and not os.path.exists(history_path):
+        _write_json_file(history_path, {"version": 3, "items": []})
+        _log(f"[INFO] history cache created: {history_path}")
+
+def _apply_portable_defaults(cfg: dict) -> dict:
+    if not _portable_edition_enabled():
+        return cfg
+    out = _deep_merge_dict(default_app_config(), cfg if isinstance(cfg, dict) else {})
+    notify = out.setdefault("notify", {})
+    notify.update({"enabled": False, "wecom_webhooks": [], "wecom_webhook_key": ""})
+    auth = out.setdefault("auth", {})
+    auth.update({"enabled": False, "username_hash": "", "password_hash": "", "sso_links": [], "passkeys": []})
+    auth["login_methods"] = []
+    api = out.setdefault("api", {})
+    api.update({"enabled": False, "token": "", "token_hash": "", "tokens": []})
+    metrics = out.setdefault("metrics", {})
+    metrics["enabled"] = False
+    return out
+
 def ensure_config_file(path: str) -> None:
     if not path:
         return
     if os.path.exists(path):
         return
     _set_oobe_required(f"配置文件不存在，已创建默认配置: {path}", True)
-    cfg = default_app_config()
+    if APP_CONFIG_PATH_LOCKED:
+        raise FileNotFoundError(path)
+    cfg = {}
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -1381,7 +1430,7 @@ def load_app_config(path: str | None) -> dict:
     try:
         ensure_config_file(path)
         raw = _config_load_raw(path)
-        cfg = _deep_merge_dict(default_app_config(), raw)
+        cfg = _apply_portable_defaults(_deep_merge_dict(default_app_config(), raw))
         try:
             shutil.copy2(path, rb_path)
         except Exception as e:
@@ -1399,7 +1448,7 @@ def load_app_config(path: str | None) -> dict:
         if os.path.exists(rb_path):
             try:
                 rb_raw = _config_load_raw(rb_path)
-                cfg = _deep_merge_dict(default_app_config(), rb_raw)
+                cfg = _apply_portable_defaults(_deep_merge_dict(default_app_config(), rb_raw))
                 broken = _config_isolate_file(path, "broken")
                 if broken:
                     _log(f"[WARN] 主配置文件已隔离为: {broken}")
@@ -1416,7 +1465,10 @@ def load_app_config(path: str | None) -> dict:
                     _log(f"[WARN] 回滚配置文件已隔离为: {rb_broken}")
 
         _log("[WARN] 配置回滚不可用，使用默认配置重建")
-        cfg = default_app_config()
+        if APP_CONFIG_PATH_LOCKED and (not os.path.exists(path)):
+            _log(f"[WARN] locked config missing, using in-memory defaults: {path}")
+            return _apply_portable_defaults(default_app_config())
+        cfg = _apply_portable_defaults(default_app_config())
         try:
             broken = _config_isolate_file(path, "broken")
             if broken:
@@ -1803,7 +1855,7 @@ def _settings_view_payload() -> dict:
                 "change_on_rssi": bool(basic.get("change_on_rssi")),
                 "change_on_payload": bool(basic.get("change_on_payload")),
                 "debug": bool(basic.get("debug")),
-                "model_map": str(basic.get("model_map") or os.path.join(os.getcwd(), "rid_models.json")),
+                "model_map": str(basic.get("model_map") or os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT)),
                 "history_file": str(basic.get("history_file") or os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT)),
             },
             "notify": {
@@ -3337,10 +3389,15 @@ def init_app_update_from_config(cfg: dict | None) -> None:
 def init_metrics_from_config(cfg: dict | None) -> None:
     global METRICS_CFG
     METRICS_CFG = _normalize_metrics_cfg(cfg)
+    if _portable_edition_enabled():
+        METRICS_CFG["enabled"] = False
 
 def init_auth_from_config(cfg: dict | None) -> None:
     global AUTH_CFG, AUTH_SESSION_TTL_SEC
     AUTH_CFG = _normalize_auth_cfg(cfg)
+    if _portable_edition_enabled():
+        AUTH_CFG.update({"enabled": False, "username_hash": "", "password_hash": "", "sso_links": [], "passkeys": []})
+        AUTH_CFG["login_methods"] = []
     AUTH_SESSION_TTL_SEC = int(max(60, float(AUTH_CFG.get("session_ttl_min") or 30) * 60.0))
     now_wall = time.time()
     max_exp = now_wall + float(AUTH_SESSION_TTL_SEC)
@@ -3352,10 +3409,14 @@ def init_auth_from_config(cfg: dict | None) -> None:
 def init_api_from_config(cfg: dict | None) -> None:
     global API_CFG
     API_CFG = _normalize_api_cfg(cfg)
+    if _portable_edition_enabled():
+        API_CFG.update({"enabled": False, "token": "", "token_hash": "", "tokens": []})
 
 def init_notify_from_config(cfg: dict | None) -> None:
     global NOTIFY_CFG
     NOTIFY_CFG = _normalize_notify_cfg(cfg)
+    if _portable_edition_enabled():
+        NOTIFY_CFG.update({"enabled": False, "wecom_webhooks": [], "wecom_webhook_key": ""})
     hooks = _notify_wecom_targets(NOTIFY_CFG)
     if NOTIFY_CFG.get("enabled") and hooks:
         _log(f"[INFO] WeCom robot notification enabled ({len(hooks)} channel(s), online-only)")
@@ -3366,7 +3427,7 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
     global APP_CONFIG, PRINT_INTERVAL, MIN_GAP, LOST_TIMEOUT, CHANGE_ON_RSSI, CHANGE_ON_PL, RSSI_DELTA, DEBUG_MODE
     if not isinstance(cfg, dict):
         return False, "invalid config root"
-    APP_CONFIG = _deep_merge_dict(default_app_config(), cfg)
+    APP_CONFIG = _apply_portable_defaults(_deep_merge_dict(default_app_config(), cfg))
     init_web_from_config(APP_CONFIG)
     init_ap_from_config(APP_CONFIG)
     init_model_update_from_config(APP_CONFIG)

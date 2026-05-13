@@ -26,8 +26,8 @@ class RuntimeContext:
     package_dir: Path
     entrypoint: Path
     chunk_files: tuple[str, ...] = DEFAULT_CHUNK_FILES
-    module_name: str = "light_rid._assembled"
-    package_name: str = "light_rid"
+    module_name: str = "station_edition.light_rid._assembled"
+    package_name: str = "station_edition.light_rid"
     namespace: dict[str, Any] = field(default_factory=dict)
     loaded: bool = False
 
@@ -88,12 +88,16 @@ def create_runtime_context(
     package_dir: Path | None = None,
     entrypoint: Path | None = None,
     chunk_files: tuple[str, ...] | None = None,
+    module_name: str = "station_edition.light_rid._assembled",
+    package_name: str = "station_edition.light_rid",
 ) -> RuntimeContext:
     """Create a runtime context with project defaults."""
     return RuntimeContext(
         package_dir=package_dir or default_package_dir(),
         entrypoint=entrypoint or default_entrypoint(),
         chunk_files=chunk_files or DEFAULT_CHUNK_FILES,
+        module_name=module_name,
+        package_name=package_name,
     )
 
 

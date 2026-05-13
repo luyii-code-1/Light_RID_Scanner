@@ -1,4 +1,6 @@
 def _api_token_enabled() -> bool:
+    if _portable_edition_enabled():
+        return False
     return bool(API_CFG.get("enabled")) and bool(_auth_enabled()) and _auth_hashes_present(AUTH_CFG) and _api_tokens_have_secret(API_CFG)
 
 def _api_token_check_value(token: str | None) -> dict | None:
@@ -508,6 +510,8 @@ def _oobe_auth_required() -> bool:
     return bool(_oobe_state().get("required")) and _auth_enabled() and _auth_hashes_present(AUTH_CFG)
 
 def _auth_enabled() -> bool:
+    if _portable_edition_enabled():
+        return False
     return bool(AUTH_CFG.get("enabled"))
 
 def _auth_check_userpass(username: str, password: str) -> bool:

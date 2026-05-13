@@ -5,6 +5,19 @@
 Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定式 Remote ID / OpenDroneID Wi-Fi 监测器。
 
 
+## 版本目录
+
+- `station_edition/`
+  完整基站版本，包含扫描、网页、安全鉴权、systemd/AP 维护和树莓派部署默认逻辑。
+- `portable_edition/`
+  移动部署最小版本，复用扫描核心和网页核心，但启动时强制关闭网页登录、API Token、SSO、Passkey、监控指标和企业微信通知。
+- 根目录 `run.py`
+  基站版本兼容入口，实际跳转到 `station_edition/run.py`。
+- 根目录 `rid-models.json`
+  面向 GitHub Raw 的公开机型库；二进制内也会嵌入同一份资源，运行目录缺失时可自动恢复。
+
+各版本优先从自身目录运行。未显式传入路径时，`config.json`、`history-cache.json` 和 `rid-models.json` 等运行文件都按当前工作目录解析。
+
 ## 功能概览
 
 - 现代化局域网页面
@@ -35,27 +48,47 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 
 - Linux
 - 推荐 Raspberry Pi OS
-- 使用 `linux-arm64` 发布产物时需要 64 位系统
+- 使用 `arm64` 发布产物时需要 64 位系统
 - 支持监控模式的无线网卡
 - 切换监控模式 / 信道时需要 root 权限
 - 使用 AP 热点网页服务时需要 `iw` 和 `hostapd`
 
-部署 Linux 二进制文件：
+从源码运行基站版：
 
 ```bash
-install -m 0755 light_rid_scanner-linux-arm64 /opt/light-rid/light_rid_scanner
+cd station_edition
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r ../requirements.txt
+python run.py --no-tui
 ```
 
-首次启动只需要放置二进制文件。`rid_config.json` 和 `rid_models.json` 不存在时，程序会在启动时按内置默认值自动创建。
+从源码运行移动版：
+
+```bash
+cd portable_edition
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r ../requirements.txt
+python pe.py --no-tui
+```
+
+部署基站 Linux 二进制文件：
+
+```bash
+install -m 0755 light_rid_station-arm64 /opt/light-rid/light_rid_station-arm64
+```
+
+首次启动只需要放置二进制文件。程序会检查运行目录下的 `config.json`、`history-cache.json` 和 `rid-models.json`。未显式传入 `--config` 时，缺失的配置和历史文件会按空运行文件创建；如果缺少 `rid-models.json`，程序会先尝试下载 GitHub Raw 机型库，网络不可用时再使用二进制内置资源。
 
 ```text
-/opt/light-rid/light_rid_scanner
+/opt/light-rid/light_rid_station-arm64
 ```
 
 systemd 应直接执行二进制文件：
 
 ```ini
-ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.json --no-tui
+ExecStart=/opt/light-rid/light_rid_station-arm64 --config /opt/light-rid/config.json --no-tui
 ```
 
 默认网页地址：
@@ -69,7 +102,7 @@ ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.js
 - `basic.lost_timeout` 用于配置飞机离线判定时间，默认 15 秒。
 - OOBE 和设置页提供“自定义网卡绑定”，可以把每张网卡设置为 `scan`（扫描）、`web`（网页服务）、`ap_web`（AP 热点网页服务）、`disabled`（禁用）、`idle`（闲置）或 `none`；`scan` 会同步写回 `basic.iface`。
 - `ap_web` 会通过 `hostapd` 配置热点，使用内置 DHCP 在 `172.16.0.0/24` 分配地址，并在服务具备所需 Linux capability 时把网页服务暴露到 `172.16.0.1:80`。
-- 如果 `rid_config.json` 缺失、损坏，或者还没有绑定默认网卡，网页会进入 `/oobe` 初始化流程。
+- 如果 `config.json` 缺失、损坏，或者还没有绑定默认网卡，网页会进入 `/oobe` 初始化流程。
 - OOBE 用来完成最小可运行配置：
   - 选择默认无线网卡
   - 设置 RID 信道
@@ -89,22 +122,24 @@ ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.js
 ## 关键文件
 
 - `run.py`
-  源码和构建共用的薄入口。
-- `light_rid/`
+  基站版本兼容入口。
+- `station_edition/run.py`
+  基站版本源码和构建入口。
+- `station_edition/light_rid/`
   拆分后的扫描、解析、HTTP/WS 服务、内嵌页面、API、设置、认证、硬件辅助和 CLI/TUI 模块。
-- `light_rid_scanner`
-  部署目标上的 Linux 单文件运行二进制。
-- `rid_models.json`
-  机型前缀映射表。
-- `rid_config.example.json`
+- `portable_edition/pe.py`
+  移动版本源码和构建入口。
+- `rid-models.json`
+  GitHub Raw 机型前缀映射表，也是二进制内置资源的源文件。
+- `station_edition/config.example.json`
   可提交到 Git 的安全示例配置。
-- `rid_config.json`
+- `config.json`
   实际运行配置，不应提交。
 - `EULA.md`
   内置 EULA 同意页面显示的源文本。
-- `rid_history_cache.json`
+- `history-cache.json`
   运行时生成的历史 / 轨迹缓存。
-- `rid_config.json.rollback`
+- `config.json.rollback`
   配置文件回滚副本。
 - `rid_build_info.json`
   本地构建版本标记，用于页面版本号，例如 `commit:ba15d57#3`。
@@ -138,7 +173,7 @@ ExecStart=/opt/light-rid/light_rid_scanner --config /opt/light-rid/rid_config.js
 
 示例配置文件：
 
-- `rid_config.example.json`
+- `station_edition/config.example.json`
 
 ## Token API 重点说明
 
@@ -427,10 +462,10 @@ PY
 
 ### 在线识别库更新
 
-设置页可以从远端 JSON 文件更新 `rid_models.json`。默认地址：
+设置页可以从远端 JSON 文件更新 `rid-models.json`。默认地址：
 
 ```text
-https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid-models.json
 ```
 
 行为说明：
@@ -439,7 +474,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 手动更新按钮使用同一个地址
 - 地址必须以 `http://` 或 `https://` 开头
 - 更新成功或失败都会写入操作日志和通知中心
-- 同一个设置卡片可以把 `rid_models.json` 作为前缀/机型列表编辑
+- 同一个设置卡片可以把 `rid-models.json` 作为前缀/机型列表编辑
 - 机型为 N/A 的详情卡片可以直接写入本地识别库，或打开预填的 GitHub Issue / PR 编辑页
 
 ### 远程配置更新
@@ -459,7 +494,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 通行密钥以现有网页登录账号密码为引导完成首次注册，之后保存在 `auth.passkeys`。
 - 原始配置编辑被限制在当前配置根目录内，并且需要当前浏览器会话先完成一次短时二次解锁。
 - 运行时修复卡片可以创建 / 确认 `rid` 专用运行账号、授予采集和热点能力、安装无线工具，并注册 / 更新 `light-rid-scanner.service`。
-- 二进制部署时，systemd 服务应始终指向已安装的 `light_rid_scanner` 二进制文件、当前配置文件路径以及 `--no-tui` 服务运行模式。
+- 二进制部署时，systemd 服务应始终指向已安装的基站二进制文件、当前配置文件路径以及 `--no-tui` 服务运行模式。
 
 ### 主机负载趋势
 
@@ -481,7 +516,16 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 commit:<Git短提交号>#<本地构建号>
 ```
 
-`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成用于部署的 Linux 单文件产物，其中 64 位 Raspberry Pi OS 使用 `light_rid_scanner-linux-arm64`。
+`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成 4 个 Linux 单文件产物：基站版和移动版分别覆盖 `x86_64` 与 `arm64`。
+
+本地构建可以使用根目录共享入口，也可以进入版本目录使用本地包装脚本：
+
+```bash
+python pytools/build_release.py --edition station --target arm64
+python pytools/build_release.py --edition portable --target x86_64
+cd station_edition
+python pytools/build.py --target arm64
+```
 
 设置页可以手动比较本地程序提交号和远端 Git 提交号。这个检查只报告是否存在更新，不会自动下载、套用代码或重启服务。
 
@@ -616,11 +660,11 @@ commit:<Git短提交号>#<本地构建号>
 
 提交到 GitHub 之前请确保：
 
-- 不要提交 `rid_config.json`
+- 不要提交 `config.json`
 - 不要提交真实企业微信 Key
 - 不要提交真实 API Token
 - 不要提交运行期生成的历史 / 缓存文件
-- 只提交 `rid_config.example.json`
+- 只提交 `station_edition/config.example.json`
 
 ## 说明
 

@@ -2354,7 +2354,7 @@ function buildExtraUi(){
       '      <button class="btn-mini" id="btn-config-save" type="button">保存并热重载</button>'+
       '    </div>'+
       '    <div class="adv-note" id="config-editor-status">-</div>'+
-      '    <textarea id="config-editor" class="cfg-editor" spellcheck="false" placeholder="在这里编辑 rid_config.json"></textarea>'+
+      '    <textarea id="config-editor" class="cfg-editor" spellcheck="false" placeholder="在这里编辑 config.json"></textarea>'+
       '    <div class="adv-row">'+
       '      <label for="track-sn-select">历史/轨迹</label>'+
       '      <select id="track-sn-select" class="adv-input"><option value="">请选择飞机</option></select>'+
@@ -5418,13 +5418,13 @@ _MAIN_PAGE_PATCH_JS = r"""
       'Prefix: ' + String(prefix || ''),
       'Current model: N/A',
       '',
-      'Please add this RID model mapping to rid_models.json.'
+      'Please add this RID model mapping to rid-models.json.'
     ].join('\\n');
     return 'https://github.com/luyii-code-1/Light_RID_Scanner/issues/new?title='
       + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
   }
   function modelPrEditUrl(){
-    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid_models.json';
+    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid-models.json';
   }
   function patchLocalModel(sn, model){
     sn = String(sn || '');
@@ -6979,7 +6979,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 <div class="modal-mask" id="model-map-modal">
   <div class="modal-card wide">
     <h3>识别库编辑</h3>
-    <div class="section-copy">编辑本地 rid_models.json 条目，保存后立即刷新实时和历史机型。</div>
+    <div class="section-copy">编辑本地 rid-models.json 条目，保存后立即刷新实时和历史机型。</div>
     <div class="model-editor">
       <div class="model-editor-toolbar">
         <input id="model-map-search" type="text" placeholder="前缀或机型">

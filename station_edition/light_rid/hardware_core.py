@@ -1,4 +1,4 @@
-from light_rid.platform_compat import (
+from station_edition.light_rid.platform_compat import (
     local_group_exists as _platform_local_group_exists,
     local_user_exists as _platform_local_user_exists,
     username_for_uid as _platform_username_for_uid,
@@ -614,6 +614,48 @@ def load_model_map(path: str) -> None:
     except Exception as e:
         _log(f"[WARN] model map load failed: {e}")
 
+def ensure_model_map_file(path: str) -> None:
+    if not path or os.path.exists(path):
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    errors: list[str] = []
+    try:
+        req = urllib.request.Request(
+            RID_MODELS_UPDATE_URL_DEFAULT,
+            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+model-map bootstrap)"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = resp.read(2 * 1024 * 1024)
+        obj = json.loads(data.decode("utf-8", errors="replace"))
+        next_map = _validate_model_map_payload(obj)
+        _write_json_file(path, next_map)
+        _log(f"[INFO] model map downloaded: {path}")
+        return
+    except Exception as e:
+        errors.append("remote=" + str(e))
+    try:
+        resource_path = _runtime_resource_path(MODEL_MAP_FILE_DEFAULT)
+        with open(resource_path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        next_map = _validate_model_map_payload(obj)
+        _write_json_file(path, next_map)
+        _log(f"[INFO] model map restored from embedded resource: {path}")
+        return
+    except Exception as e:
+        errors.append("embedded=" + str(e))
+    legacy = os.path.join(os.getcwd(), MODEL_MAP_LEGACY_FILE)
+    if os.path.exists(legacy):
+        try:
+            shutil.copy2(legacy, path)
+            _log(f"[INFO] model map restored from legacy file: {legacy}")
+            return
+        except Exception as e:
+            errors.append("legacy=" + str(e))
+    _log("[WARN] model map bootstrap failed: " + "; ".join(errors))
+
 def _model_map_target_path() -> str:
     try:
         basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
@@ -623,7 +665,7 @@ def _model_map_target_path() -> str:
                 return os.path.abspath(raw)
     except Exception:
         pass
-    return os.path.abspath(os.path.join(os.getcwd(), "rid_models.json"))
+    return os.path.abspath(os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT))
 
 def _model_map_items_from_dict(obj: dict | None) -> list[dict]:
     src = obj if isinstance(obj, dict) else {}

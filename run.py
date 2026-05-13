@@ -1,8 +1,8 @@
-"""Command-line entrypoint for Light RID Scanner."""
+"""Compatibility entrypoint for the station edition."""
 
 from __future__ import annotations
 
-from light_rid.app import main
+from station_edition.run import main
 
 
 if __name__ == "__main__":

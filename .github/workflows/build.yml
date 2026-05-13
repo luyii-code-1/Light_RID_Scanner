@@ -1,4 +1,4 @@
-name: Build Linux Binaries
+name: Build Edition Binaries
 
 permissions:
   contents: write
@@ -16,21 +16,28 @@ on:
         default: ""
 
 env:
-  APP_NAME: light_rid_scanner
   RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
   BUILD_REF: ${{ github.event.release.tag_name || github.event.inputs.tag || github.sha }}
 
 jobs:
-  linux:
-    name: Linux ${{ matrix.artifact }}
+  linux-native:
+    name: ${{ matrix.edition }} ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            artifact: linux-amd64
-          - runner: ubuntu-24.04-arm
-            artifact: linux-arm64
+          - edition: station
+            target: x86_64
+            runner: ubuntu-24.04
+          - edition: portable
+            target: x86_64
+            runner: ubuntu-24.04
+          - edition: station
+            target: arm64
+            runner: ubuntu-24.04-arm
+          - edition: portable
+            target: arm64
+            runner: ubuntu-24.04-arm
 
     runs-on: ${{ matrix.runner }}
 
@@ -64,43 +71,24 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
-          pyinstaller \
-            --onefile \
-            --clean \
-            --collect-submodules scapy \
-            --add-data "light_rid:light_rid" \
-            --name "$APP_NAME" \
-            run.py
-
-          echo "=== dist files ==="
-          ls -lah dist
-          file "dist/$APP_NAME"
+          python pytools/build_release.py --edition "${{ matrix.edition }}" --target "${{ matrix.target }}"
+          file "release/${{ matrix.edition }}/${{ matrix.target }}"/*
 
       - name: Prepare artifact
         shell: bash
         run: |
           set -euxo pipefail
-
-          mkdir -p release
-
-          SRC="dist/$APP_NAME"
-          DST="release/$APP_NAME-${{ matrix.artifact }}"
-
-          test -f "$SRC"
-          mv "$SRC" "$DST"
-          chmod +x "$DST"
-
-          echo "=== release files ==="
-          ls -lah release
-          file "$DST"
+          mkdir -p release-upload
+          cp "release/${{ matrix.edition }}/${{ matrix.target }}"/* release-upload/
+          chmod +x release-upload/*
+          ls -lah release-upload
 
       - name: Upload workflow artifact
         if: ${{ env.RELEASE_TAG == '' }}
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact }}
-          path: release/${{ env.APP_NAME }}-${{ matrix.artifact }}
+          name: ${{ matrix.edition }}-${{ matrix.target }}
+          path: release-upload/*
           if-no-files-found: error
 
       - name: Upload binary to GitHub Release
@@ -110,7 +98,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-
-          gh release upload "${RELEASE_TAG}" release/* \
+          gh release upload "${RELEASE_TAG}" release-upload/* \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber

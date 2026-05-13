@@ -94,6 +94,28 @@ Default web URL:
 
 - `http://<device-ip>:4600/`
 
+## Node Center Viewer
+
+`viewer/server.py` is a standalone node-center service for aggregating multiple `station_edition` sub-stations.
+
+```bash
+python viewer/server.py --host 0.0.0.0 --port 4700
+```
+
+Open:
+
+- `http://<center-ip>:4700/`
+
+The viewer stores its own configuration in `viewer/cfg.db`: node API URLs, node API tokens, and optional viewer password / SSO login settings. It does not store remote aircraft, base-station, AP, track, or health payloads. Every dashboard refresh fetches the current data from each configured station API and renders the aggregate result.
+
+The viewer UI keeps the station visual style but changes the workflow to node management. It does not show a default local base station, and its settings page only contains password login and SSO check login controls.
+
+Viewer binaries are built by the separate `.github/workflows/build-viewer.yml` workflow for Linux `x86_64`, Linux `arm64`, and Windows `x86_64`. Local build helper:
+
+```bash
+python pytools/build_viewer.py --target x86_64
+```
+
 ## Fixed NIC Binding and OOBE
 
 - The scanner no longer auto-rotates across NICs.

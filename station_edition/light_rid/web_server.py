@@ -6785,8 +6785,10 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
               <select id="cfg-metrics-temp-source">
                 <option value="auto">自动（优先 vcgencmd）</option>
                 <option value="vcgencmd">仅 vcgencmd</option>
+                <option value="vcgencmd_pmic">仅 vcgencmd PMIC</option>
                 <option value="thermal_zone">仅 /sys/class/thermal</option>
                 <option value="hwmon">仅 /sys/class/hwmon</option>
+                <option value="w1">仅 DS18B20 / w1</option>
                 <option value="off">关闭温度采集</option>
               </select>
               <div class="micro">节点温度会写入主机状态和温度曲线；关闭后显示为空值。</div>

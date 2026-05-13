@@ -2,6 +2,28 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## 节点中心 Viewer
+
+`viewer/server.py` 是独立 node-center 服务，用于聚合多个 `station_edition` 子站。
+
+```bash
+python viewer/server.py --host 0.0.0.0 --port 4700
+```
+
+打开：
+
+- `http://<中心节点IP>:4700/`
+
+Viewer 使用 `viewer/cfg.db` 保存自身配置：节点 API 地址、节点 API Token，以及可选的 Viewer 密码登录 / SSO check 登录设置。远端飞机、基站、AP、轨迹和健康状态不会落库；每次刷新都会从各子站 API 实时读取并聚合显示。
+
+Viewer 保留 station 风格，但入口改为节点管理器；不显示默认本地基站，设置页只保留密码登录和 SSO check 登录，不包含 API、负载、AP、基站信息或 Passkey 设置。
+
+Viewer 二进制由单独的 `.github/workflows/build-viewer.yml` 构建，覆盖 Linux `x86_64`、Linux `arm64` 和 Windows `x86_64`。本地构建命令：
+
+```bash
+python pytools/build_viewer.py --target x86_64
+```
+
 Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定式 Remote ID / OpenDroneID Wi-Fi 监测器。
 
 

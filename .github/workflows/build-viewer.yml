@@ -1,0 +1,94 @@
+name: Build Viewer Binary
+
+permissions:
+  contents: write
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag to build and upload to release"
+        required: false
+        default: ""
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
+  BUILD_REF: ${{ github.event.release.tag_name || github.event.inputs.tag || github.sha }}
+
+jobs:
+  viewer:
+    name: viewer ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            runner: ubuntu-24.04
+          - target: arm64
+            runner: ubuntu-24.04-arm
+          - target: windows-x86_64
+            runner: windows-2025
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python --version
+          python -c "import os, platform; print(platform.platform()); print(platform.machine()); print(os.name)"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build viewer binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python pytools/build_viewer.py --target "${{ matrix.target }}"
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-upload
+          cp "release/viewer/${{ matrix.target }}"/* release-upload/
+          ls -lah release-upload
+
+      - name: Upload workflow artifact
+        if: ${{ env.RELEASE_TAG == '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: viewer-${{ matrix.target }}
+          path: release-upload/*
+          if-no-files-found: error
+
+      - name: Upload binary to GitHub Release
+        if: ${{ env.RELEASE_TAG != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release upload "${RELEASE_TAG}" release-upload/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

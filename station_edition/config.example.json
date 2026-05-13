@@ -111,7 +111,8 @@
   },
   "metrics": {
     "enabled": false,
-    "retention_days": 7
+    "retention_days": 7,
+    "temperature_source": "auto"
   },
   "network_bindings": {
     "items": [

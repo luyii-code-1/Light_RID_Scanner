@@ -1578,78 +1578,178 @@ def _host_mem_stats() -> dict:
         return {"percent": None, "used_mb": None, "total_mb": None}
 
 
-def _host_temperature_from_vcgencmd() -> float | None:
+def _host_temperature_parse_text(text: str) -> float | None:
+    m = re.search(r"temp\s*=\s*(-?\d+(?:\.\d+)?)\s*'?\s*c", str(text or ""), re.I)
+    if not m:
+        m = re.search(r"^\s*(-?\d+(?:\.\d+)?)\s*(?:'?\s*c)?\s*$", str(text or ""), re.I)
+    if not m:
+        return None
     try:
-        out = subprocess.run(["vcgencmd", "measure_temp"], capture_output=True, text=True, timeout=3)
-        m = re.search(r"(-?\d+(?:\.\d+)?)", (out.stdout or "") + (out.stderr or ""))
-        if m:
-            value = float(m.group(1))
-            if -40.0 <= value <= 125.0:
-                return round(value, 1)
+        value = float(m.group(1))
+        if -40.0 <= value <= 140.0:
+            return round(value, 1)
     except Exception:
         pass
     return None
 
 
+def _host_temperature_from_vcgencmd(*extra_args: str) -> float | None:
+    try:
+        out = subprocess.run(["vcgencmd", "measure_temp", *extra_args], capture_output=True, text=True, timeout=3)
+        text = out.stdout or (out.stderr if int(getattr(out, "returncode", 1) or 0) == 0 else "")
+        return _host_temperature_parse_text(text)
+    except Exception:
+        return None
+
+
+def _host_temperature_from_vcgencmd_pmic() -> float | None:
+    return _host_temperature_from_vcgencmd("pmic")
+
+
+def _host_temperature_value_from_file(path: str, *, min_c: float = -40.0, max_c: float = 140.0) -> float | None:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read().strip()
+        if not raw:
+            return None
+        value = float(raw)
+        if abs(value) > 250:
+            value = value / 1000.0
+        if min_c <= value <= max_c:
+            return round(value, 1)
+    except Exception:
+        pass
+    return None
+
+
+def _host_temperature_best_candidate(candidates: list[tuple[int, float, str]]) -> float | None:
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], abs(item[1] - 55.0), item[1]))
+    best = candidates[0]
+    if best[1] >= 95.0:
+        for item in candidates[1:]:
+            if item[1] < 95.0 and item[0] <= best[0] + 8:
+                best = item
+                break
+    return round(best[1], 1)
+
+
+def _host_temperature_candidates_from_thermal(root: str = "/sys/class/thermal") -> list[tuple[int, float, str]]:
+    candidates: list[tuple[int, float, str]] = []
+    try:
+        names = sorted(os.listdir(root))
+    except Exception:
+        return candidates
+    for name in names:
+        if not name.startswith("thermal_zone"):
+            continue
+        dirpath = os.path.join(root, name)
+        temp_path = os.path.join(dirpath, "temp")
+        if not os.path.exists(temp_path):
+            continue
+        label = ""
+        try:
+            with open(os.path.join(dirpath, "type"), "r", encoding="utf-8", errors="ignore") as f:
+                label = f.read().strip().lower()
+        except Exception:
+            label = ""
+        value = _host_temperature_value_from_file(temp_path)
+        if value is None:
+            continue
+        score = 12
+        if any(k in label for k in ("cpu", "soc", "board", "thermal", "system")):
+            score -= 10
+        if any(k in label for k in ("max", "crit", "limit", "trip", "hot")):
+            score += 12
+        if value >= 95.0 and not any(k in label for k in ("cpu", "soc", "board")):
+            score += 8
+        candidates.append((score, float(value), temp_path))
+    return candidates
+
+
+def _host_temperature_candidates_from_hwmon(root: str = "/sys/class/hwmon") -> list[tuple[int, float, str]]:
+    candidates: list[tuple[int, float, str]] = []
+    try:
+        names = sorted(os.listdir(root))
+    except Exception:
+        return candidates
+    for name in names:
+        if not name.startswith("hwmon"):
+            continue
+        dirpath = os.path.join(root, name)
+        device_label = ""
+        try:
+            with open(os.path.join(dirpath, "name"), "r", encoding="utf-8", errors="ignore") as f:
+                device_label = f.read().strip().lower()
+        except Exception:
+            device_label = ""
+        try:
+            files = sorted(os.listdir(dirpath))
+        except Exception:
+            continue
+        for fname in files:
+            if not re.match(r"^temp\d+_input$", fname):
+                continue
+            path = os.path.join(dirpath, fname)
+            label = device_label
+            label_name = fname[:-6] + "_label"
+            try:
+                with open(os.path.join(dirpath, label_name), "r", encoding="utf-8", errors="ignore") as f:
+                    label = (f.read().strip().lower() or device_label)
+            except Exception:
+                pass
+            value = _host_temperature_value_from_file(path)
+            if value is None:
+                continue
+            score = 20
+            if any(k in label for k in ("cpu", "package", "soc", "board", "thermal", "system", "tctl", "tdie")):
+                score -= 10
+            if any(k in label for k in ("max", "crit", "limit", "trip", "hot")):
+                score += 12
+            if value >= 95.0 and not any(k in label for k in ("cpu", "package", "soc", "board", "tctl", "tdie")):
+                score += 8
+            candidates.append((score, float(value), path))
+    return candidates
+
+
+def _host_temperature_from_w1(root: str = "/sys/bus/w1/devices") -> float | None:
+    candidates: list[tuple[int, float, str]] = []
+    try:
+        names = sorted(os.listdir(root))
+    except Exception:
+        return None
+    for name in names:
+        if not name.startswith("28-"):
+            continue
+        path = os.path.join(root, name, "temperature")
+        value = _host_temperature_value_from_file(path, min_c=-55.0, max_c=125.0)
+        if value is None:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                if f.read().strip() == "85000":
+                    continue
+        except Exception:
+            pass
+        candidates.append((30, float(value), path))
+    return _host_temperature_best_candidate(candidates)
+
+
 def _host_temperature_from_sysfs(*roots: str) -> float | None:
     candidates: list[tuple[int, float, str]] = []
     for root in roots:
-        try:
-            for dirpath, _dirs, files in os.walk(root):
-                label = ""
-                base = os.path.basename(dirpath).lower()
-                try:
-                    if base.startswith("thermal_zone") and "type" in files:
-                        with open(os.path.join(dirpath, "type"), "r", encoding="utf-8", errors="ignore") as f:
-                            label = f.read().strip().lower()
-                except Exception:
-                    label = ""
-                for name in files:
-                    if not (name == "temp" or (name.startswith("temp") and name.endswith("_input"))):
-                        continue
-                    path = os.path.join(dirpath, name)
-                    sensor_label = label
-                    if not sensor_label and base.startswith("hwmon") and "_input" in name:
-                        label_name = name[:-6] + "_label"
-                        try:
-                            with open(os.path.join(dirpath, label_name), "r", encoding="utf-8", errors="ignore") as f:
-                                sensor_label = f.read().strip().lower()
-                        except Exception:
-                            sensor_label = label
-                    try:
-                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                            raw = f.read().strip()
-                        if not raw:
-                            continue
-                        value = float(raw)
-                        if abs(value) > 250:
-                            value = value / 1000.0
-                        if not (-40.0 <= value <= 140.0):
-                            continue
-                    except Exception:
-                        continue
-                    score = 20
-                    if base.startswith("thermal_zone"):
-                        score -= 8
-                    if any(k in sensor_label for k in ("cpu", "package", "soc", "board", "thermal", "system")):
-                        score -= 10
-                    if any(k in sensor_label for k in ("max", "crit", "limit", "trip", "hot")):
-                        score += 12
-                    if value >= 95.0 and not any(k in sensor_label for k in ("cpu", "package", "soc", "board")):
-                        score += 8
-                    candidates.append((score, float(value), path))
-        except Exception:
-            continue
-    if candidates:
-        candidates.sort(key=lambda item: (item[0], abs(item[1] - 55.0), item[1]))
-        best = candidates[0]
-        if best[1] >= 95.0:
-            for item in candidates[1:]:
-                if item[1] < 95.0 and item[0] <= best[0] + 8:
-                    best = item
-                    break
-        return round(best[1], 1)
-    return None
+        root_text = str(root or "")
+        base = os.path.basename(os.path.normpath(root_text)).lower()
+        if base == "thermal":
+            candidates.extend(_host_temperature_candidates_from_thermal(root_text))
+        elif base == "hwmon":
+            candidates.extend(_host_temperature_candidates_from_hwmon(root_text))
+        elif base == "devices" and "w1" in root_text:
+            value = _host_temperature_from_w1(root_text)
+            if value is not None:
+                candidates.append((30, float(value), root_text))
+    return _host_temperature_best_candidate(candidates)
 
 
 def _host_temperature_read() -> tuple[float | None, str]:
@@ -1658,16 +1758,25 @@ def _host_temperature_read() -> tuple[float | None, str]:
         return None, "off"
     probes = []
     if source == "vcgencmd":
-        probes = [("vcgencmd", _host_temperature_from_vcgencmd)]
+        probes = [
+            ("vcgencmd", _host_temperature_from_vcgencmd),
+            ("vcgencmd_pmic", _host_temperature_from_vcgencmd_pmic),
+        ]
+    elif source == "vcgencmd_pmic":
+        probes = [("vcgencmd_pmic", _host_temperature_from_vcgencmd_pmic)]
     elif source == "thermal_zone":
         probes = [("thermal_zone", lambda: _host_temperature_from_sysfs("/sys/class/thermal"))]
     elif source == "hwmon":
         probes = [("hwmon", lambda: _host_temperature_from_sysfs("/sys/class/hwmon"))]
+    elif source == "w1":
+        probes = [("w1", _host_temperature_from_w1)]
     else:
         probes = [
             ("vcgencmd", _host_temperature_from_vcgencmd),
+            ("vcgencmd_pmic", _host_temperature_from_vcgencmd_pmic),
             ("thermal_zone", lambda: _host_temperature_from_sysfs("/sys/class/thermal")),
             ("hwmon", lambda: _host_temperature_from_sysfs("/sys/class/hwmon")),
+            ("w1", _host_temperature_from_w1),
         ]
     for key, probe in probes:
         value = probe()
@@ -1683,13 +1792,16 @@ def _host_temperature_c() -> float | None:
 
 def _host_temperature_source_label(source: str | None) -> str:
     key = str(source or "").strip().lower().replace("-", "_")
-    return {
+    labels = {
         "auto": "自动",
         "vcgencmd": "vcgencmd",
+        "vcgencmd_pmic": "vcgencmd pmic",
         "thermal_zone": "/sys/class/thermal",
         "hwmon": "/sys/class/hwmon",
+        "w1": "DS18B20 / w1",
         "off": "关闭",
-    }.get(key, "自动")
+    }
+    return labels.get(key, "自动")
 
 
 def _host_local_ips() -> list[str]:

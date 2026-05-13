@@ -21,6 +21,8 @@ station_edition/config.json.rollback
 *.rollback.*
 rid_config.local.json
 *.secrets.json
+viewer/cfg.db
+viewer/cfg.db-*
 EULA.set
 tools
 # Runtime data

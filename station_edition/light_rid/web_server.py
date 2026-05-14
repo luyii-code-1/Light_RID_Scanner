@@ -974,6 +974,14 @@ function uasIdText(e){
   var s = String((e && e.uas_id) || '').trim();
   return s ? s : '-';
 }
+function ridFormatText(e){
+  var s = String((e && (e.rid_format || e.dji_rid_kind || e.kind)) || '').trim();
+  return s ? s : '-';
+}
+function parseNoteText(e){
+  var s = String((e && e.parse_note) || '').trim();
+  return s ? s : '';
+}
 function includeDroneByFirmware(e){
   if(newFirmwareParseEnabled()) return true;
   return String((e && e.scan_type_key) || '').toLowerCase() === 'phone';
@@ -992,6 +1000,8 @@ function buildInfoHtml(e){
   html += infoRowHtml('归档', e.archived ? '是' : '否');
   html += infoRowHtml('MAC', String(e.mac || '-'));
   html += infoRowHtml('SSID', String(e.ssid || '(hidden)'));
+  html += infoRowHtml('RID格式', ridFormatText(e));
+  if(parseNoteText(e)) html += infoRowHtml('解析状态', parseNoteText(e));
   html += infoRowHtml('来源', snSourceText(e));
   html += infoRowHtml('扫描类型', scanTypeText(e));
   html += infoRowHtml('固件', firmwareTypeText(e));
@@ -1006,6 +1016,8 @@ function buildInfoHtml(e){
   html += infoRowHtml('经度', fmt(e.lon,6,''));
   html += infoRowHtml('飞手纬度', fmt(e.pilot_lat,6,''));
   html += infoRowHtml('飞手经度', fmt(e.pilot_lon,6,''));
+  html += infoRowHtml('Home/Aux 纬度', fmt(e.home_lat ?? e.aux_lat,6,''));
+  html += infoRowHtml('Home/Aux 经度', fmt(e.home_lon ?? e.aux_lon,6,''));
   html += infoRowHtml('飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-'));
   html += infoRowHtml('高度', fmt(e.alt,1,'m'));
   html += infoRowHtml('相对高度', fmt(e.alt_relative,1,'m'));
@@ -3466,11 +3478,57 @@ function wgs84ToGcj02(lat, lon){
 function toMapLatLng(lat, lon){
   return wgs84ToGcj02(lat, lon);
 }
+function validMapCoord(lat, lon){
+  lat = numOrNull(lat);
+  lon = numOrNull(lon);
+  if(lat == null || lon == null) return false;
+  if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return false;
+  return true;
+}
+function safeMapLatLng(lat, lon){
+  if(!validMapCoord(lat, lon)) return null;
+  return toMapLatLng(Number(lat), Number(lon));
+}
+function mapLatLngsNeedFit(latlngs, marginPx){
+  if(!map || !Array.isArray(latlngs) || !latlngs.length) return false;
+  if(!map.getBounds || !map.latLngToContainerPoint || !map.getSize) return true;
+  try{
+    var b = map.getBounds();
+    var size = map.getSize();
+    var margin = Math.max(12, Number(marginPx || 26));
+    for(var i=0;i<latlngs.length;i++){
+      var ll = latlngs[i];
+      if(!b.contains(ll)) return true;
+      var p = map.latLngToContainerPoint(ll);
+      if(p.x < margin || p.y < margin || p.x > size.x - margin || p.y > size.y - margin) return true;
+    }
+    return false;
+  }catch(_e){
+    return true;
+  }
+}
+function fitMapDisplayLatLngs(latlngs, singleZoom, padRatio, marginPx){
+  if(!map || !Array.isArray(latlngs) || !latlngs.length) return false;
+  if(map._rid_fitted && !map._rid_user_moved && !mapLatLngsNeedFit(latlngs, marginPx)) return false;
+  try{
+    if(latlngs.length === 1){
+      map.setView(latlngs[0], singleZoom || 14);
+    }else{
+      map.fitBounds(L.latLngBounds(latlngs).pad(padRatio == null ? 0.16 : padRatio), {padding:[24,24]});
+    }
+    map._rid_fitted = true;
+    map._rid_base_fitted = false;
+    map._rid_user_moved = false;
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
 function focusEntryOnMap(e, zoom){
   if(!map || !e) return;
   var lat = Number(e.lat), lon = Number(e.lon);
-  if(!isFinite(lat) || !isFinite(lon)) return;
-  var pos = toMapLatLng(lat, lon);
+  var pos = safeMapLatLng(lat, lon);
+  if(!pos) return;
   var nextZoom = Math.max(Number(zoom || 16), Number(map.getZoom ? map.getZoom() : 0) || 0);
   markMapUserInteracted();
   try{
@@ -4321,15 +4379,13 @@ function updateMap(drones){
     var sn = String((e && e.sn) || '');
     if(!sn) return false;
     if(page === 'history' && !selectedSet[sn]) return false;
-    if(e.lat==null || e.lon==null) return false;
-    return true;
+    return validMapCoord(e.lat, e.lon);
   });
   var livePilot = (page === 'live' ? recentRows : rows).filter(function(e){
     var sn = String((e && e.sn) || '');
     if(!sn) return false;
     if(page === 'history' && !selectedSet[sn]) return false;
-    if(e.pilot_lat==null || e.pilot_lon==null) return false;
-    return true;
+    return validMapCoord(e.pilot_lat, e.pilot_lon);
   });
   var mapHintTxt = '';
   if(page === 'live'){
@@ -4386,7 +4442,7 @@ function updateMap(drones){
     motionState[sn] = {lat:latRaw, lon:lonRaw, heading:heading, ts:nowSec};
 
     var popup = '<b>'+sn+'</b><br>'+e.model+'<br>'
-      +(e.lat!=null?e.lat.toFixed(5):'-')+', '+(e.lon!=null?e.lon.toFixed(5):'-')
+      +(validMapCoord(e.lat, e.lon)?Number(e.lat).toFixed(5):'-')+', '+(validMapCoord(e.lat, e.lon)?Number(e.lon).toFixed(5):'-')
       +'<br>高度: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
       +'<br>速度: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
       +'<br>信号: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
@@ -4394,7 +4450,8 @@ function updateMap(drones){
       +'<br>航向差: '+(isFinite(Number(headingDelta))?((headingDelta>=0?'+':'')+Number(headingDelta).toFixed(1)+'°'):'N/A')
       +'<br>数据更新: '+esc(String(e.age_text || fmtAge(e.age)));
 
-    var airPos = toMapLatLng(latRaw, lonRaw);
+    var airPos = safeMapLatLng(latRaw, lonRaw);
+    if(!airPos) return;
     var dispNo = idx + 1;
     if(markers[sn]){
       markers[sn].setLatLng(airPos)
@@ -4420,9 +4477,10 @@ function updateMap(drones){
     activePilot[sn] = true;
     var col = colorIdx[sn] || '#ffb84d';
     var ptxt = String(e.pilot_loc_type_text || e.pilot_loc_type || 'unknown');
-    var pilotPos = toMapLatLng(e.pilot_lat, e.pilot_lon);
+    var pilotPos = safeMapLatLng(e.pilot_lat, e.pilot_lon);
+    if(!pilotPos) return;
     var popup = '<b>'+sn+'</b><br>飞手位置<br>'
-      +(e.pilot_lat!=null?e.pilot_lat.toFixed(5):'-')+', '+(e.pilot_lon!=null?e.pilot_lon.toFixed(5):'-')
+      +(validMapCoord(e.pilot_lat, e.pilot_lon)?Number(e.pilot_lat).toFixed(5):'-')+', '+(validMapCoord(e.pilot_lat, e.pilot_lon)?Number(e.pilot_lon).toFixed(5):'-')
       +'<br>类型: '+esc(ptxt);
     if(pilotMarkers[sn]){
       pilotMarkers[sn].setLatLng(pilotPos)
@@ -4454,8 +4512,9 @@ function updateMap(drones){
     for(var i=0;i<tr.length;i++){
       var p = tr[i] || {};
       var lat = Number(p.lat), lon = Number(p.lon);
-      if(isFinite(lat) && isFinite(lon)){
-        var ll = toMapLatLng(lat, lon);
+      if(validMapCoord(lat, lon)){
+        var ll = safeMapLatLng(lat, lon);
+        if(!ll) continue;
         latlngs.push(ll);
         trackLatLngsAll.push(ll);
       }
@@ -4502,11 +4561,8 @@ function updateMap(drones){
 
   if(!liveAir.length){
     var b = baseFromMeta(metaState);
-    if(page === 'history' && trackLatLngsAll.length && autoState.allow && (!map._rid_fitted || !!map._rid_user_moved)){
-      if(trackLatLngsAll.length === 1) map.setView(trackLatLngsAll[0], 15);
-      else map.fitBounds(L.latLngBounds(trackLatLngsAll).pad(0.14));
-      map._rid_fitted = true;
-      map._rid_user_moved = false;
+    if(page === 'history' && trackLatLngsAll.length && autoState.allow){
+      fitMapDisplayLatLngs(trackLatLngsAll, 15, 0.14, 26);
       document.getElementById('map-hint').textContent = '历史轨迹 ' + trackSn.length + ' 架';
       return;
     }
@@ -4514,6 +4570,7 @@ function updateMap(drones){
       if(autoState.allow && (!map._rid_base_fitted || !!map._rid_user_moved)){
         map.setView([b.lat, b.lon], b.zoom);
         map._rid_base_fitted = true;
+        map._rid_fitted = false;
         map._rid_user_moved = false;
       }
       if(autoState.allow){
@@ -4532,13 +4589,11 @@ function updateMap(drones){
     return;
   }
 
-  // first-time fit bounds for visible aircraft only
-  var latlngs = liveAir.map(function(e){ return toMapLatLng(e.lat, e.lon); }).concat(page === 'history' ? trackLatLngsAll : []);
-  if(latlngs.length && autoState.allow && (!map._rid_fitted || !!map._rid_user_moved)){
-    if(latlngs.length === 1) map.setView(latlngs[0], 14);
-    else map.fitBounds(L.latLngBounds(latlngs).pad(0.3));
-    map._rid_fitted = true;
-    map._rid_user_moved = false;
+  // Keep all visible aircraft in range; use history tracks only when no aircraft position is displayable.
+  var aircraftLatLngs = liveAir.map(function(e){ return safeMapLatLng(e.lat, e.lon); }).filter(function(x){ return !!x; });
+  var latlngs = aircraftLatLngs.length ? aircraftLatLngs : (page === 'history' ? trackLatLngsAll : []);
+  if(latlngs.length && autoState.allow){
+    fitMapDisplayLatLngs(latlngs, 14, 0.18, 30);
   }
 }
 </script>
@@ -5516,6 +5571,8 @@ _MAIN_PAGE_PATCH_JS = r"""
         ['来源', snSourceText(e)],
         ['扫描类型', scanTypeText(e)],
         ['固件', firmwareTypeText(e)],
+        ['RID格式', ridFormatText(e)],
+        ['解析状态', parseNoteText(e) || '-'],
         ['MAC', String(e.mac || '-')],
         ['SSID', String(e.ssid || '(hidden)')],
         ['捕获类型', String(e.capture_type || '-')],
@@ -5544,6 +5601,8 @@ _MAIN_PAGE_PATCH_JS = r"""
       var pilotPos = [
         ['飞手纬度', fmt(e.pilot_lat,6,'')],
         ['飞手经度', fmt(e.pilot_lon,6,'')],
+        ['Home/Aux 纬度', fmt(e.home_lat ?? e.aux_lat,6,'')],
+        ['Home/Aux 经度', fmt(e.home_lon ?? e.aux_lon,6,'')],
         ['飞手高度', fmt(e.pilot_alt,1,'m')],
         ['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]
       ];
@@ -6819,6 +6878,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
           <div class="row-actions" style="margin-top:10px">
             <button class="btn" id="btn-export-scan-data" type="button">导出扫描数据</button>
             <button class="btn ghost" id="btn-import-scan-data" type="button">导入扫描数据</button>
+            <button class="btn ghost" id="btn-reidentify-recent-history" type="button">识别所有飞机近100包</button>
             <input id="import-scan-data-file" type="file" accept=".json,application/json" style="display:none">
           </div>
           <div class="micro" id="settings-config-path" style="margin-top:10px">设置文件: -</div>
@@ -7331,6 +7391,19 @@ async function postJson(url, body){
   if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
+}
+async function reidentifyRecentHistoryPackets(){
+  setStatus('status-data-transfer', '正在识别所有飞机最近存储的100个数据包...', false);
+  var data = await postJson('/api/settings/history/reidentify-recent', {limit:100});
+  var msg = '历史包批量识别完成: 飞机 ' + Number(data.updated_aircraft || 0) + '/' + Number(data.aircraft_count || 0)
+    + '，数据包 ' + Number(data.decoded || 0) + '/' + Number(data.packet_count || 0);
+  var extra = [];
+  if(Number(data.migrated || 0) > 0) extra.push('SN迁移 ' + Number(data.migrated || 0));
+  if(Number(data.skipped || 0) > 0) extra.push('跳过 ' + Number(data.skipped || 0));
+  if(Number(data.failed || 0) > 0) extra.push('失败 ' + Number(data.failed || 0));
+  if(extra.length) msg += '（' + extra.join('，') + '）';
+  setStatus('status-data-transfer', msg, false);
+  showNotice('所有飞机近100个存储包已识别。', 'ok', 3600);
 }
 function closeElevate(value){
   var modal = qs('elevate-modal');
@@ -9411,6 +9484,9 @@ function bindDataTransferActions(){
     if(!file) return;
     guarded(function(){ return importScanDataFileFromFile(file); }, 'status-data-transfer', '', 0, 4200);
   });
+  on('btn-reidentify-recent-history', 'click', function(){
+    guarded(reidentifyRecentHistoryPackets, 'status-data-transfer', '所有飞机近100个存储包已识别。', 2400, 5200);
+  });
 }
 function bindEulaActions(){
   on('btn-eula-view', 'click', function(){ location.href = '/eula?next=/settings'; });
@@ -10884,6 +10960,20 @@ def http_server_thread() -> None:
                 removed = delete_history_item(sn)
                 _op_log("history-delete", f"sn={sn} removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({"ok": True, "sn": sn, "removed": bool(removed)}, 200)
+            elif path in ("/api/settings/history/reidentify-recent", "/api/settings/history/reidentify-latest"):
+                body = self._read_json_body()
+                try:
+                    limit = int(body.get("limit") or HISTORY_RAW_PACKET_LIMIT) if isinstance(body, dict) else HISTORY_RAW_PACKET_LIMIT
+                except Exception:
+                    limit = HISTORY_RAW_PACKET_LIMIT
+                try:
+                    rsp = reidentify_recent_history_packets(limit=limit)
+                    summary = f"aircraft={rsp.get('updated_aircraft')}/{rsp.get('aircraft_count')} packets={rsp.get('decoded')}/{rsp.get('packet_count')}"
+                    _op_log("history-reidentify-recent", str(rsp.get("error") or summary), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                    self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                except Exception as e:
+                    _op_log("history-reidentify-recent", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e)}, 500)
             elif path == "/api/settings/import/settings":
                 body = self._read_json_body()
                 payload = body.get("payload", body) if isinstance(body, dict) else body

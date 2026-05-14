@@ -59,11 +59,16 @@ ODID_PROTOCOL_MAX    = 2
 DJI_RID_VENDOR_TYPE  = 0x0D
 DJI_RID_VENDOR_PREFIX = ODID_OUI + bytes([DJI_RID_VENDOR_TYPE])
 RID_NEW_FW_BODY_MIN  = 83
+RID_DJI_VENDOR_MIN   = 10
+RID_DJI_GB46750_MIN  = 83
+RID_DJI_M400_PRIVATE_MIN = 68
 RID_NEW_FW_SN_LEN    = 20
 RID_NEW_FW_UAS_LEN   = 8
 RID_NEW_FW_GB_OFF    = 5
 RID_NEW_FW_GB_MIN    = 78
 RID_NEW_FW_ALL_IDENTIFIERS = b"\xff\xff\xfe"
+RID_DJI_GB46750_HEADER = b"\xff\x20\x48\xff\xff\xfe"
+RID_DJI_M400_PRIVATE_HEADER = b"\xf1\x19\x03\x01\x12"
 RID_NEW_FW_SN_OFF    = 11
 RID_NEW_FW_UAS_OFF   = 31
 RID_NEW_FW_PILOT_LON_OFF = 42
@@ -112,6 +117,8 @@ LOG_BUF_SIZE = 4000   # Log ring buffer size
 TUI_REFRESH  = 0.5    # Forced TUI refresh interval (seconds)
 CONFIG_FILE_DEFAULT = "config.json"
 HISTORY_STORE_DEFAULT = "history-cache.json"
+HISTORY_RAW_PACKET_LIMIT = 100
+HISTORY_RAW_PACKET_SNAPSHOT_LIMIT = 3
 MODEL_MAP_FILE_DEFAULT = "rid-models.json"
 MODEL_MAP_LEGACY_FILE = "rid_models.json"
 SYSTEMD_SERVICE_NAME = "light-rid-scanner.service"
@@ -751,6 +758,11 @@ def _history_disk_items_locked() -> list[dict]:
             "src_mac": e.get("src_mac"),
             "id_type": e.get("id_type"),
             "uas_id": _uas_id_clean(e.get("uas_id")),
+            "kind": e.get("kind"),
+            "rid_format": e.get("rid_format"),
+            "dji_rid_kind": e.get("dji_rid_kind"),
+            "parse_note": e.get("parse_note"),
+            "raw_vendor": e.get("raw_vendor"),
             "model": _resolve_model_name(sn, e.get("scan_type"), e.get("model")),
             "last_ch": e.get("last_ch"),
             "ch_assumed": bool(e.get("ch_assumed")),
@@ -766,10 +778,22 @@ def _history_disk_items_locked() -> list[dict]:
             "rssi": e.get("rssi"),
             "move_dir": e.get("move_dir"),
             "ssid": e.get("ssid"),
+            "gb_data_type": e.get("gb_data_type"),
+            "gb_version_raw": e.get("gb_version_raw"),
+            "gb_data_len": e.get("gb_data_len"),
+            "dji_dynamic": e.get("dji_dynamic"),
+            "reg_mark": e.get("reg_mark"),
+            "status": e.get("status"),
+            "coord_type": e.get("coord_type"),
+            "home_lat": e.get("home_lat"),
+            "home_lon": e.get("home_lon"),
+            "aux_lat": e.get("aux_lat"),
+            "aux_lon": e.get("aux_lon"),
+            "alt_candidates": e.get("alt_candidates"),
             "capture_type": e.get("capture_type"),
             "firmware_type": _firmware_type_key(e.get("firmware_type")),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
-            "raw_packets": list(e.get("raw_packets") or [])[-3:],
+            "raw_packets": list(e.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:],
             "scan_type": _scan_type_key(e.get("scan_type")),
             "track": _sanitize_track(e.get("track") or []),
             "track_updated_wall_ts": e.get("track_updated_wall_ts"),
@@ -821,7 +845,7 @@ def load_history_store(path: str | None) -> None:
                 if new_model != (old_model if old_model else "N/A"):
                     h["model"] = new_model
                     repaired_model += 1
-                h["raw_packets"] = list(h.get("raw_packets") or [])[-3:]
+                h["raw_packets"] = list(h.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:]
                 h["track"] = _sanitize_track(h.get("track") or [])
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
                 # Monotonic timestamps are process-local; keep them unset until new packets arrive.
@@ -964,7 +988,10 @@ def clear_track_store(sn: str | None = None) -> int:
 HISTORY_DETAIL_KEYS = (
     "src_mac","id_type","uas_id","model","last_ch","ch_assumed","lat","lon",
     "alt","speed","vspeed","pilot_lat","pilot_lon","pilot_loc_type","pilot_loc_type_text",
+    "kind","rid_format","dji_rid_kind","parse_note","raw_vendor",
     "gb_version","gb_identifiers",
+    "gb_data_type","gb_version_raw","gb_data_len","dji_dynamic",
+    "reg_mark","status","coord_type",
     "operation_category","operation_category_text",
     "aircraft_category","aircraft_category_text",
     "pilot_alt","track_deg","ground_speed","vertical_speed",
@@ -973,6 +1000,7 @@ HISTORY_DETAIL_KEYS = (
     "coord_sys","coord_sys_text",
     "horizontal_accuracy","vertical_accuracy","speed_accuracy",
     "timestamp_ms","timestamp_accuracy","timestamp_accuracy_text",
+    "home_lat","home_lon","aux_lat","aux_lon","alt_candidates",
     "rssi","move_dir","ssid",
     "capture_type","firmware_type","last_capture_wall_ts","raw_packets",
     "scan_type","track","track_updated_wall_ts",
@@ -999,7 +1027,7 @@ def _history_apply_raw_locked(raw: dict) -> tuple[bool, bool]:
         if k not in raw:
             continue
         if k == "raw_packets":
-            h[k] = list(raw.get(k) or [])[-3:]
+            h[k] = list(raw.get(k) or [])[-HISTORY_RAW_PACKET_LIMIT:]
         else:
             h[k] = raw.get(k)
     h["scan_type"] = _scan_type_key(h.get("scan_type"))

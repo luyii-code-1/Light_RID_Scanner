@@ -6,7 +6,10 @@ def _snap(e: dict) -> dict:
     return s
 
 NEW_FW_DETAIL_KEYS = (
+    "kind", "rid_format", "dji_rid_kind", "parse_note", "raw_vendor",
     "gb_version", "gb_identifiers",
+    "gb_data_type", "gb_version_raw", "gb_data_len", "dji_dynamic",
+    "reg_mark", "status", "coord_type",
     "operation_category", "operation_category_text",
     "aircraft_category", "aircraft_category_text",
     "pilot_alt", "track_deg", "ground_speed", "vertical_speed",
@@ -15,6 +18,7 @@ NEW_FW_DETAIL_KEYS = (
     "coord_sys", "coord_sys_text",
     "horizontal_accuracy", "vertical_accuracy", "speed_accuracy",
     "timestamp_ms", "timestamp_accuracy", "timestamp_accuracy_text",
+    "home_lat", "home_lon", "aux_lat", "aux_lon", "alt_candidates",
 )
 
 def _copy_new_fw_detail(dst: dict, src: dict | None) -> None:
@@ -75,7 +79,7 @@ def _history_merge(dst: dict, src: dict) -> None:
     src_rp = list(src.get("raw_packets") or [])
     if src_rp:
         dst_rp = list(dst.get("raw_packets") or [])
-        merged = (dst_rp + src_rp)[-6:]
+        merged = (dst_rp + src_rp)[-HISTORY_RAW_PACKET_LIMIT:]
         dst["raw_packets"] = merged
     src_track = _sanitize_track(src.get("track") or [])
     if src_track:
@@ -115,7 +119,7 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
             "pilot_loc_type_text": e.get("pilot_loc_type_text"),
             "pilot_alt": e.get("pilot_alt"),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
-            "raw_packets": list(e.get("raw_packets") or [])[-3:],
+            "raw_packets": list(e.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:],
             "scan_type": _scan_type_key(e.get("scan_type")),
             "track": _sanitize_track(e.get("track") or []),
             "track_updated_wall_ts": e.get("track_updated_wall_ts"),
@@ -144,7 +148,7 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h["uas_id"] = _uas_id_clean(e.get("uas_id"))
     h["firmware_type"] = _firmware_type_key(e.get("firmware_type"))
     h["last_capture_wall_ts"] = e.get("last_capture_wall_ts")
-    h["raw_packets"] = list(e.get("raw_packets") or [])[-3:]
+    h["raw_packets"] = list(e.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:]
     h["scan_type"] = _scan_type_key(e.get("scan_type"))
     h["track"] = _sanitize_track(h.get("track") or [])
     if e.get("lat") is not None and e.get("lon") is not None:
@@ -160,13 +164,331 @@ def _history_touch(e: dict, now: float, now_wall: float) -> None:
     h.setdefault("pilot_loc_type", e.get("pilot_loc_type"))
     h.setdefault("pilot_loc_type_text", e.get("pilot_loc_type_text"))
     h.setdefault("pilot_alt", e.get("pilot_alt"))
-    h.setdefault("raw_packets", list(e.get("raw_packets") or [])[-3:])
+    h.setdefault("raw_packets", list(e.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:])
     h.setdefault("scan_type", _scan_type_key(e.get("scan_type")))
     h.setdefault("uas_id", _uas_id_clean(e.get("uas_id")))
     h.setdefault("firmware_type", _firmware_type_key(e.get("firmware_type")))
     h.setdefault("track", _sanitize_track(e.get("track") or []))
     h.setdefault("track_updated_wall_ts", e.get("track_updated_wall_ts"))
     _history_mark_dirty()
+
+def _history_raw_packet_wall_ts(raw: dict, fallback: float | None = None) -> float:
+    if isinstance(raw, dict):
+        ts_text = str(raw.get("ts") or "").strip()
+        if ts_text and ts_text != "-":
+            try:
+                return float(time.mktime(time.strptime(ts_text, "%Y-%m-%d %H:%M:%S")))
+            except Exception:
+                pass
+    try:
+        return float(fallback or 0.0)
+    except Exception:
+        return 0.0
+
+def _history_recent_raw_packet_candidates_locked(limit: int = HISTORY_RAW_PACKET_LIMIT) -> list[dict]:
+    try:
+        per_aircraft_limit = int(limit)
+    except Exception:
+        per_aircraft_limit = HISTORY_RAW_PACKET_LIMIT
+    per_aircraft_limit = max(1, min(per_aircraft_limit, HISTORY_RAW_PACKET_LIMIT))
+    out: list[dict] = []
+    seq = 0
+    for sn, hist in history_table.items():
+        if not isinstance(hist, dict):
+            continue
+        fallback_ts = hist.get("last_capture_wall_ts") or hist.get("last_seen_wall_ts") or 0.0
+        raw_packets = list(hist.get("raw_packets") or [])[-per_aircraft_limit:]
+        for packet_index, raw in enumerate(raw_packets):
+            seq += 1
+            if not isinstance(raw, dict):
+                continue
+            if not str(raw.get("hex") or "").strip():
+                continue
+            wall_ts = _history_raw_packet_wall_ts(raw, fallback_ts)
+            out.append({
+                "wall_ts": wall_ts,
+                "seq": seq,
+                "sn": str(sn or ""),
+                "hist": dict(hist),
+                "raw": dict(raw),
+                "packet_index": packet_index,
+                "packet_count": len(raw_packets),
+            })
+    out.sort(key=lambda x: (str(x.get("sn") or ""), float(x.get("wall_ts") or 0.0), int(x.get("seq") or 0)))
+    return out
+
+def _history_raw_hex_to_bytes(raw_hex: str) -> bytes:
+    text = str(raw_hex or "")
+    if "..." in text:
+        text = text.split("...", 1)[0]
+    pairs = re.findall(r"(?i)(?<![0-9a-f])([0-9a-f]{2})(?![0-9a-f])", text)
+    if not pairs:
+        compact = re.sub(r"(?i)[^0-9a-f]", "", text)
+        if len(compact) >= 2:
+            if len(compact) % 2:
+                compact = compact[:-1]
+            pairs = [compact[i:i + 2] for i in range(0, len(compact), 2)]
+    if not pairs:
+        return b""
+    return bytes(int(p, 16) for p in pairs)
+
+def _history_ssid_hint(hist: dict, target_sn: str) -> str:
+    ssid = str(hist.get("ssid") or "").strip()
+    rid = _ssid_to_sn(ssid) if ssid else None
+    if rid:
+        return rid
+    target = str(target_sn or "").strip()
+    if len(target) == RID_NEW_FW_SN_LEN and target.isalnum():
+        return target
+    return ""
+
+def _history_decode_old_payloads(data: bytes) -> dict:
+    merged = {"basic_id": None, "location": None, "system": None}
+    payloads = []
+    try:
+        payloads = list(extract_from_raw(data) or [])
+    except Exception:
+        payloads = []
+    try:
+        if not payloads and _valid_payload(data):
+            payloads = [data]
+    except Exception:
+        pass
+    for payload in payloads:
+        try:
+            decoded = decode_odid(payload)
+        except Exception:
+            continue
+        if decoded.get("basic_id") and not merged.get("basic_id"):
+            merged["basic_id"] = decoded.get("basic_id")
+        if decoded.get("location") and not merged.get("location"):
+            merged["location"] = decoded.get("location")
+        if decoded.get("system") and not merged.get("system"):
+            merged["system"] = decoded.get("system")
+    return merged
+
+def _history_decode_raw_packet(data: bytes, hist: dict, target_sn: str) -> tuple[dict | None, str, bytes]:
+    ssid_hint = _history_ssid_hint(hist, target_sn)
+    try:
+        new_payloads = list(extract_new_firmware_from_raw(data, ssid_hint) or [])
+    except Exception:
+        new_payloads = []
+    if new_payloads:
+        body, decoded = new_payloads[-1]
+        return decoded, "new", bytes(body or b"")
+    pos = data.find(DJI_RID_VENDOR_PREFIX)
+    if pos >= 0:
+        body = data[pos:]
+        decoded = decode_new_firmware_payload(body, ssid_hint)
+        if decoded:
+            return decoded, "new", body
+    decoded = _history_decode_old_payloads(data)
+    if decoded.get("basic_id") or decoded.get("location") or decoded.get("system"):
+        return decoded, "old", data
+    return None, "", data
+
+def _history_track_replace_latest(record: dict, lat, lon, wall_ts: float) -> None:
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except Exception:
+        return
+    if not ((-90.0 <= lat_f <= 90.0) and (-180.0 <= lon_f <= 180.0)):
+        return
+    track = _sanitize_track(record.get("track") or [])
+    point = {"lat": round(lat_f, 7), "lon": round(lon_f, 7), "ts": float(wall_ts or time.time())}
+    if track:
+        try:
+            last_ts = float(track[-1].get("ts") or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if not wall_ts or abs(last_ts - float(wall_ts)) <= 120.0 or last_ts <= float(wall_ts):
+            track[-1] = point
+        else:
+            track.append(point)
+    else:
+        track.append(point)
+    record["track"] = _sanitize_track(track)
+    record["track_updated_wall_ts"] = float(record["track"][-1].get("ts") or time.time())
+
+def _history_raw_packet_matches(a: dict, b: dict) -> bool:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    if str(a.get("hex") or "").strip() != str(b.get("hex") or "").strip():
+        return False
+    b_ts = str(b.get("ts") or "").strip()
+    if b_ts:
+        return str(a.get("ts") or "").strip() == b_ts
+    return True
+
+def _history_update_raw_packet_metadata(record: dict, hist: dict, raw: dict) -> None:
+    packets = list(record.get("raw_packets") or hist.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:]
+    if isinstance(raw, dict) and raw.get("hex"):
+        replaced = False
+        for idx in range(len(packets) - 1, -1, -1):
+            if _history_raw_packet_matches(packets[idx], raw):
+                packets[idx] = dict(raw)
+                replaced = True
+                break
+        if not replaced:
+            packets.append(dict(raw))
+    record["raw_packets"] = packets[-HISTORY_RAW_PACKET_LIMIT:]
+
+def _history_apply_reidentified_locked(target_sn: str, hist: dict, raw: dict, decoded: dict, firmware_type: str, body: bytes) -> dict:
+    basic = decoded.get("basic_id") if isinstance(decoded, dict) else None
+    loc = decoded.get("location") if isinstance(decoded, dict) else None
+    sys_loc = decoded.get("system") if isinstance(decoded, dict) else None
+    meta = decoded.get("metadata") if isinstance(decoded, dict) else None
+    parsed_sn = ""
+    id_type = hist.get("id_type")
+    if isinstance(basic, dict):
+        parsed_sn = str(basic.get("uas_id") or "").strip()
+        id_type = basic.get("id_type") or id_type
+    old_sn = str(target_sn or "").strip()
+    sn = parsed_sn if parsed_sn and (old_sn.startswith("MAC:") or old_sn != parsed_sn) else old_sn
+    if not sn:
+        sn = parsed_sn or old_sn
+    existing = history_table.get(sn) if sn != old_sn else None
+    record = dict(existing) if isinstance(existing, dict) else dict(hist)
+    if sn != old_sn and old_sn in history_table:
+        old_record = history_table.pop(old_sn)
+        if existing:
+            _history_merge(record, old_record)
+    record["sn"] = sn
+    if id_type:
+        record["id_type"] = id_type
+    uas_id_value = _uas_id_clean(decoded.get("uas_id"))
+    record["uas_id"] = uas_id_value
+    record["firmware_type"] = _firmware_type_key(firmware_type)
+    record["scan_type"] = _scan_type_key(record.get("scan_type"))
+    record["model"] = _resolve_model_name(sn, record.get("scan_type"), record.get("model"))
+    cap_wall = _history_raw_packet_wall_ts(raw, record.get("last_capture_wall_ts") or record.get("last_seen_wall_ts"))
+    if cap_wall:
+        record["last_capture_wall_ts"] = cap_wall
+        record["last_seen_wall_ts"] = max(float(record.get("last_seen_wall_ts") or 0.0), float(cap_wall))
+    if isinstance(raw, dict):
+        raw["firmware_type"] = record["firmware_type"]
+        raw["uas_id"] = uas_id_value
+    _history_update_raw_packet_metadata(record, hist, raw)
+    if record["firmware_type"] == "new":
+        for key in NEW_FW_DETAIL_KEYS:
+            record[key] = meta.get(key) if isinstance(meta, dict) else None
+        if body:
+            record["raw_vendor"] = body.hex()
+    elif isinstance(meta, dict):
+        _copy_new_fw_detail(record, meta)
+    if isinstance(loc, dict):
+        for key, src_key in (
+            ("lat", "lat"),
+            ("lon", "lon"),
+            ("alt", "alt_geodetic"),
+            ("speed", "speed_ms"),
+            ("vspeed", "vspeed_ms"),
+            ("move_dir", "direction_deg"),
+            ("alt_relative", "alt_relative"),
+            ("alt_geoid", "alt_geoid"),
+            ("alt_baro", "alt_baro"),
+        ):
+            if src_key in loc:
+                record[key] = loc.get(src_key)
+    elif record["firmware_type"] == "new":
+        for key in ("lat", "lon", "alt", "speed", "vspeed", "move_dir", "alt_relative", "alt_geoid", "alt_baro"):
+            record[key] = None
+    if isinstance(sys_loc, dict):
+        record["pilot_lat"] = sys_loc.get("pilot_lat")
+        record["pilot_lon"] = sys_loc.get("pilot_lon")
+        record["pilot_alt"] = sys_loc.get("pilot_alt")
+        record["pilot_loc_type"] = sys_loc.get("pilot_loc_type")
+        record["pilot_loc_type_text"] = str(sys_loc.get("pilot_loc_type_text") or "")
+    elif record["firmware_type"] == "new":
+        for key in ("pilot_lat", "pilot_lon", "pilot_alt", "pilot_loc_type", "pilot_loc_type_text"):
+            record[key] = None if key != "pilot_loc_type_text" else ""
+    if record.get("lat") is not None and record.get("lon") is not None:
+        _history_track_replace_latest(record, record.get("lat"), record.get("lon"), cap_wall or time.time())
+    history_table[sn] = record
+    if sn != old_sn and old_sn in state_table:
+        if sn not in state_table:
+            state_table[sn] = state_table.pop(old_sn)
+            state_table[sn]["sn"] = sn
+        else:
+            state_table.pop(old_sn, None)
+    state_entry = state_table.get(sn)
+    if isinstance(state_entry, dict):
+        for key in (
+            "id_type", "uas_id", "model", "lat", "lon", "alt", "speed", "vspeed", "move_dir",
+            "pilot_lat", "pilot_lon", "pilot_alt", "pilot_loc_type", "pilot_loc_type_text",
+            "firmware_type", "last_capture_wall_ts", "raw_packets", "track", "track_updated_wall_ts",
+        ) + NEW_FW_DETAIL_KEYS:
+            if key in record:
+                state_entry[key] = record.get(key)
+    _history_mark_dirty()
+    return record
+
+def reidentify_recent_history_packets(limit: int = HISTORY_RAW_PACKET_LIMIT) -> dict:
+    try:
+        effective_limit = max(1, min(int(limit or HISTORY_RAW_PACKET_LIMIT), HISTORY_RAW_PACKET_LIMIT))
+    except Exception:
+        effective_limit = HISTORY_RAW_PACKET_LIMIT
+    with state_lock:
+        candidates = _history_recent_raw_packet_candidates_locked(effective_limit)
+    if not candidates:
+        return {"ok": False, "error": "no history raw packet"}
+    decoded_count = 0
+    skipped_count = 0
+    failed_count = 0
+    migrated_count = 0
+    updated_sns: set[str] = set()
+    formats: dict[str, int] = {}
+    errors: list[dict] = []
+    aircraft_seen = {str(item.get("sn") or "") for item in candidates if str(item.get("sn") or "")}
+    for item in candidates:
+        target_sn = str(item.get("sn") or "")
+        hist = item.get("hist") if isinstance(item.get("hist"), dict) else {}
+        raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+        data = _history_raw_hex_to_bytes(str(raw.get("hex") or ""))
+        if not data:
+            skipped_count += 1
+            if len(errors) < 8:
+                errors.append({"sn": target_sn, "error": "raw packet has no usable hex"})
+            continue
+        decoded, firmware_type, body = _history_decode_raw_packet(data, hist, target_sn)
+        if not decoded:
+            failed_count += 1
+            if len(errors) < 8:
+                errors.append({"sn": target_sn, "error": "raw packet could not be decoded"})
+            continue
+        with state_lock:
+            record = _history_apply_reidentified_locked(target_sn, hist, raw, decoded, firmware_type, body)
+        decoded_count += 1
+        sn_now = str(record.get("sn") or target_sn)
+        updated_sns.add(sn_now)
+        if sn_now and sn_now != target_sn:
+            migrated_count += 1
+        fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or "unknown")
+        formats[fmt] = int(formats.get(fmt, 0)) + 1
+    saved = save_history_store(force=True)
+    _log(
+        "[INFO] history recent packets reidentified: "
+        f"aircraft={len(updated_sns)}/{len(aircraft_seen)} packets={decoded_count}/{len(candidates)} "
+        f"skipped={skipped_count} failed={failed_count} migrated={migrated_count}"
+    )
+    return {
+        "ok": True,
+        "limit": effective_limit,
+        "aircraft_count": len(aircraft_seen),
+        "updated_aircraft": len(updated_sns),
+        "packet_count": len(candidates),
+        "decoded": decoded_count,
+        "skipped": skipped_count,
+        "failed": failed_count,
+        "migrated": migrated_count,
+        "formats": formats,
+        "errors": errors,
+        "saved": bool(saved),
+    }
+
+def reidentify_latest_history_packet() -> dict:
+    return reidentify_recent_history_packets(limit=HISTORY_RAW_PACKET_LIMIT)
 
 def state_update(src_mac: str, decoded: dict, rssi: int | None,
                  ch: int, ch_assumed: bool, pl_sig: int,
@@ -286,8 +608,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                     "uas_id": uas_id_value,
                     "hex": str(raw_pkt_hex),
                 })
-                if len(rp) > 6:
-                    rp = rp[-6:]
+                if len(rp) > HISTORY_RAW_PACKET_LIMIT:
+                    rp = rp[-HISTORY_RAW_PACKET_LIMIT:]
                 e["raw_packets"] = rp
 
         if CHANGE_ON_PL:   e["pl_sig"] = pl_sig
@@ -355,6 +677,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 e["alt"]    = loc.get("alt_geodetic")
                 e["speed"]  = loc.get("speed_ms")
                 e["vspeed"] = loc.get("vspeed_ms")
+                if loc.get("direction_deg") is not None:
+                    e["move_dir"] = loc.get("direction_deg")
                 if firmware_type_key == "new":
                     for key, src_key in (
                         ("alt_relative", "alt_relative"),
@@ -643,6 +967,11 @@ def _state_snapshot() -> dict:
                 "scan_type": scan_type,
                 "firmware_type": firmware_type,
                 "firmware_type_key": firmware_type_key,
+                "kind": cur.get("kind", hist.get("kind")),
+                "rid_format": cur.get("rid_format", hist.get("rid_format")),
+                "dji_rid_kind": cur.get("dji_rid_kind", hist.get("dji_rid_kind")),
+                "parse_note": cur.get("parse_note", hist.get("parse_note")),
+                "raw_vendor": cur.get("raw_vendor", hist.get("raw_vendor")),
                 "model": model_name,
                 "lost": lost,
                 "archived": sn not in live_by_sn,
@@ -660,6 +989,11 @@ def _state_snapshot() -> dict:
                 "pilot_alt": cur.get("pilot_alt", hist.get("pilot_alt")),
                 "pilot_loc_type": cur.get("pilot_loc_type", hist.get("pilot_loc_type")),
                 "pilot_loc_type_text": cur.get("pilot_loc_type_text", hist.get("pilot_loc_type_text","")) or "",
+                "home_lat": cur.get("home_lat", hist.get("home_lat")),
+                "home_lon": cur.get("home_lon", hist.get("home_lon")),
+                "aux_lat": cur.get("aux_lat", hist.get("aux_lat")),
+                "aux_lon": cur.get("aux_lon", hist.get("aux_lon")),
+                "alt_candidates": cur.get("alt_candidates", hist.get("alt_candidates")),
                 "gb_version": cur.get("gb_version", hist.get("gb_version")),
                 "gb_identifiers": cur.get("gb_identifiers", hist.get("gb_identifiers")),
                 "operation_category": cur.get("operation_category", hist.get("operation_category")),
@@ -689,7 +1023,7 @@ def _state_snapshot() -> dict:
                 "capture_type": cur.get("capture_type", hist.get("capture_type","")) or "",
                 "capture_time": _fmt_wall_ts(cap_wall_ts),
                 "last_pkt_time": _fmt_wall_ts(cap_wall_ts),
-                "raw_packets": list(cur.get("raw_packets", hist.get("raw_packets", [])) or [])[-3:],
+                "raw_packets": list(cur.get("raw_packets", hist.get("raw_packets", [])) or [])[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:],
                 "scan_type_key": scan_type_key,
                 "age": round(age),
                 "age_text": _fmt_age_compact(age),

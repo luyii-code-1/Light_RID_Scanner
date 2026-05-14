@@ -16,7 +16,7 @@ python viewer/server.py --host 0.0.0.0 --port 4700
 
 Viewer 使用 `viewer/cfg.db` 保存自身配置：节点 API 地址、节点 API Token，以及可选的 Viewer 密码登录 / SSO check 登录设置。远端飞机、基站、AP、轨迹和健康状态不会落库；每次刷新都会从各子站 API 实时读取并聚合显示。
 
-Viewer 保留 station 风格，但入口改为节点管理器；不显示默认本地基站，设置页只保留密码登录和 SSO check 登录，不包含 API、负载、AP、基站信息或 Passkey 设置。
+Viewer 的实时/历史主界面直接复用 `station_edition/light_rid/web_server.py` 的 Station 页面模板；viewer 代码只替换数据/API 层，并从 DOM 中删除 Station 专用控制项。`/settings` 复用 Station 设置页风格，只保留 Viewer 主机状态、地图默认位置/缩放、密码登录、SSO check 登录和许可协议。节点管理单独放在 `/nodes`，支持节点卡片、负载曲线、扫描统计、一键生成子站 SSO 登录 URL，以及多节点批量重启程序 / 更新识别库。
 
 Viewer 二进制由单独的 `.github/workflows/build-viewer.yml` 构建，覆盖 Linux `x86_64`、Linux `arm64` 和 Windows `x86_64`。本地构建命令：
 

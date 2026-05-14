@@ -108,7 +108,7 @@ Open:
 
 The viewer stores its own configuration in `viewer/cfg.db`: node API URLs, node API tokens, and optional viewer password / SSO login settings. It does not store remote aircraft, base-station, AP, track, or health payloads. Every dashboard refresh fetches the current data from each configured station API and renders the aggregate result.
 
-The viewer UI keeps the station visual style but changes the workflow to node management. It does not show a default local base station, and its settings page only contains password login and SSO check login controls.
+The viewer live/history UI is built from the same Station page template used by `station_edition/light_rid/web_server.py`; viewer code only patches the data/API layer and removes Station-only controls from the DOM. `/settings` uses the Station settings style for viewer host status, default map position/zoom, password login, SSO check login, and EULA controls. Node management is a separate `/nodes` page with node cards, load charts, scan counts, one-click SSO URL creation, and batch restart/model-database update actions.
 
 Viewer binaries are built by the separate `.github/workflows/build-viewer.yml` workflow for Linux `x86_64`, Linux `arm64`, and Windows `x86_64`. Local build helper:
 

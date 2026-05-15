@@ -10,7 +10,7 @@ python viewer\server.py --host 0.0.0.0 --port 4700
 
 Open `http://127.0.0.1:4700/`.
 
-The viewer stores only its own configuration in `viewer/cfg.db`: node API URLs, node API tokens, and optional viewer login settings. It does not store remote aircraft, base-station status, tracks, AP data, or other live node payloads; those are fetched from each station API on every refresh.
+The viewer stores only its own configuration in `viewer/cfg.db`: node API root URLs, node API tokens, and optional viewer login settings. It does not store remote aircraft, base-station status, tracks, AP data, or other live node payloads; those are fetched from each station API on every refresh.
 
 The live/history UI is built from the same Station page template used by `station_edition/light_rid/web_server.py`. Viewer-specific code only patches the data/API layer and removes Station-only controls from the DOM.
 
@@ -19,9 +19,12 @@ The live/history UI is built from the same Station page template used by `statio
 
 Each station node should expose the `station_edition` token API, especially:
 
+- `GET /api/v1`
 - `GET /api/health`
 - `GET /api/v1/snapshot`
 - `GET /api/v1/drones`
+
+When adding a node, enter only the URL root, for example `http://192.168.1.10:4600`. Paths, query strings, fragments, and user-info are rejected; the viewer appends `/api/v1` paths itself and tests real API responses before saving.
 
 The viewer sends the configured token as both `X-API-Token` and `Authorization: Bearer <token>`.
 

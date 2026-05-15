@@ -296,9 +296,27 @@ async function loadAll(){
   if(state.selectedId && nodeById(state.selectedId)) showBasic(state.selectedId);
   setStatus('bulk-status', '节点 ' + String(agg.online_node_count || 0) + '/' + String(agg.node_count || 0) + ' 在线，飞机 ' + String(agg.online_drone_count || 0) + '/' + String(agg.drone_count || 0), false);
 }
+function normalizeNodeRootInput(raw){
+  var value = String(raw || '').trim();
+  if(!value) throw new Error('API address is required');
+  if(/\s/.test(value)) throw new Error('API address must not contain whitespace');
+  if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) value = 'http://' + value;
+  var url;
+  try{ url = new URL(value); }catch(_e){ throw new Error('API address must be an http(s) URL root'); }
+  if(url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('API address must be http(s)');
+  if(url.username || url.password || (url.pathname && url.pathname !== '/') || url.search || url.hash){
+    throw new Error('Only the URL root is allowed, for example http://192.168.1.10:4600');
+  }
+  return url.origin;
+}
+function collectNodeBody(){
+  var root = normalizeNodeRootInput(qs('node-url').value);
+  qs('node-url').value = root;
+  return {id:Number(qs('node-id').value||0), name:qs('node-name').value, base_url:root, token:qs('node-token').value, enabled:qs('node-enabled').checked};
+}
 function clearForm(){ qs('node-id').value=''; qs('node-name').value=''; qs('node-url').value=''; qs('node-token').value=''; qs('node-enabled').checked=true; setStatus('node-status','-',false); }
 async function saveNode(testOnly){
-  var body = {id:Number(qs('node-id').value||0), name:qs('node-name').value, base_url:qs('node-url').value, token:qs('node-token').value, enabled:qs('node-enabled').checked};
+  var body = collectNodeBody();
   setStatus('node-status', testOnly ? '正在测试...' : '正在保存...', false);
   var d = await post(testOnly ? '/api/nodes/test' : '/api/nodes', body);
   if(testOnly){ var n=d.node||{}; setStatus('node-status', '测试完成：' + (n.ok ? '在线' : '离线') + (n.error ? ' · ' + n.error : ''), !n.ok); return; }

@@ -64,6 +64,70 @@ def _fetch_json(base_url: str, token: str, path: str) -> tuple[dict[str, Any] | 
     return _request_json(base_url, token, path)
 
 
+def _payload_ok(payload: dict[str, Any] | None) -> bool:
+    return isinstance(payload, dict) and payload.get("ok", True) is not False
+
+
+def test_node_communication(node: dict[str, Any]) -> dict[str, Any]:
+    started = time.time()
+    base_url = str(node.get("base_url") or "")
+    token = str(node.get("token") or "")
+    api_root = base_url.rstrip("/") + "/api/v1"
+    root, root_err, root_code = _fetch_json(base_url, token, "/api/v1")
+    if not _payload_ok(root):
+        return {
+            "id": node.get("id", 0),
+            "name": node.get("name") or base_url,
+            "base_url": base_url,
+            "api_root": api_root,
+            "enabled": bool(node.get("enabled", True)),
+            "ok": False,
+            "error": "api root failed: " + (root_err or "invalid API response"),
+            "status_code": root_code,
+            "latency_ms": int((time.time() - started) * 1000),
+            "station": {"name": node.get("name") or base_url, "lat": None, "lon": None, "zoom": 13},
+            "drones": [],
+            "count": 0,
+            "online_count": 0,
+            "fetched_at": time.time(),
+        }
+    snapshot, snap_err, snap_code = _fetch_json(base_url, token, "/api/v1/snapshot")
+    if not _payload_ok(snapshot):
+        return {
+            "id": node.get("id", 0),
+            "name": node.get("name") or base_url,
+            "base_url": base_url,
+            "api_root": api_root,
+            "enabled": bool(node.get("enabled", True)),
+            "ok": False,
+            "error": "snapshot API failed: " + (snap_err or "invalid API response"),
+            "status_code": snap_code,
+            "latency_ms": int((time.time() - started) * 1000),
+            "station": {"name": node.get("name") or base_url, "lat": None, "lon": None, "zoom": 13},
+            "drones": [],
+            "count": 0,
+            "online_count": 0,
+            "fetched_at": time.time(),
+        }
+    drones = _rows_from_snapshot(snapshot or {})
+    return {
+        "id": node.get("id", 0),
+        "name": node.get("name") or base_url,
+        "base_url": base_url,
+        "api_root": api_root,
+        "enabled": bool(node.get("enabled", True)),
+        "ok": True,
+        "error": None,
+        "status_code": snap_code or root_code,
+        "latency_ms": int((time.time() - started) * 1000),
+        "station": _station_position_from_snapshot(snapshot or {}),
+        "drones": drones,
+        "count": len(drones),
+        "online_count": len([x for x in drones if not bool(x.get("lost")) and not bool(x.get("archived"))]),
+        "fetched_at": time.time(),
+    }
+
+
 def post_node_json(node: dict[str, Any], path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     payload, err, code = _request_json(
         str(node.get("base_url") or ""),

@@ -26,17 +26,17 @@ if __package__ in (None, ""):
 from viewer.aggregation import (
     aggregate_nodes,
     create_node_sso_url,
-    fetch_node_live,
     fetch_node_metrics,
     fetch_node_track,
     run_node_operation,
+    test_node_communication,
     viewer_state_snapshot,
 )
 from viewer.nodes_ui import build_nodes_page
 from viewer.paths import APP_NAME, APP_VERSION, ASSETS_DIR, DEFAULT_DB, DEFAULT_HOST, DEFAULT_PORT, EULA_PATH
 from viewer.settings_ui import build_settings_page
 from viewer.station_ui import build_station_viewer_page
-from viewer.storage import ConfigStore, SESSION_TTL_SEC, verify_secret
+from viewer.storage import ConfigStore, SESSION_TTL_SEC, normalize_base_url, verify_secret
 
 
 COOKIE_NAME = "rid_node_center_session"
@@ -134,6 +134,18 @@ def _viewer_config_payload(store: ConfigStore) -> dict[str, Any]:
         "readonly": True,
         "text": json.dumps(cfg, ensure_ascii=False, indent=2),
     }
+
+
+def _node_candidate_from_body(store: ConfigStore, body: dict[str, Any]) -> dict[str, Any]:
+    node_id = int(body.get("id") or 0)
+    base_url = normalize_base_url(str(body.get("base_url") or body.get("url") or ""))
+    token = str(body.get("token") or "")
+    if node_id and token == "" and not bool(body.get("clear_token")):
+        existing = next((n for n in store.list_nodes(reveal_token=True) if int(n.get("id") or 0) == node_id), None)
+        if existing:
+            token = str(existing.get("token") or "")
+    name = str(body.get("name") or "").strip() or urllib.parse.urlparse(base_url).netloc
+    return {"id": node_id, "name": name, "base_url": base_url, "token": token, "enabled": True}
 
 
 def _markdown_to_basic_html(text: str) -> str:
@@ -562,17 +574,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "auth": self.store.save_auth_config(body)})
                 return
             if path == "/api/nodes":
+                probe = test_node_communication(_node_candidate_from_body(self.store, body))
+                if not probe.get("ok"):
+                    self._send_json({"ok": False, "error": probe.get("error") or "node API communication failed", "node": probe}, 400)
+                    return
                 self._send_json({"ok": True, "item": self.store.upsert_node(body)})
                 return
             if path == "/api/nodes/test":
-                node = {
-                    "id": int(body.get("id") or 0),
-                    "name": str(body.get("name") or "测试节点").strip() or "测试节点",
-                    "base_url": str(body.get("base_url") or body.get("url") or ""),
-                    "token": str(body.get("token") or ""),
-                    "enabled": True,
-                }
-                self._send_json({"ok": True, "node": fetch_node_live(node)})
+                node = _node_candidate_from_body(self.store, body)
+                self._send_json({"ok": True, "node": test_node_communication(node)})
                 return
             if path == "/api/nodes/delete":
                 self._send_json({"ok": True, "deleted": self.store.delete_node(int(body.get("id") or 0))})

@@ -42,14 +42,26 @@ def normalize_base_url(value: str) -> str:
     from urllib.parse import urlparse, urlunparse
 
     raw = str(value or "").strip()
+    if any(ch.isspace() for ch in raw):
+        raise ValueError("API address must not contain whitespace")
     if not raw:
         raise ValueError("API 地址不能为空")
     if "://" not in raw:
         raw = "http://" + raw
     parsed = urlparse(raw)
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("API address port is invalid") from exc
+    if not parsed.hostname:
+        raise ValueError("API address must be an http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("API address must not include user info")
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("API address must be the URL root only, for example http://host:4600")
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("API 地址必须是 http(s) URL")
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+    return urlunparse((parsed.scheme.lower(), parsed.netloc, "", "", "", ""))
 
 
 def _float_or_none(value: Any) -> float | None:

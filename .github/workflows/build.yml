@@ -59,6 +59,15 @@ jobs:
           uname -a
           uname -m
           python --version
+          python - <<'PY'
+          import os
+          import platform
+          import struct
+
+          print("python_bits =", struct.calcsize("P") * 8)
+          print("platform_machine =", platform.machine())
+          print("uname_machine =", os.uname().machine)
+          PY
 
       - name: Install dependencies
         shell: bash
@@ -129,6 +138,7 @@ jobs:
         run: |
           set -euxo pipefail
           uname -a
+          uname -m
           docker version
 
       - name: Build 32-bit x86 binary
@@ -142,6 +152,15 @@ jobs:
             bash -lc 'set -euxo pipefail
               apt-get update
               apt-get install -y --no-install-recommends file
+              python - <<'"'"'PY'"'"'
+import os
+import platform
+import struct
+
+print("python_bits =", struct.calcsize("P") * 8)
+print("platform_machine =", platform.machine())
+print("uname_machine =", os.uname().machine)
+PY
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
               python pytools/build_release.py \
@@ -185,7 +204,7 @@ jobs:
 
   linux-armv7:
     name: ${{ matrix.edition }} linux-armv7
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -196,6 +215,11 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ env.BUILD_REF }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
 
       - name: Show runner info
         shell: bash
@@ -216,6 +240,15 @@ jobs:
             bash -lc 'set -euxo pipefail
               apt-get update
               apt-get install -y --no-install-recommends file build-essential python3-dev libpcap-dev
+              python - <<'"'"'PY'"'"'
+import os
+import platform
+import struct
+
+print("python_bits =", struct.calcsize("P") * 8)
+print("platform_machine =", platform.machine())
+print("uname_machine =", os.uname().machine)
+PY
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
               python pytools/build_release.py \

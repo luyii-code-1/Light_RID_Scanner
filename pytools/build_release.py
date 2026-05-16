@@ -14,14 +14,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
 EDITION_ENTRYPOINTS = {
     "station": ROOT / "station_edition" / "run.py",
     "portable": ROOT / "portable_edition" / "pe.py",
 }
+
 EDITION_NAMES = {
     "station": "light_rid_station",
     "portable": "light_rid_portable",
 }
+
 TARGET_ALIASES = {
     "x86_64": "x86_64",
     "amd64": "x86_64",
@@ -36,9 +39,9 @@ TARGET_ALIASES = {
     "aarch64": "arm64",
 
     "armv7": "armv7",
+    "armv7l": "armv7",
     "armhf": "armv7",
     "arm": "armv7",
-    "armv7l": "armv7",
 }
 
 
@@ -63,18 +66,25 @@ def default_target() -> str:
 
 
 def validate_target_runtime(target: str) -> None:
+    """
+    PyInstaller normally builds for the current Python runtime architecture.
+
+    For Docker/QEMU jobs, `uname -m` can be misleading depending on binfmt/qemu,
+    so for 32-bit targets we mainly validate Python pointer size instead of
+    strictly checking machine names.
+    """
     bitness = struct.calcsize("P") * 8
     machine = current_machine()
 
     if target == "x32":
-        if bitness != 32 or machine not in {"i386", "i686", "x86"}:
+        if bitness != 32:
             raise SystemExit(
-                "target x32 requires a 32-bit x86 Python runtime. "
+                "target x32 requires a 32-bit Python runtime. "
                 "Use the CI linux-x32 Docker job with --platform linux/386."
             )
 
     if target == "armv7":
-        if bitness != 32 or machine not in {"armv7l", "armv7", "armhf", "arm"}:
+        if bitness != 32:
             raise SystemExit(
                 "target armv7 requires a 32-bit ARMv7/armhf Python runtime. "
                 "Use the CI linux-armv7 Docker job with --platform linux/arm/v7, "
@@ -98,8 +108,8 @@ def build_binary(edition: str, target: str, *, clean: bool = True) -> Path:
 
     dist_dir = ROOT / "release" / edition / target
     work_dir = ROOT / "build" / "pyinstaller" / edition / target
-    name = f"{EDITION_NAMES[edition]}-{target}"
 
+    name = f"{EDITION_NAMES[edition]}-{target}"
     if os.name == "nt":
         name += ".exe"
 

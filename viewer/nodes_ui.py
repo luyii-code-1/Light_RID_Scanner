@@ -16,6 +16,7 @@ def build_nodes_page() -> str:
       <div class="actions">
         <button class="btn" id="btn-back" type="button">返回实时/历史</button>
         <button class="btn" id="btn-settings" type="button">Viewer 设置</button>
+        <button class="btn" id="btn-theme" type="button">浅色</button>
         <button class="btn ghost" id="btn-refresh" type="button">刷新</button>
       </div>
     </div>
@@ -138,6 +139,18 @@ function qs(id){ return document.getElementById(id); }
 function qsa(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel) || []); }
 function enc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function pageHeaders(extra){ var h={'X-LightRID-Page':'1'}; if(extra) Object.assign(h, extra); return h; }
+function loadTheme(){
+  try{ var s = localStorage.getItem('rid_ui_theme'); if(s === 'dark' || s === 'light') return s; }catch(_e){}
+  try{ if(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light'; }catch(_e){}
+  return 'dark';
+}
+function applyTheme(theme){
+  var light = (theme === 'light');
+  document.body.classList.toggle('theme-light', light);
+  document.body.classList.toggle('theme-dark', !light);
+  try{ localStorage.setItem('rid_ui_theme', light ? 'light' : 'dark'); }catch(_e){}
+  if(qs('btn-theme')) qs('btn-theme').textContent = light ? '深色' : '浅色';
+}
 async function api(path, opts){
   const r = await fetch(path, Object.assign({cache:'no-store', headers:pageHeaders()}, opts || {}));
   const d = await r.json().catch(()=>({}));
@@ -372,6 +385,7 @@ document.addEventListener('click', function(ev){
 });
 qs('btn-back').onclick = function(){ location.href='/'; };
 qs('btn-settings').onclick = function(){ location.href='/settings'; };
+qs('btn-theme').onclick = function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); };
 qs('btn-refresh').onclick = function(){ loadAll().catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-clear-form').onclick = clearForm;
 qs('btn-test-node').onclick = function(){ saveNode(true).catch(function(e){ setStatus('node-status', e.message || e, true); }); };
@@ -384,6 +398,7 @@ qs('btn-select-all').onclick = function(){ qsa('.node-select').forEach(function(
 qs('btn-select-online').onclick = function(){ qsa('.node-select').forEach(function(x){ var on=x.getAttribute('data-online') === '1'; x.checked = on; state.checkedIds[Number(x.value || 0)] = on; }); };
 qs('btn-remote-restart').onclick = function(){ remoteOp('restart').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-remote-models').onclick = function(){ remoteOp('update_models').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
+applyTheme(loadTheme());
 loadAll().catch(function(e){ setStatus('bulk-status', e.message || e, true); });
 """
     return station_page("节点管理器", body, script, extra_css=extra_css)

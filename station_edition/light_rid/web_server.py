@@ -914,7 +914,6 @@ function filterTrackForDisplay(track, page, sn){
   if(page !== 'history') return [];
   var arr = Array.isArray(track) ? track.slice() : [];
   arr = filterTrackByHistoryTime(arr);
-  arr = filterTrackByReplay(arr, sn);
   return arr;
 }
 function trackLatLngSignature(latlngs){
@@ -1120,7 +1119,8 @@ async function ensureTrackLoaded(sn, force){
       shown: Number(tr.length || 0)
     };
     if(currentAppPage() === 'history' && isHistoryTrackVisible(sn)){
-      updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+      if(replaySyncPaused) renderReplayFrame();
+      else updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
   }catch(_e){
     if(!trackCache[sn]) trackCache[sn] = [];
@@ -4082,7 +4082,8 @@ function ensureTrackReplayCard(){
     if(!applied){
       renderReplayCard();
       renderDroneTable(Array.isArray(latestDroneRows) ? latestDroneRows : []);
-      updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+      if(replaySyncPaused) renderReplayFrame();
+      else updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
     showBanner(applied ? '已手动更新到最新实时数据。' : '当前没有待更新的实时数据。', applied ? 'ok' : 'warn', 2600, {persist:false});
   });
@@ -4482,10 +4483,10 @@ function replayRowsAtCursor(){
   }).filter(function(e){ return !!e; });
 }
 function renderReplayFrame(){
-  var rows = replayRowsAtCursor();
+  var mapRows = replayRowsAtCursor();
   renderReplayCard();
-  renderDroneTable(rows);
-  updateMap(rows);
+  renderDroneTable(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+  updateMap(mapRows);
 }
 function clearReplayMarkers(){
   if(!map) return;
@@ -4586,11 +4587,14 @@ function updateMap(drones){
   var autoState = mapAutoState();
   var page = currentAppPage();
   var rows = Array.isArray(drones) ? drones : [];
-  var selected = (page === 'history') ? historyVisibleSnList(rows) : selectedSnList();
+  var replaySelected = (page === 'history' && (replaySyncPaused || (replayState.points || []).length) && (replayState.snList || []).length)
+    ? (replayState.snList || []).slice()
+    : null;
+  var selected = replaySelected || ((page === 'history') ? historyVisibleSnList(rows) : selectedSnList());
   var selectedSet = {};
   selected.forEach(function(sn){ selectedSet[sn] = true; });
   var recentRows = liveRecentRows(rows);
-  var trackSn = displayTrackSnList(page, rows);
+  var trackSn = replaySelected || displayTrackSnList(page, rows);
   var liveAir = (page === 'live' ? recentRows : rows).filter(function(e){
     var sn = String((e && e.sn) || '');
     if(!sn) return false;

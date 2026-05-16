@@ -33,6 +33,7 @@ def build_settings_page() -> str:
     <div class="settings-jump" aria-label="设置分组导航">
       <button class="btn ghost" data-jump="settings-status" type="button">状态</button>
       <button class="btn ghost" data-jump="settings-map" type="button">地图</button>
+      <button class="btn ghost" data-jump="settings-aggregate" type="button">聚合</button>
       <button class="btn ghost" data-jump="settings-access" type="button">访问</button>
       <button class="btn ghost" data-jump="settings-eula" type="button">许可</button>
     </div>
@@ -73,6 +74,26 @@ def build_settings_page() -> str:
                 <button class="btn ghost" id="btn-clear-base-loc" type="button">清空默认坐标</button>
               </div>
               <div class="micro" id="base-geo-hint">浏览器定位能力由当前访问协议和浏览器权限决定。</div>
+            </div>
+          </div>
+        </div>
+        <div class="card" id="settings-aggregate" data-card-key="aggregate">
+          <div class="section-head">
+            <div>
+              <h2>历史聚合</h2>
+              <div class="section-copy">读取所有基站历史与轨迹，按 SN 合并为一条时间线；字段冲突时采用信号最强的版本，并缓存到 viewer/cfg.db。</div>
+            </div>
+          </div>
+          <div class="grid" style="margin-top:14px">
+            <div class="field"><label>聚合缓存有效期(小时)</label><input id="cfg-aggregate-ttl" type="number" min="1" max="168"></div>
+            <div class="field full">
+              <label>手动维护</label>
+              <div class="row-actions">
+                <button class="btn" id="btn-aggregate-refresh" type="button">手动聚合</button>
+                <button class="btn ghost" id="btn-aggregate-load" type="button">手动刷新</button>
+                <button class="btn warn" id="btn-aggregate-clear" type="button">清空缓存</button>
+              </div>
+              <div class="micro" id="aggregate-meta">-</div>
             </div>
           </div>
         </div>
@@ -201,7 +222,7 @@ function renderHost(host){
 function numberOrBlank(v){ return v == null || v === '' ? '' : String(v); }
 async function loadSettings(){
   const data = await getJson('/api/settings');
-  const a = data.auth || {}, m = data.map || {};
+  const a = data.auth || {}, m = data.map || {}, ag = data.aggregate || {};
   qs('cfg-auth-enabled').checked = !!a.enabled;
   qs('cfg-auth-user').value = a.username || 'admin';
   qs('cfg-sso-enabled').checked = !!a.sso_enabled;
@@ -211,6 +232,7 @@ async function loadSettings(){
   qs('cfg-base-zoom').value = numberOrBlank(m.base_zoom || 5);
   qs('cfg-map-idle').value = numberOrBlank(m.map_auto_center_idle_sec || 20);
   qs('cfg-heading-ref').value = numberOrBlank(m.heading_ref_deg || 0);
+  qs('cfg-aggregate-ttl').value = numberOrBlank(ag.cache_ttl_hours || 24);
   setStatus('status-settings', '密码 ' + (a.password_configured ? '已配置' : '未配置') + ' · SSO ' + (a.sso_configured ? '已配置' : '未配置'), false);
   renderHost(data.host || {});
   renderEula(data.eula || {});
@@ -231,6 +253,9 @@ function collectSettings(){
       base_zoom: qs('cfg-base-zoom').value,
       map_auto_center_idle_sec: qs('cfg-map-idle').value,
       heading_ref_deg: qs('cfg-heading-ref').value
+    },
+    aggregate: {
+      cache_ttl_hours: qs('cfg-aggregate-ttl').value
     }
   };
 }
@@ -241,7 +266,29 @@ async function saveSettings(){
   qs('cfg-sso-check').value = '';
   renderHost(data.host || {});
   renderEula(data.eula || {});
+  if(data.aggregate && qs('cfg-aggregate-ttl')) qs('cfg-aggregate-ttl').value = numberOrBlank(data.aggregate.cache_ttl_hours || 24);
   setStatus('status-settings', '已保存。密码 ' + (data.auth.password_configured ? '已配置' : '未配置') + ' · SSO ' + (data.auth.sso_configured ? '已配置' : '未配置'), false);
+}
+function renderAggregateMeta(data){
+  data = data || {};
+  var text = '缓存: ' + (data.cached ? '命中' : '已更新') +
+    ' | 飞机 ' + String(data.count || 0) +
+    ' | 原始版本 ' + String(data.raw_count || 0) +
+    ' | 聚合 ' + String(data.aggregate_count || 0) +
+    ' | TTL ' + String(data.cache_ttl_hours || qs('cfg-aggregate-ttl').value || 24) + '小时';
+  if(data.generated_at){
+    try{ text += ' | 生成 ' + new Date(Number(data.generated_at) * 1000).toLocaleString(); }catch(_e){}
+  }
+  if(qs('aggregate-meta')) qs('aggregate-meta').textContent = text;
+}
+async function loadAggregate(force){
+  if(qs('aggregate-meta')) qs('aggregate-meta').textContent = force ? '正在重新聚合...' : '正在读取缓存...';
+  const data = force ? await postJson('/api/history/aggregate', {force:true}) : await getJson('/api/history/aggregate');
+  renderAggregateMeta(data);
+}
+async function clearAggregate(){
+  const data = await postJson('/api/history/aggregate/clear', {});
+  if(qs('aggregate-meta')) qs('aggregate-meta').textContent = '已清空缓存: ' + String(data.cleared || 0);
 }
 function renderEula(eula){
   setStatus('status-eula', (eula.accepted ? '当前已同意许可协议。' : '当前未同意许可协议。') + '\n状态文件: ' + String(eula.set_path || 'viewer/cfg.db'), !eula.accepted);
@@ -263,6 +310,9 @@ qs('btn-theme').addEventListener('click', function(){ applyTheme(document.body.c
 qs('btn-reload-view').addEventListener('click', function(){ loadSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
 qs('btn-refresh-host').addEventListener('click', function(){ loadSettings().catch(function(e){ setStatus('host-meta', e.message || e, true); }); });
 qs('btn-save-settings').addEventListener('click', function(){ saveSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
+qs('btn-aggregate-refresh').addEventListener('click', function(){ loadAggregate(true).catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
+qs('btn-aggregate-load').addEventListener('click', function(){ loadAggregate(false).catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
+qs('btn-aggregate-clear').addEventListener('click', function(){ clearAggregate().catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
 qs('btn-browser-loc').addEventListener('click', function(){
   if(!navigator.geolocation){ setStatus('status-settings', '浏览器不支持定位。', true); return; }
   navigator.geolocation.getCurrentPosition(function(pos){

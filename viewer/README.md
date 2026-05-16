@@ -10,12 +10,14 @@ python viewer\server.py --host 0.0.0.0 --port 4700
 
 Open `http://127.0.0.1:4700/`.
 
-The viewer stores only its own configuration in `viewer/cfg.db`: node API root URLs, node API tokens, and optional viewer login settings. It does not store remote aircraft, base-station status, tracks, AP data, or other live node payloads; those are fetched from each station API on every refresh.
+The viewer stores its own configuration in `viewer/cfg.db`: node API root URLs, node API tokens, optional viewer login settings, and the viewer-side history aggregation cache. Live aircraft, base-station status, AP data, and normal track refreshes are fetched from station APIs on demand.
 
 The live/history UI is built from the same Station page template used by `station_edition/light_rid/web_server.py`. Viewer-specific code only patches the data/API layer and removes Station-only controls from the DOM.
 
 - `/settings`: Station-styled viewer settings with host status, default map center/zoom, password login, SSO check login, and EULA controls.
 - `/nodes`: node manager with add/edit/test/delete, basic info cards, load cards and charts, scan counts, one-click remote SSO URL creation, and batch restart/model-database update actions.
+- Live refresh fetches enabled nodes concurrently and merges duplicate aircraft by `SN`; when multiple base stations see the same aircraft, the merged card includes `发现的基站:{name1}{name2}` and conflicting fields prefer the strongest RSSI version.
+- History aggregation is available from `/settings`. It pulls all enabled station snapshots/tracks, merges duplicate aircraft onto one timeline, stores the result in `viewer/cfg.db`, and defaults to a 24-hour cache TTL.
 
 Each station node should expose the `station_edition` token API, especially:
 

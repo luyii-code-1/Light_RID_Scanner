@@ -118,6 +118,12 @@ class ConfigStore:
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS aggregate_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
                 """
             )
 
@@ -189,6 +195,63 @@ class ConfigStore:
             "map_auto_center_idle_sec": _int_clamped(self.get_setting("map.auto_center_idle_sec", "20"), 20, 5, 600),
             "heading_ref_deg": _float_or_none(self.get_setting("map.heading_ref_deg", "0")) or 0,
         }
+
+    def aggregate_config(self) -> dict[str, Any]:
+        return {
+            "cache_ttl_hours": _int_clamped(self.get_setting("aggregate.cache_ttl_hours", "24"), 24, 1, 168),
+        }
+
+    def save_aggregate_config(self, body: dict[str, Any]) -> dict[str, Any]:
+        src = body if isinstance(body, dict) else {}
+        ttl = _int_clamped(src.get("cache_ttl_hours"), 24, 1, 168)
+        self.set_setting("aggregate.cache_ttl_hours", str(ttl))
+        return self.aggregate_config()
+
+    def get_cache_payload(self, cache_key: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT payload,expires_at FROM aggregate_cache WHERE cache_key=?",
+                (str(cache_key),),
+            ).fetchone()
+            if not row:
+                return None
+            if float(row["expires_at"] or 0) < now:
+                db.execute("DELETE FROM aggregate_cache WHERE cache_key=?", (str(cache_key),))
+                return None
+            try:
+                payload = __import__("json").loads(str(row["payload"] or "{}"))
+            except Exception:
+                db.execute("DELETE FROM aggregate_cache WHERE cache_key=?", (str(cache_key),))
+                return None
+        return payload if isinstance(payload, dict) else None
+
+    def set_cache_payload(self, cache_key: str, payload: dict[str, Any], ttl_hours: int | float) -> None:
+        import json
+
+        now = time.time()
+        ttl_sec = max(60.0, float(ttl_hours) * 3600.0)
+        text = json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, separators=(",", ":"))
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO aggregate_cache(cache_key,payload,created_at,expires_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    payload=excluded.payload,
+                    created_at=excluded.created_at,
+                    expires_at=excluded.expires_at
+                """,
+                (str(cache_key), text, now, now + ttl_sec),
+            )
+
+    def clear_cache_payload(self, cache_key: str | None = None) -> int:
+        with self.connect() as db:
+            if cache_key:
+                cur = db.execute("DELETE FROM aggregate_cache WHERE cache_key=?", (str(cache_key),))
+            else:
+                cur = db.execute("DELETE FROM aggregate_cache")
+            return int(cur.rowcount or 0)
 
     def save_map_config(self, body: dict[str, Any]) -> dict[str, Any]:
         src = body if isinstance(body, dict) else {}

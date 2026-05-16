@@ -475,6 +475,12 @@ def _runtime_entrypoint_path() -> str:
     return str(__file__)
 
 def _app_root_dir() -> str:
+    cfg_path = globals().get("APP_CONFIG_PATH")
+    if cfg_path:
+        try:
+            return os.path.abspath(os.path.dirname(str(cfg_path)) or os.getcwd())
+        except Exception:
+            pass
     return os.path.dirname(os.path.abspath(_runtime_entrypoint_path()))
 
 def _app_file_path(name: str) -> str:

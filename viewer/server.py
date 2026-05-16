@@ -24,7 +24,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from viewer.aggregation import (
+    aggregate_history,
     aggregate_nodes,
+    aggregate_track_for_sn,
     create_node_sso_url,
     fetch_node_metrics,
     fetch_node_track,
@@ -125,6 +127,7 @@ def _viewer_config_payload(store: ConfigStore) -> dict[str, Any]:
             "db_path": str(store.path),
             "auth": store.public_auth_config(),
             "map": store.map_config(),
+            "aggregate": store.aggregate_config(),
             "nodes": store.list_nodes(reveal_token=False),
         }
     }
@@ -440,6 +443,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "auth": self.store.public_auth_config(),
                     "map": self.store.map_config(),
+                    "aggregate": self.store.aggregate_config(),
                     "host": _viewer_host_status(self.store, self.listen_label),
                     "eula": self.store.eula_status(),
                 }
@@ -453,6 +457,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "auth": self.store.public_auth_config(),
                     "map": self.store.map_config(),
+                    "aggregate": self.store.aggregate_config(),
                     "host": _viewer_host_status(self.store, self.listen_label),
                     "eula": self.store.eula_status(),
                     "nodes": self.store.list_nodes(False),
@@ -486,12 +491,22 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(aggregate_nodes(self.store))
             return
+        if path == "/api/history/aggregate":
+            if not self._require_auth():
+                return
+            force = str((query.get("force") or ["0"])[0] or "0").lower() in ("1", "true", "yes", "on")
+            self._send_json(aggregate_history(self.store, force=force))
+            return
         if path == "/api/tracks/get":
             if not self._require_auth():
                 return
             try:
                 node_id = int((query.get("node_id") or ["0"])[0] or "0")
                 sn = str((query.get("sn") or [""])[0] or "").strip()
+                if not node_id:
+                    payload = aggregate_track_for_sn(self.store, sn, force=False)
+                    self._send_json(payload, 200 if payload.get("ok") else 404)
+                    return
                 nodes = self.store.list_nodes(reveal_token=True)
                 if node_id:
                     nodes = [n for n in nodes if int(n.get("id") or 0) == node_id]
@@ -560,11 +575,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
             if path == "/api/settings/save":
                 auth = self.store.save_auth_config(body.get("auth") if isinstance(body.get("auth"), dict) else {})
                 map_cfg = self.store.save_map_config(body.get("map") if isinstance(body.get("map"), dict) else {})
+                aggregate_cfg = self.store.save_aggregate_config(body.get("aggregate") if isinstance(body.get("aggregate"), dict) else {})
+                if isinstance(body.get("aggregate"), dict):
+                    self.store.clear_cache_payload("history.aggregate")
                 self._send_json(
                     {
                         "ok": True,
                         "auth": auth,
                         "map": map_cfg,
+                        "aggregate": aggregate_cfg,
                         "host": _viewer_host_status(self.store, self.listen_label),
                         "eula": self.store.eula_status(),
                     }
@@ -573,19 +592,34 @@ class ViewerHandler(BaseHTTPRequestHandler):
             if path == "/api/settings/auth":
                 self._send_json({"ok": True, "auth": self.store.save_auth_config(body)})
                 return
+            if path == "/api/history/aggregate":
+                force = bool(body.get("force", True))
+                payload = aggregate_history(self.store, force=force)
+                self._send_json(payload)
+                return
+            if path == "/api/history/aggregate/clear":
+                cleared = self.store.clear_cache_payload("history.aggregate")
+                self._send_json({"ok": True, "cleared": cleared})
+                return
             if path == "/api/nodes":
                 probe = test_node_communication(_node_candidate_from_body(self.store, body))
                 if not probe.get("ok"):
                     self._send_json({"ok": False, "error": probe.get("error") or "node API communication failed", "node": probe}, 400)
                     return
-                self._send_json({"ok": True, "item": self.store.upsert_node(body)})
+                item = self.store.upsert_node(body)
+                self.store.clear_cache_payload("history.aggregate")
+                self.store.clear_cache_payload(None)
+                self._send_json({"ok": True, "item": item})
                 return
             if path == "/api/nodes/test":
                 node = _node_candidate_from_body(self.store, body)
                 self._send_json({"ok": True, "node": test_node_communication(node)})
                 return
             if path == "/api/nodes/delete":
-                self._send_json({"ok": True, "deleted": self.store.delete_node(int(body.get("id") or 0))})
+                deleted = self.store.delete_node(int(body.get("id") or 0))
+                if deleted:
+                    self.store.clear_cache_payload(None)
+                self._send_json({"ok": True, "deleted": deleted})
                 return
             if path == "/api/nodes/sso":
                 node_id = int(body.get("node_id") or body.get("id") or 0)

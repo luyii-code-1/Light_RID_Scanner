@@ -59,15 +59,7 @@ jobs:
           uname -a
           uname -m
           python --version
-          python - <<'PY'
-          import os
-          import platform
-          import struct
-
-          print("python_bits =", struct.calcsize("P") * 8)
-          print("platform_machine =", platform.machine())
-          print("uname_machine =", os.uname().machine)
-          PY
+          python -c 'import os, platform, struct; print("python_bits =", struct.calcsize("P") * 8); print("platform_machine =", platform.machine()); print("uname_machine =", os.uname().machine)'
 
       - name: Install dependencies
         shell: bash
@@ -152,20 +144,10 @@ jobs:
             bash -lc 'set -euxo pipefail
               apt-get update
               apt-get install -y --no-install-recommends file
-              python - <<'"'"'PY'"'"'
-import os
-import platform
-import struct
-
-print("python_bits =", struct.calcsize("P") * 8)
-print("platform_machine =", platform.machine())
-print("uname_machine =", os.uname().machine)
-PY
+              python -c "import os, platform, struct; print(\"python_bits =\", struct.calcsize(\"P\") * 8); print(\"platform_machine =\", platform.machine()); print(\"uname_machine =\", os.uname().machine)"
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
-              python pytools/build_release.py \
-                --edition "${{ matrix.edition }}" \
-                --target x32
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target x32
               file "release/${{ matrix.edition }}/x32"/*'
 
       - name: Prepare artifact
@@ -240,20 +222,10 @@ PY
             bash -lc 'set -euxo pipefail
               apt-get update
               apt-get install -y --no-install-recommends file build-essential python3-dev libpcap-dev
-              python - <<'"'"'PY'"'"'
-import os
-import platform
-import struct
-
-print("python_bits =", struct.calcsize("P") * 8)
-print("platform_machine =", platform.machine())
-print("uname_machine =", os.uname().machine)
-PY
+              python -c "import os, platform, struct; print(\"python_bits =\", struct.calcsize(\"P\") * 8); print(\"platform_machine =\", platform.machine()); print(\"uname_machine =\", os.uname().machine)"
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
-              python pytools/build_release.py \
-                --edition "${{ matrix.edition }}" \
-                --target armv7
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target armv7
               file "release/${{ matrix.edition }}/armv7"/*'
 
       - name: Prepare artifact

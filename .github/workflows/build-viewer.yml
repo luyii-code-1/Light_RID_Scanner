@@ -28,10 +28,16 @@ jobs:
         include:
           - target: x86_64
             runner: ubuntu-24.04
+            python-architecture: x64
           - target: arm64
             runner: ubuntu-24.04-arm
+            python-architecture: arm64
           - target: windows-x86_64
             runner: windows-2025
+            python-architecture: x64
+          - target: windows-x32
+            runner: windows-2025
+            python-architecture: x86
 
     runs-on: ${{ matrix.runner }}
 
@@ -45,6 +51,7 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.python-architecture }}
 
       - name: Show runner info
         shell: bash
@@ -79,6 +86,66 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: viewer-${{ matrix.target }}
+          path: release-upload/*
+          if-no-files-found: error
+
+      - name: Upload binary to GitHub Release
+        if: ${{ env.RELEASE_TAG != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release upload "${RELEASE_TAG}" release-upload/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  viewer-linux-x32:
+    name: viewer x32
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          docker version
+
+      - name: Build 32-bit viewer binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker run --rm --platform linux/386 \
+            -v "$PWD:/work" \
+            -w /work \
+            python:3.12-bookworm \
+            bash -lc 'set -euxo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends file
+              python -m pip install --upgrade pip
+              pip install pyinstaller
+              python pytools/build_viewer.py --target x32
+              file "release/viewer/x32"/*'
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-upload
+          cp "release/viewer/x32"/* release-upload/
+          ls -lah release-upload
+
+      - name: Upload workflow artifact
+        if: ${{ env.RELEASE_TAG == '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: viewer-x32
           path: release-upload/*
           if-no-files-found: error
 

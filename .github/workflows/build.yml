@@ -101,3 +101,68 @@ jobs:
           gh release upload "${RELEASE_TAG}" release-upload/* \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+  linux-x32:
+    name: ${{ matrix.edition }} x32
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [station, portable]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          docker version
+
+      - name: Build 32-bit binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker run --rm --platform linux/386 \
+            -v "$PWD:/work" \
+            -w /work \
+            python:3.12-bookworm \
+            bash -lc 'set -euxo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends file
+              python -m pip install --upgrade pip
+              pip install pyinstaller -r requirements.txt
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target x32
+              file "release/${{ matrix.edition }}/x32"/*'
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-upload
+          cp "release/${{ matrix.edition }}/x32"/* release-upload/
+          chmod +x release-upload/*
+          ls -lah release-upload
+
+      - name: Upload workflow artifact
+        if: ${{ env.RELEASE_TAG == '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.edition }}-x32
+          path: release-upload/*
+          if-no-files-found: error
+
+      - name: Upload binary to GitHub Release
+        if: ${{ env.RELEASE_TAG != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release upload "${RELEASE_TAG}" release-upload/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

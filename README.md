@@ -110,7 +110,7 @@ The viewer stores its own configuration in `viewer/cfg.db`: node API URLs, node 
 
 The viewer live/history UI is built from the same Station page template used by `station_edition/light_rid/web_server.py`; viewer code only patches the data/API layer and removes Station-only controls from the DOM. `/settings` uses the Station settings style for viewer host status, default map position/zoom, password login, SSO check login, and EULA controls. Node management is a separate `/nodes` page with node cards, load charts, scan counts, one-click SSO URL creation, and batch restart/model-database update actions.
 
-Viewer binaries are built by the separate `.github/workflows/build-viewer.yml` workflow for Linux `x86_64`, Linux `arm64`, and Windows `x86_64`. Local build helper:
+Viewer binaries are built by the separate `.github/workflows/build-viewer.yml` workflow for Linux `x86_64`, Linux `x32`, Linux `arm64`, Windows `windows-x86_64`, and Windows `windows-x32`. Local build helper:
 
 ```bash
 python pytools/build_viewer.py --target x86_64
@@ -524,16 +524,19 @@ The UI version string is shown as:
 commit:<git-short-commit>#<local-build-number>
 ```
 
-`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces 4 one-file Linux artifacts: station and portable editions for `x86_64` and `arm64`.
+`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces 6 one-file Linux artifacts: station and portable editions for `x86_64`, `x32`, and `arm64`.
 
 Local builds can use either the shared root entrypoint or an edition-local wrapper:
 
 ```bash
 python pytools/build_release.py --edition station --target arm64
 python pytools/build_release.py --edition portable --target x86_64
+python pytools/build_release.py --edition portable --target x32
 cd station_edition
 python pytools/build.py --target arm64
 ```
+
+The `x32` target must be built with a 32-bit Python runtime; the GitHub Actions workflow does this in a separate Linux 32-bit Docker job.
 
 The Settings page can manually compare the local app commit with the upstream Git commit. This check only reports whether a newer commit exists; it does not download, apply, or restart code automatically.
 

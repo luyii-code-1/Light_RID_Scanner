@@ -763,49 +763,133 @@ def parse_dji_gb46750(vendor: bytes, ssid: str | None = None) -> dict | None:
         "raw_vendor": vendor.hex(),
     }
 
-def parse_dji_m400_private(vendor: bytes, ssid: str | None = None) -> dict | None:
+def _dji_enterprise_valid_lat_lon(lat, lon) -> bool:
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except Exception:
+        return False
+    return -90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0
+
+def _decode_dji_enterprise_lat_lon(raw: bytes) -> tuple[float | None, float | None]:
+    raw = bytes(raw or b"")
+    if len(raw) != 8 or raw == b"\xff" * 8:
+        return None, None
+    try:
+        lat = int.from_bytes(raw[0:4], "little", signed=True) / 1e7
+        lon = int.from_bytes(raw[4:8], "little", signed=True) / 1e7
+    except Exception:
+        return None, None
+    if not _dji_enterprise_valid_lat_lon(lat, lon):
+        return None, None
+    return round(float(lat), 7), round(float(lon), 7)
+
+def _decode_dji_enterprise_alt_candidate(raw: bytes) -> float | None:
+    raw = bytes(raw or b"")
+    if len(raw) != 2:
+        return None
+    try:
+        value = int.from_bytes(raw, "little", signed=False)
+    except Exception:
+        return None
+    if value == 0:
+        return None
+    return round(value / 2.0 - 1000.0, 1)
+
+def detect_enterprise_model(sn: str, model_hint: str | None = None) -> str:
+    candidates = [str(model_hint or "")]
+    model_from_sn = globals().get("_model_from_sn")
+    if callable(model_from_sn):
+        try:
+            candidates.append(str(model_from_sn(sn) or ""))
+        except Exception:
+            pass
+    for text in candidates:
+        model = re.sub(r"[^0-9A-Z]+", "", str(text or "").upper())
+        if "MINI4K" in model:
+            return "MINI_4K"
+        if "M350" in model or "MATRICE350" in model:
+            return "M350_RTK"
+        if "M400" in model or "MATRICE400" in model:
+            return "M400"
+    return ""
+
+def parse_dji_enterprise_private(
+    vendor: bytes,
+    ssid: str | None = None,
+    model_hint: str | None = None,
+) -> dict | None:
     vendor = bytes(vendor or b"")
-    if len(vendor) < RID_DJI_M400_PRIVATE_MIN:
+    if len(vendor) < RID_DJI_ENTERPRISE_PRIVATE_MIN:
         return None
     if vendor[0:3] != ODID_OUI or int(vendor[3]) != DJI_RID_VENDOR_TYPE:
         return None
-    if int(vendor[4]) != 0x06 or vendor[5:10] != RID_DJI_M400_PRIVATE_HEADER:
+    if vendor[5:10] != RID_DJI_ENTERPRISE_PRIVATE_HEADER:
         return None
 
     sn = _new_fw_read_ascii(vendor, 10, 20)
     if not sn or not _dji_vendor_ssid_matches(sn, ssid):
         return None
-    aux_coord = _new_fw_decode_lat_lon_pair(vendor, 38)
-    air_coord = _new_fw_decode_lat_lon_pair(vendor, 60)
-    alt_candidates = []
-    for off in (46, 48, 50):
-        alt_candidates.append(_new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0))
+    pos_a_lat, pos_a_lon = _decode_dji_enterprise_lat_lon(vendor[38:46])
+    pos_b_lat, pos_b_lon = _decode_dji_enterprise_lat_lon(vendor[60:68])
+    alt_candidates = [
+        _decode_dji_enterprise_alt_candidate(vendor[46:48]),
+        _decode_dji_enterprise_alt_candidate(vendor[48:50]),
+        _decode_dji_enterprise_alt_candidate(vendor[50:52]),
+    ]
+
+    model = detect_enterprise_model(sn, model_hint)
+    air_lat = air_lon = None
+    pilot_lat = pilot_lon = None
+    home_lat = home_lon = None
+    aux_lat = aux_lon = None
+
+    if model in ("M350_RTK", "MINI_4K"):
+        air_lat, air_lon = pos_a_lat, pos_a_lon
+        pilot_lat, pilot_lon = pos_b_lat, pos_b_lon
+    elif model == "M400":
+        air_lat, air_lon = pos_b_lat, pos_b_lon
+        home_lat, home_lon = pos_a_lat, pos_a_lon
+        aux_lat, aux_lon = pos_a_lat, pos_a_lon
 
     return {
-        "kind": "DJI_M400_PRIVATE",
-        "rid_format": "DJI_M400_PRIVATE",
-        "dji_rid_kind": "DJI_M400_PRIVATE",
+        "kind": "DJI_ENTERPRISE_PRIVATE",
+        "rid_format": "DJI_ENTERPRISE_PRIVATE",
+        "dji_rid_kind": "DJI_ENTERPRISE_PRIVATE",
         "ssid": ssid,
         "sn": sn,
         "uas_id": "",
-        "lat": air_coord["lat"] if air_coord else None,
-        "lon": air_coord["lon"] if air_coord else None,
+        "lat": air_lat,
+        "lon": air_lon,
         "alt": None,
         "speed": None,
         "vspeed": None,
         "move_dir": None,
-        "pilot_lat": None,
-        "pilot_lon": None,
+        "pilot_lat": pilot_lat,
+        "pilot_lon": pilot_lon,
         "pilot_alt": None,
-        "home_lat": aux_coord["lat"] if aux_coord else None,
-        "home_lon": aux_coord["lon"] if aux_coord else None,
-        "aux_lat": aux_coord["lat"] if aux_coord else None,
-        "aux_lon": aux_coord["lon"] if aux_coord else None,
+        "coord_sys": 0,
+        "coord_sys_text": "WGS-84",
+        "home_lat": home_lat,
+        "home_lon": home_lon,
+        "aux_lat": aux_lat,
+        "aux_lon": aux_lon,
+        "pos_a_lat": pos_a_lat,
+        "pos_a_lon": pos_a_lon,
+        "pos_b_lat": pos_b_lat,
+        "pos_b_lon": pos_b_lon,
         "alt_candidates": alt_candidates,
+        "enterprise_model": model,
+        "enterprise_dynamic": int(vendor[4]),
+        "enterprise_signature": vendor[5:10].hex(),
         "raw_vendor": vendor.hex(),
     }
 
-def parse_dji_vendor(vendor: bytes, ssid: str | None = None) -> dict | None:
+def parse_dji_vendor(
+    vendor: bytes,
+    ssid: str | None = None,
+    model_hint: str | None = None,
+) -> dict | None:
     vendor = bytes(vendor or b"")
     if len(vendor) < RID_DJI_VENDOR_MIN:
         return None
@@ -816,11 +900,10 @@ def parse_dji_vendor(vendor: bytes, ssid: str | None = None) -> dict | None:
     if len(vendor) >= RID_DJI_GB46750_MIN and vendor[5:11] == RID_DJI_GB46750_HEADER:
         return parse_dji_gb46750(vendor, ssid)
     if (
-        len(vendor) >= RID_DJI_M400_PRIVATE_MIN
-        and int(vendor[4]) == 0x06
-        and vendor[5:10] == RID_DJI_M400_PRIVATE_HEADER
+        len(vendor) >= RID_DJI_ENTERPRISE_PRIVATE_MIN
+        and vendor[5:10] == RID_DJI_ENTERPRISE_PRIVATE_HEADER
     ):
-        return parse_dji_m400_private(vendor, ssid)
+        return parse_dji_enterprise_private(vendor, ssid, model_hint)
     ssid_rid = _new_fw_ssid_rid(ssid)
     return {
         "kind": "DJI_UNKNOWN_RID",
@@ -874,7 +957,9 @@ def _dji_vendor_parsed_to_decoded(parsed: dict | None) -> dict | None:
         "h_acc", "v_acc", "speed_acc", "horizontal_accuracy",
         "vertical_accuracy", "speed_accuracy", "timestamp_ms",
         "timestamp_acc", "timestamp_accuracy", "timestamp_accuracy_text",
-        "home_lat", "home_lon", "aux_lat", "aux_lon", "alt_candidates",
+        "home_lat", "home_lon", "aux_lat", "aux_lon",
+        "pos_a_lat", "pos_a_lon", "pos_b_lat", "pos_b_lon",
+        "alt_candidates", "enterprise_model", "enterprise_dynamic", "enterprise_signature",
     ):
         if key in parsed:
             metadata[key] = parsed.get(key)
@@ -890,7 +975,11 @@ def _new_fw_payload_sig(body: bytes) -> int:
     head = bytes(body or b"")[:RID_NEW_FW_SIG_BYTES]
     return zlib.crc32(head) & 0xFFFFFFFF
 
-def decode_new_firmware_payload(buf: bytes, ssid_sn: str | None = None) -> dict | None:
+def decode_new_firmware_payload(
+    buf: bytes,
+    ssid_sn: str | None = None,
+    model_hint: str | None = None,
+) -> dict | None:
     """Decode DJI's newer Beacon vendor body starting at FA:0B:BC:0D.
 
     This path is intentionally separate from the standard ODID decoder. DJI's
@@ -900,11 +989,17 @@ def decode_new_firmware_payload(buf: bytes, ssid_sn: str | None = None) -> dict 
     if not buf or len(buf) < RID_DJI_VENDOR_MIN:
         return None
     vendor = bytes(buf)
-    parsed = parse_dji_vendor(vendor, ssid_sn)
+    parsed = parse_dji_vendor(vendor, ssid_sn, model_hint)
     return _dji_vendor_parsed_to_decoded(parsed)
 
-def _append_new_firmware_result(results: list[tuple[bytes, dict]], dedup: set[int], body: bytes, ssid_sn: str | None) -> None:
-    decoded = decode_new_firmware_payload(body, ssid_sn=ssid_sn)
+def _append_new_firmware_result(
+    results: list[tuple[bytes, dict]],
+    dedup: set[int],
+    body: bytes,
+    ssid_sn: str | None,
+    model_hint: str | None = None,
+) -> None:
+    decoded = decode_new_firmware_payload(body, ssid_sn=ssid_sn, model_hint=model_hint)
     if not decoded:
         return
     sig = _new_fw_payload_sig(body)
@@ -971,7 +1066,11 @@ def extract_from_raw(pkt) -> list[bytes]:
         idx = pos + 1
     return results
 
-def extract_new_firmware_from_ies(pkt, ssid_sn: str | None = None) -> list[tuple[bytes, dict]]:
+def extract_new_firmware_from_ies(
+    pkt,
+    ssid_sn: str | None = None,
+    model_hint: str | None = None,
+) -> list[tuple[bytes, dict]]:
     results: list[tuple[bytes, dict]] = []
     dedup: set[int] = set()
     elt = pkt.getlayer(Dot11Elt)
@@ -984,7 +1083,7 @@ def extract_new_firmware_from_ies(pkt, ssid_sn: str | None = None) -> list[tuple
                 if pos < 0:
                     break
                 if pos < len(info):
-                    _append_new_firmware_result(results, dedup, info[pos:], ssid_sn)
+                    _append_new_firmware_result(results, dedup, info[pos:], ssid_sn, model_hint)
                 idx = pos + 1
         try:
             nxt = elt.payload
@@ -995,7 +1094,11 @@ def extract_new_firmware_from_ies(pkt, ssid_sn: str | None = None) -> list[tuple
             break
     return results
 
-def extract_new_firmware_from_raw(pkt, ssid_sn: str | None = None) -> list[tuple[bytes, dict]]:
+def extract_new_firmware_from_raw(
+    pkt,
+    ssid_sn: str | None = None,
+    model_hint: str | None = None,
+) -> list[tuple[bytes, dict]]:
     """Search the newer DJI RID vendor-IE body in raw frame bytes."""
     try:
         raw = bytes(pkt)
@@ -1009,7 +1112,9 @@ def extract_new_firmware_from_raw(pkt, ssid_sn: str | None = None) -> list[tuple
         if pos < 0:
             break
         if pos < len(raw):
-            _append_new_firmware_result(results, dedup, raw[pos:pos + RID_NEW_FW_SIG_BYTES], ssid_sn)
+            _append_new_firmware_result(
+                results, dedup, raw[pos:pos + RID_NEW_FW_SIG_BYTES], ssid_sn, model_hint
+            )
         idx = pos + 1
     return results
 

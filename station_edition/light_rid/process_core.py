@@ -18,7 +18,9 @@ NEW_FW_DETAIL_KEYS = (
     "coord_sys", "coord_sys_text",
     "horizontal_accuracy", "vertical_accuracy", "speed_accuracy",
     "timestamp_ms", "timestamp_accuracy", "timestamp_accuracy_text",
-    "home_lat", "home_lon", "aux_lat", "aux_lon", "alt_candidates",
+    "home_lat", "home_lon", "aux_lat", "aux_lon",
+    "pos_a_lat", "pos_a_lon", "pos_b_lat", "pos_b_lon",
+    "alt_candidates", "enterprise_model", "enterprise_dynamic", "enterprise_signature",
 )
 
 def _copy_new_fw_detail(dst: dict, src: dict | None) -> None:
@@ -269,8 +271,9 @@ def _history_decode_old_payloads(data: bytes) -> dict:
 
 def _history_decode_raw_packet(data: bytes, hist: dict, target_sn: str) -> tuple[dict | None, str, bytes]:
     ssid_hint = _history_ssid_hint(hist, target_sn)
+    model_hint = str(hist.get("model") or "")
     try:
-        new_payloads = list(extract_new_firmware_from_raw(data, ssid_hint) or [])
+        new_payloads = list(extract_new_firmware_from_raw(data, ssid_hint, model_hint) or [])
     except Exception:
         new_payloads = []
     if new_payloads:
@@ -279,7 +282,7 @@ def _history_decode_raw_packet(data: bytes, hist: dict, target_sn: str) -> tuple
     pos = data.find(DJI_RID_VENDOR_PREFIX)
     if pos >= 0:
         body = data[pos:]
-        decoded = decode_new_firmware_payload(body, ssid_hint)
+        decoded = decode_new_firmware_payload(body, ssid_hint, model_hint)
         if decoded:
             return decoded, "new", body
     decoded = _history_decode_old_payloads(data)
@@ -993,7 +996,14 @@ def _state_snapshot() -> dict:
                 "home_lon": cur.get("home_lon", hist.get("home_lon")),
                 "aux_lat": cur.get("aux_lat", hist.get("aux_lat")),
                 "aux_lon": cur.get("aux_lon", hist.get("aux_lon")),
+                "pos_a_lat": cur.get("pos_a_lat", hist.get("pos_a_lat")),
+                "pos_a_lon": cur.get("pos_a_lon", hist.get("pos_a_lon")),
+                "pos_b_lat": cur.get("pos_b_lat", hist.get("pos_b_lat")),
+                "pos_b_lon": cur.get("pos_b_lon", hist.get("pos_b_lon")),
                 "alt_candidates": cur.get("alt_candidates", hist.get("alt_candidates")),
+                "enterprise_model": cur.get("enterprise_model", hist.get("enterprise_model")),
+                "enterprise_dynamic": cur.get("enterprise_dynamic", hist.get("enterprise_dynamic")),
+                "enterprise_signature": cur.get("enterprise_signature", hist.get("enterprise_signature")),
                 "gb_version": cur.get("gb_version", hist.get("gb_version")),
                 "gb_identifiers": cur.get("gb_identifiers", hist.get("gb_identifiers")),
                 "operation_category": cur.get("operation_category", hist.get("operation_category")),

@@ -7,6 +7,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import struct
 import sys
 from pathlib import Path
 
@@ -16,10 +17,18 @@ ENTRYPOINT = ROOT / "viewer" / "server.py"
 TARGET_ALIASES = {
     "x86_64": "x86_64",
     "amd64": "x86_64",
+    "x32": "x32",
+    "x86": "x32",
+    "i386": "x32",
+    "i686": "x32",
     "arm64": "arm64",
     "aarch64": "arm64",
     "windows-x86_64": "windows-x86_64",
     "win-x86_64": "windows-x86_64",
+    "windows-x32": "windows-x32",
+    "windows-x86": "windows-x32",
+    "win-x32": "windows-x32",
+    "win-x86": "windows-x32",
 }
 
 
@@ -36,7 +45,18 @@ def data_arg(src: str, dst: str) -> str:
     return f"{src_path.resolve()}{sep}{dst}"
 
 
+def validate_target_runtime(target: str) -> None:
+    bitness = struct.calcsize("P") * 8
+    if target == "x32" and bitness != 32:
+        raise SystemExit(
+            "target x32 requires a 32-bit Python runtime; use the CI linux-x32 Docker job or a 32-bit Python"
+        )
+    if target == "windows-x32" and (os.name != "nt" or bitness != 32):
+        raise SystemExit("target windows-x32 requires a 32-bit Python runtime on Windows")
+
+
 def build_binary(target: str, *, clean: bool = True) -> Path:
+    validate_target_runtime(target)
     if not ENTRYPOINT.exists():
         raise SystemExit(f"missing entrypoint: {ENTRYPOINT}")
     dist_dir = ROOT / "release" / "viewer" / target

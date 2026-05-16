@@ -560,6 +560,79 @@ def _resolve_model_name(sn: str, scan_type: str | None = None, current_model: st
     cur = str(current_model or "").strip()
     return cur if (cur and cur.upper() != "N/A") else "N/A"
 
+def _enterprise_model_key_from_text(model_name: str | None) -> str:
+    model = re.sub(r"[^0-9A-Z]+", "", str(model_name or "").upper())
+    if "MINI4K" in model:
+        return "MINI_4K"
+    if "M350" in model or "MATRICE350" in model:
+        return "M350_RTK"
+    if "M400" in model or "MATRICE400" in model:
+        return "M400"
+    return ""
+
+def _enterprise_coord_pair(record: dict, prefix: str) -> tuple[float | None, float | None]:
+    try:
+        lat = float(record.get(f"{prefix}_lat"))
+        lon = float(record.get(f"{prefix}_lon"))
+    except Exception:
+        return None, None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None, None
+    return round(lat, 7), round(lon, 7)
+
+def _refresh_enterprise_private_record(record: dict, model_name: str) -> bool:
+    if not isinstance(record, dict):
+        return False
+    rid_kind = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or "")
+    if rid_kind != "DJI_ENTERPRISE_PRIVATE":
+        return False
+    model_key = _enterprise_model_key_from_text(model_name)
+    if not model_key:
+        return False
+
+    pos_a_lat, pos_a_lon = _enterprise_coord_pair(record, "pos_a")
+    pos_b_lat, pos_b_lon = _enterprise_coord_pair(record, "pos_b")
+    updates = {
+        "enterprise_model": model_key,
+        "alt": None,
+        "speed": None,
+        "vspeed": None,
+        "move_dir": None,
+        "coord_sys": 0,
+        "coord_sys_text": "WGS-84",
+    }
+    if model_key in ("M350_RTK", "MINI_4K"):
+        updates.update({
+            "lat": pos_a_lat,
+            "lon": pos_a_lon,
+            "pilot_lat": pos_b_lat,
+            "pilot_lon": pos_b_lon,
+            "pilot_alt": None,
+            "home_lat": None,
+            "home_lon": None,
+            "aux_lat": None,
+            "aux_lon": None,
+        })
+    elif model_key == "M400":
+        updates.update({
+            "lat": pos_b_lat,
+            "lon": pos_b_lon,
+            "pilot_lat": None,
+            "pilot_lon": None,
+            "pilot_alt": None,
+            "home_lat": pos_a_lat,
+            "home_lon": pos_a_lon,
+            "aux_lat": pos_a_lat,
+            "aux_lon": pos_a_lon,
+        })
+
+    changed = False
+    for key, value in updates.items():
+        if record.get(key) != value:
+            record[key] = value
+            changed = True
+    return changed
+
 def _refresh_models_locked(*, only_na: bool = False) -> tuple[int, int]:
     """Refresh model names from SN mapping for both history/state tables.
     Must be called with `state_lock` held.
@@ -579,6 +652,8 @@ def _refresh_models_locked(*, only_na: bool = False) -> tuple[int, int]:
         if new != old_norm:
             h["model"] = new
             history_changed += 1
+        if _refresh_enterprise_private_record(h, new):
+            history_changed += 1
     for sn, e in state_table.items():
         if not isinstance(e, dict):
             continue
@@ -590,6 +665,8 @@ def _refresh_models_locked(*, only_na: bool = False) -> tuple[int, int]:
         old_norm = old if old else "N/A"
         if new != old_norm:
             e["model"] = new
+            state_changed += 1
+        if _refresh_enterprise_private_record(e, new):
             state_changed += 1
     return history_changed, state_changed
 

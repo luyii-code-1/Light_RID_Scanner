@@ -17,6 +17,7 @@ def build_settings_page() -> str:
         <button class="btn" id="btn-back" type="button">返回实时/历史</button>
         <button class="btn" id="btn-nodes" type="button">节点管理</button>
         <button class="btn ghost" id="btn-logout" type="button">登出</button>
+        <button class="btn" id="btn-theme" type="button">浅色</button>
         <button class="btn" id="btn-reload-view" type="button">刷新</button>
       </div>
     </div>
@@ -141,6 +142,18 @@ function qs(id){ return document.getElementById(id); }
 function qsa(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel) || []); }
 function enc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function pageHeaders(extra){ var h={'X-LightRID-Page':'1'}; if(extra) Object.assign(h, extra); return h; }
+function loadTheme(){
+  try{ var s = localStorage.getItem('rid_ui_theme'); if(s === 'dark' || s === 'light') return s; }catch(_e){}
+  try{ if(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light'; }catch(_e){}
+  return 'dark';
+}
+function applyTheme(theme){
+  var light = (theme === 'light');
+  document.body.classList.toggle('theme-light', light);
+  document.body.classList.toggle('theme-dark', !light);
+  try{ localStorage.setItem('rid_ui_theme', light ? 'light' : 'dark'); }catch(_e){}
+  if(qs('btn-theme')) qs('btn-theme').textContent = light ? '深色' : '浅色';
+}
 async function getJson(path){
   const r = await fetch(path, {cache:'no-store', headers:pageHeaders()});
   const d = await r.json().catch(()=>({}));
@@ -246,6 +259,7 @@ function jumpTo(id){
 qs('btn-back').addEventListener('click', function(){ location.href='/'; });
 qs('btn-nodes').addEventListener('click', function(){ location.href='/nodes'; });
 qs('btn-logout').addEventListener('click', async function(){ try{ await postJson('/api/logout', {}); }finally{ location.href='/'; } });
+qs('btn-theme').addEventListener('click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
 qs('btn-reload-view').addEventListener('click', function(){ loadSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
 qs('btn-refresh-host').addEventListener('click', function(){ loadSettings().catch(function(e){ setStatus('host-meta', e.message || e, true); }); });
 qs('btn-save-settings').addEventListener('click', function(){ saveSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
@@ -261,6 +275,7 @@ qs('btn-clear-base-loc').addEventListener('click', function(){ qs('cfg-base-lat'
 qs('btn-eula-view').addEventListener('click', function(){ location.href='/eula?next=/settings'; });
 qs('btn-eula-revoke').addEventListener('click', function(){ revokeEula().catch(function(e){ setStatus('status-eula', e.message || e, true); }); });
 qsa('[data-jump]').forEach(function(btn){ btn.addEventListener('click', function(){ jumpTo(btn.getAttribute('data-jump')); }); });
+applyTheme(loadTheme());
 loadSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); });
 """
     return station_page("Viewer 设置", body, script)

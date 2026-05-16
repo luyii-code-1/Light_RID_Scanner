@@ -18,7 +18,7 @@ Viewer 使用 `viewer/cfg.db` 保存自身配置：节点 API 地址、节点 AP
 
 Viewer 的实时/历史主界面直接复用 `station_edition/light_rid/web_server.py` 的 Station 页面模板；viewer 代码只替换数据/API 层，并从 DOM 中删除 Station 专用控制项。`/settings` 复用 Station 设置页风格，只保留 Viewer 主机状态、地图默认位置/缩放、密码登录、SSO check 登录和许可协议。节点管理单独放在 `/nodes`，支持节点卡片、负载曲线、扫描统计、一键生成子站 SSO 登录 URL，以及多节点批量重启程序 / 更新识别库。
 
-Viewer 二进制由单独的 `.github/workflows/build-viewer.yml` 构建，覆盖 Linux `x86_64`、Linux `arm64` 和 Windows `x86_64`。本地构建命令：
+Viewer 二进制由单独的 `.github/workflows/build-viewer.yml` 构建，覆盖 Linux `x86_64`、Linux `x32`、Linux `arm64`、Windows `windows-x86_64` 和 Windows `windows-x32`。本地构建命令：
 
 ```bash
 python pytools/build_viewer.py --target x86_64
@@ -538,16 +538,19 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 commit:<Git短提交号>#<本地构建号>
 ```
 
-`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成 4 个 Linux 单文件产物：基站版和移动版分别覆盖 `x86_64` 与 `arm64`。
+`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成 6 个 Linux 单文件产物：基站版和移动版分别覆盖 `x86_64`、`x32` 与 `arm64`。
 
 本地构建可以使用根目录共享入口，也可以进入版本目录使用本地包装脚本：
 
 ```bash
 python pytools/build_release.py --edition station --target arm64
 python pytools/build_release.py --edition portable --target x86_64
+python pytools/build_release.py --edition portable --target x32
 cd station_edition
 python pytools/build.py --target arm64
 ```
+
+`x32` 目标必须使用 32 位 Python 运行时构建；GitHub Actions 工作流会通过单独的 Linux 32 位 Docker job 完成。
 
 设置页可以手动比较本地程序提交号和远端 Git 提交号。这个检查只报告是否存在更新，不会自动下载、套用代码或重启服务。
 

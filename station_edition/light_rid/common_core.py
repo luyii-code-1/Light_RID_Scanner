@@ -61,14 +61,14 @@ DJI_RID_VENDOR_PREFIX = ODID_OUI + bytes([DJI_RID_VENDOR_TYPE])
 RID_NEW_FW_BODY_MIN  = 83
 RID_DJI_VENDOR_MIN   = 10
 RID_DJI_GB46750_MIN  = 83
-RID_DJI_M400_PRIVATE_MIN = 68
+RID_DJI_ENTERPRISE_PRIVATE_MIN = 68
 RID_NEW_FW_SN_LEN    = 20
 RID_NEW_FW_UAS_LEN   = 8
 RID_NEW_FW_GB_OFF    = 5
 RID_NEW_FW_GB_MIN    = 78
 RID_NEW_FW_ALL_IDENTIFIERS = b"\xff\xff\xfe"
 RID_DJI_GB46750_HEADER = b"\xff\x20\x48\xff\xff\xfe"
-RID_DJI_M400_PRIVATE_HEADER = b"\xf1\x19\x03\x01\x12"
+RID_DJI_ENTERPRISE_PRIVATE_HEADER = b"\xf1\x19\x03\x01\x12"
 RID_NEW_FW_SN_OFF    = 11
 RID_NEW_FW_UAS_OFF   = 31
 RID_NEW_FW_PILOT_LON_OFF = 42
@@ -785,11 +785,20 @@ def _history_disk_items_locked() -> list[dict]:
             "reg_mark": e.get("reg_mark"),
             "status": e.get("status"),
             "coord_type": e.get("coord_type"),
+            "coord_sys": e.get("coord_sys"),
+            "coord_sys_text": e.get("coord_sys_text"),
             "home_lat": e.get("home_lat"),
             "home_lon": e.get("home_lon"),
             "aux_lat": e.get("aux_lat"),
             "aux_lon": e.get("aux_lon"),
+            "pos_a_lat": e.get("pos_a_lat"),
+            "pos_a_lon": e.get("pos_a_lon"),
+            "pos_b_lat": e.get("pos_b_lat"),
+            "pos_b_lon": e.get("pos_b_lon"),
             "alt_candidates": e.get("alt_candidates"),
+            "enterprise_model": e.get("enterprise_model"),
+            "enterprise_dynamic": e.get("enterprise_dynamic"),
+            "enterprise_signature": e.get("enterprise_signature"),
             "capture_type": e.get("capture_type"),
             "firmware_type": _firmware_type_key(e.get("firmware_type")),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
@@ -822,6 +831,7 @@ def load_history_store(path: str | None) -> None:
             return
         loaded = 0
         repaired_model = 0
+        repaired_enterprise = 0
         compat_dirty = False
         with state_lock:
             for raw in items:
@@ -845,6 +855,13 @@ def load_history_store(path: str | None) -> None:
                 if new_model != (old_model if old_model else "N/A"):
                     h["model"] = new_model
                     repaired_model += 1
+                enterprise_refresh = globals().get("_refresh_enterprise_private_record")
+                if callable(enterprise_refresh):
+                    try:
+                        if enterprise_refresh(h, h.get("model")):
+                            repaired_enterprise += 1
+                    except Exception:
+                        pass
                 h["raw_packets"] = list(h.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:]
                 h["track"] = _sanitize_track(h.get("track") or [])
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
@@ -856,12 +873,14 @@ def load_history_store(path: str | None) -> None:
             history_persist_dirty = False
             history_persist_last_save_wall = time.time()
         _log(f"[INFO] history cache loaded: {path} ({loaded} items)")
-        if repaired_model or compat_dirty:
+        if repaired_model or repaired_enterprise or compat_dirty:
             _history_mark_dirty()
         if compat_dirty:
             _log("[INFO] history cache upgraded for firmware/UAS fields")
         if repaired_model:
             _log(f"[INFO] history model repaired from SN map: {repaired_model}")
+        if repaired_enterprise:
+            _log(f"[INFO] history enterprise RID coordinates repaired: {repaired_enterprise}")
     except Exception as e:
         _log(f"[WARN] history cache load failed: {e}")
 
@@ -1000,7 +1019,9 @@ HISTORY_DETAIL_KEYS = (
     "coord_sys","coord_sys_text",
     "horizontal_accuracy","vertical_accuracy","speed_accuracy",
     "timestamp_ms","timestamp_accuracy","timestamp_accuracy_text",
-    "home_lat","home_lon","aux_lat","aux_lon","alt_candidates",
+    "home_lat","home_lon","aux_lat","aux_lon",
+    "pos_a_lat","pos_a_lon","pos_b_lat","pos_b_lon",
+    "alt_candidates","enterprise_model","enterprise_dynamic","enterprise_signature",
     "rssi","move_dir","ssid",
     "capture_type","firmware_type","last_capture_wall_ts","raw_packets",
     "scan_type","track","track_updated_wall_ts",
@@ -1177,16 +1198,34 @@ def _scan_data_payload_valid(payload) -> bool:
         return isinstance(src.get("items"), list) or isinstance(src.get("drones"), list)
     return False
 
+def _scan_data_file_info(path: str | None = None) -> dict:
+    raw_path = str(path or HISTORY_STORE_PATH or "").strip()
+    info = {"path": raw_path, "exists": False, "size": 0, "mtime": None}
+    if not raw_path:
+        return info
+    try:
+        abs_path = os.path.abspath(raw_path)
+        info["path"] = abs_path
+        st = os.stat(abs_path)
+        info.update({"exists": True, "size": int(st.st_size), "mtime": float(st.st_mtime)})
+    except FileNotFoundError:
+        info["path"] = os.path.abspath(raw_path)
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
 def _scan_data_export_payload() -> dict:
     with state_lock:
         items = _history_disk_items_locked()
+    file_info = _scan_data_file_info()
     return {
         "ok": True,
         "kind": "scan_data",
         "version": 1,
         "store_version": 3,
         "exported_at": time.time(),
-        "data_file": HISTORY_STORE_PATH or "",
+        "data_file": file_info.get("path") or HISTORY_STORE_PATH or "",
+        "data_file_info": file_info,
         "count": len(items),
         "items": items,
     }
@@ -1212,6 +1251,7 @@ def _import_scan_data_payload(payload, *, mode: str = "merge") -> dict:
         "skipped": int(skipped),
         "count": int(total_count),
         "data_file": HISTORY_STORE_PATH or "",
+        "data_file_info": _scan_data_file_info(),
     }
 
 def _deep_merge_dict(base: dict, override: dict) -> dict:
@@ -1857,6 +1897,7 @@ def _settings_view_payload() -> dict:
     host["current_channel"] = int(current_channel or channel_effective or 6)
     host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
     host["ifaces"] = interfaces
+    scan_data_file = _scan_data_file_info(HISTORY_STORE_PATH or str(basic.get("history_file") or ""))
     api_tokens_public = _api_tokens_public(api_prepared)
     return {
         "ok": True,
@@ -1964,6 +2005,7 @@ def _settings_view_payload() -> dict:
         "oobe": _oobe_state(),
         "eula": _eula_status_payload(),
         "raw_access": _raw_config_access_payload(),
+        "scan_data_file": scan_data_file,
         "hardware_link": "/hardware-assistant",
     }
 

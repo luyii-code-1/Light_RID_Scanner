@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,10 @@ EDITION_NAMES = {
 TARGET_ALIASES = {
     "x86_64": "x86_64",
     "amd64": "x86_64",
+    "x32": "x32",
+    "x86": "x32",
+    "i386": "x32",
+    "i686": "x32",
     "arm64": "arm64",
     "aarch64": "arm64",
 }
@@ -38,7 +43,16 @@ def data_arg(src: str, dst: str) -> str:
     return f"{src}{sep}{dst}"
 
 
+def validate_target_runtime(target: str) -> None:
+    bitness = struct.calcsize("P") * 8
+    if target == "x32" and bitness != 32:
+        raise SystemExit(
+            "target x32 requires a 32-bit Python runtime; use the CI linux-x32 Docker job or a 32-bit Python"
+        )
+
+
 def build_binary(edition: str, target: str, *, clean: bool = True) -> Path:
+    validate_target_runtime(target)
     entry = EDITION_ENTRYPOINTS[edition]
     if not entry.exists():
         raise SystemExit(f"missing entrypoint: {entry}")

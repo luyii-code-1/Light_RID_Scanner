@@ -17,12 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 EDITION_ENTRYPOINTS = {
     "station": ROOT / "station_edition" / "run.py",
-    "portable": ROOT / "portable_edition" / "pe.py",
 }
 
 EDITION_NAMES = {
     "station": "light_rid_station",
-    "portable": "light_rid_portable",
 }
 
 TARGET_ALIASES = {

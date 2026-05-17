@@ -49,7 +49,7 @@ def build_nodes_page() -> str:
         <div class="section-head">
           <div>
             <h2>批量远程管理</h2>
-            <div class="section-copy">对勾选节点执行远程维护。目前支持重启主程序和更新识别库。</div>
+            <div class="section-copy">对勾选节点执行远程维护，包含重启、识别库更新和强制重新解析。</div>
           </div>
         </div>
         <div class="row-actions" style="margin-top:14px">
@@ -57,6 +57,7 @@ def build_nodes_page() -> str:
           <button class="btn ghost" id="btn-select-online" type="button">选择在线</button>
           <button class="btn warn" id="btn-remote-restart" type="button">重启程序</button>
           <button class="btn" id="btn-remote-models" type="button">更新识别库</button>
+          <button class="btn" id="btn-remote-reparse" type="button">强制重新解析</button>
         </div>
         <div id="bulk-status" class="status">-</div>
       </div>
@@ -168,6 +169,31 @@ var state = {nodes:[], records:[], selectedId:null, selectedSsoUrl:'', checkedId
 function nodeById(id){ return state.nodes.find(function(n){ return Number(n.id) === Number(id); }) || null; }
 function recordById(id){ return state.records.find(function(n){ return Number(n.id) === Number(id); }) || null; }
 function selectedIds(){ return qsa('.node-select:checked').map(function(x){ return Number(x.value || 0); }).filter(Boolean); }
+function ssoCacheKey(node){
+  node = node || {};
+  return 'rid_viewer_node_sso_' + String(node.id || '') + '_' + String(node.base_url || '').replace(/[^A-Za-z0-9]+/g, '_');
+}
+function readCachedSso(node){
+  try{
+    var raw = localStorage.getItem(ssoCacheKey(node));
+    if(!raw) return '';
+    var item = JSON.parse(raw);
+    var url = String((item && item.url) || '');
+    var exp = Number((item && item.expires_at) || 0);
+    if(exp && exp <= Date.now() / 1000){
+      localStorage.removeItem(ssoCacheKey(node));
+      return '';
+    }
+    return url;
+  }catch(_e){ return ''; }
+}
+function writeCachedSso(node, payload){
+  try{
+    var url = String((payload && payload.url) || '');
+    if(!url) return;
+    localStorage.setItem(ssoCacheKey(node), JSON.stringify({url:url, expires_at:Number(payload.expires_at || 0), saved_at:Date.now()/1000}));
+  }catch(_e){}
+}
 function cardShell(n, kind, inner){
   var ok = !!n.ok;
   return '<div class="node-card '+(Number(state.selectedId)===Number(n.id)?'active':'')+'" data-id="'+enc(n.id)+'" data-kind="'+enc(kind)+'">'
@@ -223,7 +249,7 @@ function detailRows(rows){
 function showBasic(id){
   var n = nodeById(id) || {};
   var station = n.station || {}, svc = n.service || {}, rec = recordById(id) || {};
-  state.selectedId = Number(id); state.selectedSsoUrl = '';
+  state.selectedId = Number(id); state.selectedSsoUrl = readCachedSso(n);
   qs('detail-title').textContent = n.name || '节点详情';
   qs('detail-copy').textContent = '完整基础信息';
   qs('load-chart').classList.remove('show');
@@ -234,21 +260,23 @@ function showBasic(id){
     ['采集状态', svc.sniff_state || '—'], ['采集消息', svc.sniff_msg || '—'], ['采集网卡', svc.sniff_iface || '—'],
     ['Token', rec.token_configured ? '已配置' : '未配置'], ['创建时间', fmtTime(rec.created_at)], ['更新时间', fmtTime(rec.updated_at)]
   ]);
-  setStatus('detail-status', '-', false);
+  setStatus('detail-status', state.selectedSsoUrl ? '已读取浏览器缓存的 SSO URL，可直接一键登录。' : '-', false);
   renderLists();
 }
 async function showLoad(id){
   var n = nodeById(id) || {};
-  state.selectedId = Number(id); state.selectedSsoUrl = '';
+  state.selectedId = Number(id); state.selectedSsoUrl = readCachedSso(n);
   qs('detail-title').textContent = (n.name || '节点') + ' 负载';
   qs('detail-copy').textContent = '最近负载曲线';
   qs('detail-body').innerHTML = detailRows([['API 地址', n.base_url || '—'], ['当前状态', n.ok ? '在线' : '离线'], ['扫描数据', String(n.online_count || 0) + '/' + String(n.count || 0)]]);
   setStatus('detail-status', '正在读取负载...', false);
   renderLists();
   try{
-    const d = await api('/api/nodes/metrics?node_id=' + encodeURIComponent(id) + '&window=12h');
+    const d = await withViewerPageLoading((n.name || '节点') + ' 负载数据', '正在读取数据', function(){
+      return api('/api/nodes/metrics?node_id=' + encodeURIComponent(id) + '&window=12h');
+    });
     drawChart(Array.isArray(d.items) ? d.items : []);
-    setStatus('detail-status', d.items && d.items.length ? ('样本 ' + d.items.length) : '没有可用负载样本；请确认子站已启用节点负载记录。', !(d.items && d.items.length));
+    setStatus('detail-status', d.items && d.items.length ? ('样本 ' + d.items.length) : (d.error || '没有可用负载样本；请确认子站已启用节点负载记录。'), !(d.items && d.items.length));
   }catch(e){
     drawChart([]);
     setStatus('detail-status', '负载读取失败: ' + (e.message || e), true);
@@ -256,7 +284,7 @@ async function showLoad(id){
 }
 function showScan(id){
   var n = nodeById(id) || {};
-  state.selectedId = Number(id); state.selectedSsoUrl = '';
+  state.selectedId = Number(id); state.selectedSsoUrl = readCachedSso(n);
   qs('detail-title').textContent = (n.name || '节点') + ' 扫描数据';
   qs('detail-copy').textContent = '当前聚合统计';
   qs('load-chart').classList.remove('show');
@@ -349,9 +377,19 @@ async function deleteSelected(){
 }
 async function createSso(){
   if(!state.selectedId) return;
+  var node = nodeById(state.selectedId) || {};
+  var cached = readCachedSso(node);
+  if(cached){
+    state.selectedSsoUrl = cached;
+    qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl], ['节点', node.name || state.selectedId], ['说明', '已使用浏览器缓存；需要更换时可先删除浏览器本地缓存或等待过期。']]);
+    qs('btn-open-sso').disabled = false;
+    setStatus('detail-status', '已使用浏览器缓存的 SSO URL。', false);
+    return;
+  }
   setStatus('detail-status', '正在生成 SSO 登录链接...', false);
   var d = await post('/api/nodes/sso', {node_id:state.selectedId});
   state.selectedSsoUrl = d.url || '';
+  writeCachedSso(node, d);
   qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl || '—'], ['节点', (nodeById(state.selectedId)||{}).name || state.selectedId], ['说明', '链接由子站 API 创建，按子站设置控制有效期和单次使用。']]);
   qs('btn-open-sso').disabled = !state.selectedSsoUrl;
   setStatus('detail-status', state.selectedSsoUrl ? '已生成，可点击一键登录。' : '子站没有返回 URL。', !state.selectedSsoUrl);
@@ -361,6 +399,7 @@ async function remoteOp(op){
   if(!ids.length && state.selectedId) ids = [state.selectedId];
   if(!ids.length){ setStatus('bulk-status','请先勾选节点或选择一个节点。',true); return; }
   if(op === 'restart' && !confirm('确认重启 ' + ids.length + ' 个节点的主程序？')) return;
+  if(op === 'force_reparse' && !confirm('确认要求 ' + ids.length + ' 个节点强制重新解析最近存储包？')) return;
   setStatus('bulk-status', '正在执行...', false);
   var d = await post('/api/nodes/remote', {node_ids:ids, operation:op});
   var rows = d.results || [];
@@ -386,7 +425,7 @@ document.addEventListener('click', function(ev){
 qs('btn-back').onclick = function(){ location.href='/'; };
 qs('btn-settings').onclick = function(){ location.href='/settings'; };
 qs('btn-theme').onclick = function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); };
-qs('btn-refresh').onclick = function(){ loadAll().catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
+qs('btn-refresh').onclick = function(){ withViewerPageLoading('Viewer 节点列表', '正在读取数据', loadAll).catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-clear-form').onclick = clearForm;
 qs('btn-test-node').onclick = function(){ saveNode(true).catch(function(e){ setStatus('node-status', e.message || e, true); }); };
 qs('btn-save-node').onclick = function(){ saveNode(false).catch(function(e){ setStatus('node-status', e.message || e, true); }); };
@@ -398,7 +437,8 @@ qs('btn-select-all').onclick = function(){ qsa('.node-select').forEach(function(
 qs('btn-select-online').onclick = function(){ qsa('.node-select').forEach(function(x){ var on=x.getAttribute('data-online') === '1'; x.checked = on; state.checkedIds[Number(x.value || 0)] = on; }); };
 qs('btn-remote-restart').onclick = function(){ remoteOp('restart').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-remote-models').onclick = function(){ remoteOp('update_models').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
+qs('btn-remote-reparse').onclick = function(){ remoteOp('force_reparse').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 applyTheme(loadTheme());
-loadAll().catch(function(e){ setStatus('bulk-status', e.message || e, true); });
+withViewerPageLoading('Viewer 节点列表', '正在读取数据', loadAll).catch(function(e){ setStatus('bulk-status', e.message || e, true); });
 """
     return station_page("节点管理器", body, script, extra_css=extra_css)

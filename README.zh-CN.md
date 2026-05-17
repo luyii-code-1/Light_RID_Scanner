@@ -32,13 +32,13 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - `station_edition/`
   完整基站版本，包含扫描、网页、安全鉴权、systemd/AP 维护和树莓派部署默认逻辑。
 - `portable_edition/`
-  移动部署最小版本，复用扫描核心和网页核心，但启动时强制关闭网页登录、API Token、SSO、Passkey、监控指标和企业微信通知。
+  WIP（Work in Progress，开发中）。移动版运行时代码已按新策略清空，当前目录只保留 WIP 说明。
 - 根目录 `run.py`
   基站版本兼容入口，实际跳转到 `station_edition/run.py`。
 - 根目录 `rid-models.json`
   面向 GitHub Raw 的公开机型库；二进制内也会嵌入同一份资源，运行目录缺失时可自动恢复。
 
-各版本优先从自身目录运行。未显式传入路径时，`config.json`、`history-cache.json` 和 `rid-models.json` 等运行文件都按当前工作目录解析。
+基站版优先从自身目录运行。未显式传入路径时，`config.json`、`history-cache.json` 和 `rid-models.json` 等运行文件都按当前工作目录解析。
 
 ## 功能概览
 
@@ -85,15 +85,7 @@ python -m pip install -r ../requirements.txt
 python run.py --no-tui
 ```
 
-从源码运行移动版：
-
-```bash
-cd portable_edition
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r ../requirements.txt
-python pe.py --no-tui
-```
+移动版当前为 WIP，没有可运行的源码入口。
 
 部署基站 Linux 二进制文件：
 
@@ -149,8 +141,8 @@ ExecStart=/opt/light-rid/light_rid_station-arm64 --config /opt/light-rid/config.
   基站版本源码和构建入口。
 - `station_edition/light_rid/`
   拆分后的扫描、解析、HTTP/WS 服务、内嵌页面、API、设置、认证、硬件辅助和 CLI/TUI 模块。
-- `portable_edition/pe.py`
-  移动版本源码和构建入口。
+- `portable_edition/README.md`
+  移动版 WIP 说明。
 - `rid-models.json`
   GitHub Raw 机型前缀映射表，也是二进制内置资源的源文件。
 - `station_edition/config.example.json`
@@ -538,14 +530,12 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 commit:<Git短提交号>#<本地构建号>
 ```
 
-`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成 6 个 Linux 单文件产物：基站版和移动版分别覆盖 `x86_64`、`x32` 与 `arm64`。
+`rid_build_info.json` 保存当前 Git 短提交号和本地构建号。CI 工作流会生成基站版 Linux 单文件产物，覆盖 `x86_64`、`x32`、`arm64` 和 `armv7`；移动版产物在 WIP 阶段暂停。
 
 本地构建可以使用根目录共享入口，也可以进入版本目录使用本地包装脚本：
 
 ```bash
 python pytools/build_release.py --edition station --target arm64
-python pytools/build_release.py --edition portable --target x86_64
-python pytools/build_release.py --edition portable --target x32
 cd station_edition
 python pytools/build.py --target arm64
 ```

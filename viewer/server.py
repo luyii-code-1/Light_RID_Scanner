@@ -13,6 +13,7 @@ import struct
 import sys
 import time
 import urllib.parse
+import urllib.request
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -30,8 +31,10 @@ from viewer.aggregation import (
     create_node_sso_url,
     fetch_node_metrics,
     fetch_node_track,
+    reparse_node_aircraft,
     run_node_operation,
     test_node_communication,
+    viewer_loading_snapshot,
     viewer_state_snapshot,
 )
 from viewer.nodes_ui import build_nodes_page
@@ -45,6 +48,8 @@ COOKIE_NAME = "rid_node_center_session"
 MAX_JSON_BYTES = 512 * 1024
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 APP_START_WALL = time.time()
+VIEWER_NODE_STATUS: dict[str, bool] = {}
+VIEWER_NOTIFY_LAST_TS: dict[str, float] = {}
 
 
 def _utc_text(ts: float | None = None) -> str:
@@ -101,6 +106,62 @@ def _viewer_host_status(store: ConfigStore, listen: str = "") -> dict[str, Any]:
 
 def _viewer_notification_payload() -> dict[str, Any]:
     return {"ok": True, "seq": int(time.time()), "count": 0, "items": []}
+
+
+def _viewer_wecom_url(key: str) -> str:
+    raw = str(key or "").strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + urllib.parse.quote(raw, safe="")
+
+
+def _viewer_send_wecom(store: ConfigStore, text: str) -> tuple[bool, str]:
+    cfg = store.notify_config(reveal_secret=True)
+    if not bool(cfg.get("enabled")):
+        return False, "notification disabled"
+    key = str(cfg.get("wecom_key") or "").strip()
+    if not key:
+        return False, "WeCom key missing"
+    body = json.dumps({"msgtype": "text", "text": {"content": str(text or "")}}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        _viewer_wecom_url(key),
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": f"LightRIDViewer/{APP_VERSION}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read(4096).decode("utf-8", "replace")
+        return True, raw or "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _maybe_notify_viewer_node_status(store: ConfigStore, snap: dict[str, Any]) -> None:
+    cfg = store.notify_config(reveal_secret=False)
+    if not (cfg.get("enabled") and cfg.get("wecom_configured") and cfg.get("node_status_enabled")):
+        return
+    nodes = snap.get("viewer_nodes") if isinstance(snap.get("viewer_nodes"), list) else []
+    now = time.time()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        key = str(node.get("id") or node.get("base_url") or node.get("name") or "")
+        if not key:
+            continue
+        ok = bool(node.get("ok"))
+        prev = VIEWER_NODE_STATUS.get(key)
+        VIEWER_NODE_STATUS[key] = ok
+        if prev is None or prev == ok:
+            continue
+        last = float(VIEWER_NOTIFY_LAST_TS.get(key) or 0.0)
+        if now - last < 300:
+            continue
+        VIEWER_NOTIFY_LAST_TS[key] = now
+        status = "恢复在线" if ok else "离线"
+        name = str(node.get("name") or node.get("base_url") or key)
+        detail = str(node.get("error") or node.get("base_url") or "")
+        _viewer_send_wecom(store, f"Light RID Viewer: 节点{name}{status}\n{detail}")
 
 
 def _viewer_interfaces_payload() -> dict[str, Any]:
@@ -331,11 +392,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
                 ).encode("ascii")
             )
+            self._send_ws_frame(_json_bytes(viewer_loading_snapshot(self.store)))
             last = 0.0
             while True:
                 now = time.time()
                 if now - last >= 1.5:
-                    self._send_ws_frame(_json_bytes(viewer_state_snapshot(self.store)))
+                    snap = viewer_state_snapshot(self.store)
+                    self._send_ws_frame(_json_bytes(snap))
+                    _maybe_notify_viewer_node_status(self.store, snap)
                     last = now
                 time.sleep(0.25)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
@@ -444,6 +508,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     "auth": self.store.public_auth_config(),
                     "map": self.store.map_config(),
                     "aggregate": self.store.aggregate_config(),
+                    "notify": self.store.notify_config(reveal_secret=False),
                     "host": _viewer_host_status(self.store, self.listen_label),
                     "eula": self.store.eula_status(),
                 }
@@ -458,6 +523,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     "auth": self.store.public_auth_config(),
                     "map": self.store.map_config(),
                     "aggregate": self.store.aggregate_config(),
+                    "notify": self.store.notify_config(reveal_secret=False),
                     "host": _viewer_host_status(self.store, self.listen_label),
                     "eula": self.store.eula_status(),
                     "nodes": self.store.list_nodes(False),
@@ -576,6 +642,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 auth = self.store.save_auth_config(body.get("auth") if isinstance(body.get("auth"), dict) else {})
                 map_cfg = self.store.save_map_config(body.get("map") if isinstance(body.get("map"), dict) else {})
                 aggregate_cfg = self.store.save_aggregate_config(body.get("aggregate") if isinstance(body.get("aggregate"), dict) else {})
+                notify_cfg = self.store.save_notify_config(body.get("notify") if isinstance(body.get("notify"), dict) else {})
                 if isinstance(body.get("aggregate"), dict):
                     self.store.clear_cache_payload("history.aggregate")
                 self._send_json(
@@ -584,6 +651,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                         "auth": auth,
                         "map": map_cfg,
                         "aggregate": aggregate_cfg,
+                        "notify": notify_cfg,
                         "host": _viewer_host_status(self.store, self.listen_label),
                         "eula": self.store.eula_status(),
                     }
@@ -591,6 +659,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings/auth":
                 self._send_json({"ok": True, "auth": self.store.save_auth_config(body)})
+                return
+            if path == "/api/settings/notify/test":
+                ok, msg = _viewer_send_wecom(self.store, "Light RID Viewer 企业微信测试通知")
+                self._send_json({"ok": bool(ok), "message": msg}, 200 if ok else 400)
                 return
             if path == "/api/history/aggregate":
                 force = bool(body.get("force", True))
@@ -629,6 +701,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     return
                 payload = create_node_sso_url(node)
                 self._send_json(payload, 200 if payload.get("ok", True) else 400)
+                return
+            if path == "/api/nodes/reparse":
+                sn = str(body.get("sn") or "").strip()
+                mode = str(body.get("mode") or "auto")
+                payload = reparse_node_aircraft(self.store, sn, mode=mode)
+                self._send_json(payload, 200 if payload.get("ok") else 400)
                 return
             if path == "/api/nodes/remote":
                 ids = body.get("node_ids")

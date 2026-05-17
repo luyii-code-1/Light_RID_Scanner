@@ -1606,6 +1606,22 @@ def create_config_backup(path: str | None, tag: str = "save") -> tuple[bool, str
         base = os.path.basename(path)
         dst = os.path.join(backup_dir, f"{base}.{tag}.{ts}.bak")
         shutil.copy2(path, dst)
+        try:
+            backups = []
+            prefix = base + "."
+            for name in os.listdir(backup_dir):
+                p = os.path.join(backup_dir, name)
+                if not (os.path.isfile(p) and name.startswith(prefix) and name.endswith(".bak")):
+                    continue
+                backups.append((os.path.getmtime(p), p))
+            backups.sort(reverse=True)
+            for _mtime, old_path in backups[5:]:
+                try:
+                    os.remove(old_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return True, dst
     except Exception as e:
         return False, str(e)
@@ -2334,16 +2350,15 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
     if build_err or not isinstance(candidate_cfg, dict):
         return {"ok": False, "error": str(build_err or "invalid candidate config")}
 
-    test_ok, test_msg, notify_msg = _run_visual_settings_test(
-        candidate_cfg,
-        previous_cfg=prev_cfg,
-        notify_test=False,
-        keep_runtime=not test_only,
-    )
-    if not test_ok:
-        return {"ok": False, "error": test_msg, "notify_test": notify_msg}
-
     if test_only:
+        test_ok, test_msg, notify_msg = _run_visual_settings_test(
+            candidate_cfg,
+            previous_cfg=prev_cfg,
+            notify_test=False,
+            keep_runtime=False,
+        )
+        if not test_ok:
+            return {"ok": False, "error": test_msg, "notify_test": notify_msg}
         return {
             "ok": True,
             "tested": True,
@@ -2352,6 +2367,7 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
             "notify_test": notify_msg,
             "settings": _settings_view_payload().get("visual"),
         }
+    notify_msg = "skip"
 
     backup_path = ""
     b_ok, b_msg = create_config_backup(APP_CONFIG_PATH, tag="settings")
@@ -2388,7 +2404,7 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
         "ok": True,
         "saved_to": APP_CONFIG_PATH,
         "backup_path": backup_path,
-        "tested": True,
+        "tested": False,
         "saved": True,
         "reloaded": bool(r_ok),
         "reload_msg": r_msg,
@@ -2826,6 +2842,16 @@ def _normalize_sso_links(raw) -> list[dict]:
             "next": next_path,
         })
     return out[:64]
+
+def _prune_expired_sso_links(raw, now_wall: float | None = None, grace_sec: float = 5 * 3600) -> list[dict]:
+    now_wall = float(now_wall or time.time())
+    keep: list[dict] = []
+    for item in _normalize_sso_links(raw):
+        expires_at = float(item.get("expires_at") or 0.0)
+        if expires_at > 0 and now_wall - expires_at > float(grace_sec):
+            continue
+        keep.append(item)
+    return keep
 
 def _sso_link_state(item: dict | None, now_wall: float | None = None) -> dict:
     now_wall = float(now_wall or time.time())

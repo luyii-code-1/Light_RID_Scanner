@@ -31,17 +31,79 @@ def station_settings_css() -> str:
 
 def station_page(title: str, body: str, script: str, extra_css: str = "") -> str:
     css = station_settings_css()
+    shared_css = """
+.rid-loading-overlay{position:fixed;inset:0;z-index:2600;display:none;align-items:center;justify-content:center;pointer-events:none;background:radial-gradient(circle at center,color-mix(in srgb,var(--bg) 20%,transparent),transparent 46%)}
+.rid-loading-overlay.show{display:flex}
+.rid-loading-box{min-width:min(360px,calc(100vw - 44px));max-width:min(520px,calc(100vw - 44px));display:grid;justify-items:center;gap:12px;padding:22px 24px;border:1px solid color-mix(in srgb,var(--blue) 32%,var(--border));border-radius:8px;background:color-mix(in srgb,var(--card) 92%,transparent);box-shadow:0 18px 54px rgba(0,0,0,.30),0 0 0 1px rgba(255,255,255,.04);backdrop-filter:blur(10px)}
+.rid-loading-spinner{width:42px;height:42px;border-radius:50%;border:3px solid color-mix(in srgb,var(--blue) 18%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .82s linear infinite}
+.rid-loading-title{font:700 17px/1.2 var(--font-ui);color:var(--txt)}
+.rid-loading-copy{font:600 13px/1.45 var(--font-ui);color:var(--muted);text-align:center;max-width:44ch}
+@keyframes ridLoadingSpin{to{transform:rotate(360deg)}}
+body.theme-light .rid-loading-box{background:rgba(255,255,255,.94);box-shadow:0 18px 48px rgba(0,0,0,.14)}
+"""
+    shared_script = """
+var viewerPageLoadingStartedAt = 0;
+var viewerPageLoadingTimer = null;
+function viewerPageLoadingText(target, timeoutSec){
+  if(!viewerPageLoadingStartedAt) viewerPageLoadingStartedAt = Date.now();
+  var elapsed = Math.floor((Date.now() - viewerPageLoadingStartedAt) / 1000);
+  var limit = Math.max(5, Number(timeoutSec || 15) || 15);
+  var remain = Math.max(0, limit - elapsed);
+  var name = String(target || '页面数据');
+  if(remain > 0) return '正在读取 ' + name + '，' + remain + 's 后超时';
+  return '读取 ' + name + '超时，仍在等待返回';
+}
+function showViewerPageLoading(target, title, timeoutSec){
+  viewerPageLoadingStartedAt = Date.now();
+  var host = document.getElementById('rid-loading-overlay');
+  if(!host){
+    host = document.createElement('div');
+    host.id = 'rid-loading-overlay';
+    host.className = 'rid-loading-overlay';
+    host.innerHTML = '<div class="rid-loading-box"><div class="rid-loading-spinner"></div><div class="rid-loading-title"></div><div class="rid-loading-copy"></div></div>';
+    document.body.appendChild(host);
+  }
+  var titleEl = host.querySelector('.rid-loading-title');
+  var copyEl = host.querySelector('.rid-loading-copy');
+  function tick(){
+    if(titleEl) titleEl.textContent = String(title || '正在读取数据');
+    if(copyEl) copyEl.textContent = viewerPageLoadingText(target, timeoutSec);
+  }
+  tick();
+  host.classList.add('show');
+  if(viewerPageLoadingTimer) clearInterval(viewerPageLoadingTimer);
+  viewerPageLoadingTimer = setInterval(tick, 1000);
+}
+function hideViewerPageLoading(){
+  var host = document.getElementById('rid-loading-overlay');
+  if(host) host.classList.remove('show');
+  if(viewerPageLoadingTimer){
+    clearInterval(viewerPageLoadingTimer);
+    viewerPageLoadingTimer = null;
+  }
+}
+async function withViewerPageLoading(target, title, fn){
+  showViewerPageLoading(target, title, 15);
+  try{
+    return await fn();
+  }finally{
+    hideViewerPageLoading();
+  }
+}
+"""
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} - {APP_NAME}</title>
 <style>
 {css}
+{shared_css}
 {extra_css}
 </style></head><body><div class="wrap">
 {body}
 </div>
 <script>
 window.LIGHT_RID_VIEWER_VERSION = {APP_VERSION!r};
+{shared_script}
 {script}
 </script></body></html>"""

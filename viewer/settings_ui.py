@@ -35,6 +35,7 @@ def build_settings_page() -> str:
       <button class="btn ghost" data-jump="settings-map" type="button">地图</button>
       <button class="btn ghost" data-jump="settings-aggregate" type="button">聚合</button>
       <button class="btn ghost" data-jump="settings-access" type="button">访问</button>
+      <button class="btn ghost" data-jump="settings-notify" type="button">通知</button>
       <button class="btn ghost" data-jump="settings-eula" type="button">许可</button>
     </div>
   </div>
@@ -141,6 +142,25 @@ def build_settings_page() -> str:
           </div>
           <div id="status-settings" class="status">-</div>
         </div>
+        <div class="card access-group" id="settings-notify" data-card-key="notify">
+          <div class="section-head">
+            <div>
+              <h2>企业微信通知</h2>
+              <div class="section-copy">Viewer 可在子站在线/离线变化时发送企业微信机器人通知。</div>
+            </div>
+          </div>
+          <div class="grid" style="margin-top:14px">
+            <div class="field full"><label>企业微信机器人 Key 或完整 Webhook URL</label><input id="cfg-wecom-key" type="password" placeholder="留空不修改"></div>
+          </div>
+          <div class="checks">
+            <label><input id="cfg-notify-enabled" type="checkbox"> 启用企业微信通知</label>
+            <label><input id="cfg-notify-node-status" type="checkbox"> 子站在线/离线变化通知</label>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn ghost" id="btn-notify-test" type="button">测试通知</button>
+          </div>
+          <div id="status-notify" class="status">-</div>
+        </div>
         <div class="card" id="settings-eula">
           <div class="section-head">
             <div>
@@ -161,6 +181,7 @@ def build_settings_page() -> str:
     script = r"""
 function qs(id){ return document.getElementById(id); }
 function qsa(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel) || []); }
+var viewerSettingsInitial = null;
 function enc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function pageHeaders(extra){ var h={'X-LightRID-Page':'1'}; if(extra) Object.assign(h, extra); return h; }
 function loadTheme(){
@@ -222,7 +243,7 @@ function renderHost(host){
 function numberOrBlank(v){ return v == null || v === '' ? '' : String(v); }
 async function loadSettings(){
   const data = await getJson('/api/settings');
-  const a = data.auth || {}, m = data.map || {}, ag = data.aggregate || {};
+  const a = data.auth || {}, m = data.map || {}, ag = data.aggregate || {}, no = data.notify || {};
   qs('cfg-auth-enabled').checked = !!a.enabled;
   qs('cfg-auth-user').value = a.username || 'admin';
   qs('cfg-sso-enabled').checked = !!a.sso_enabled;
@@ -233,41 +254,76 @@ async function loadSettings(){
   qs('cfg-map-idle').value = numberOrBlank(m.map_auto_center_idle_sec || 20);
   qs('cfg-heading-ref').value = numberOrBlank(m.heading_ref_deg || 0);
   qs('cfg-aggregate-ttl').value = numberOrBlank(ag.cache_ttl_hours || 24);
+  qs('cfg-notify-enabled').checked = !!no.enabled;
+  qs('cfg-notify-node-status').checked = no.node_status_enabled !== false;
+  qs('cfg-wecom-key').value = '';
+  setStatus('status-notify', '企业微信 ' + (no.wecom_configured ? '已配置' : '未配置'), !no.wecom_configured && !!no.enabled);
   setStatus('status-settings', '密码 ' + (a.password_configured ? '已配置' : '未配置') + ' · SSO ' + (a.sso_configured ? '已配置' : '未配置'), false);
   renderHost(data.host || {});
   renderEula(data.eula || {});
+  viewerSettingsInitial = collectSettings();
+  syncViewerDraftState();
 }
-function collectSettings(){
+function collectSettings(opts){
+  opts = opts || {};
+  var base = viewerSettingsInitial || {};
+  var authBase = base.auth || {};
+  var mapBase = base.map || {};
+  var aggregateBase = base.aggregate || {};
   return {
     auth: {
       enabled: qs('cfg-auth-enabled').checked,
-      username: qs('cfg-auth-user').value,
-      password: qs('cfg-auth-pass').value,
+      username: opts.checkboxOnly ? (authBase.username || 'admin') : qs('cfg-auth-user').value,
+      password: opts.checkboxOnly ? '' : qs('cfg-auth-pass').value,
       sso_enabled: qs('cfg-sso-enabled').checked,
-      sso_check: qs('cfg-sso-check').value
+      sso_check: opts.checkboxOnly ? '' : qs('cfg-sso-check').value
     },
     map: {
-      base_name: qs('cfg-base-name').value,
-      base_lat: qs('cfg-base-lat').value,
-      base_lon: qs('cfg-base-lon').value,
-      base_zoom: qs('cfg-base-zoom').value,
-      map_auto_center_idle_sec: qs('cfg-map-idle').value,
-      heading_ref_deg: qs('cfg-heading-ref').value
+      base_name: opts.checkboxOnly ? (mapBase.base_name || 'Node Center') : qs('cfg-base-name').value,
+      base_lat: opts.checkboxOnly ? (mapBase.base_lat || '') : qs('cfg-base-lat').value,
+      base_lon: opts.checkboxOnly ? (mapBase.base_lon || '') : qs('cfg-base-lon').value,
+      base_zoom: opts.checkboxOnly ? (mapBase.base_zoom || 5) : qs('cfg-base-zoom').value,
+      map_auto_center_idle_sec: opts.checkboxOnly ? (mapBase.map_auto_center_idle_sec || 20) : qs('cfg-map-idle').value,
+      heading_ref_deg: opts.checkboxOnly ? (mapBase.heading_ref_deg || 0) : qs('cfg-heading-ref').value
     },
     aggregate: {
-      cache_ttl_hours: qs('cfg-aggregate-ttl').value
+      cache_ttl_hours: opts.checkboxOnly ? (aggregateBase.cache_ttl_hours || 24) : qs('cfg-aggregate-ttl').value
+    },
+    notify: {
+      enabled: qs('cfg-notify-enabled').checked,
+      node_status_enabled: qs('cfg-notify-node-status').checked,
+      wecom_key: opts.checkboxOnly ? '' : qs('cfg-wecom-key').value
     }
   };
 }
-async function saveSettings(){
-  setStatus('status-settings', '正在保存...', false);
-  const data = await postJson('/api/settings/save', collectSettings());
-  qs('cfg-auth-pass').value = '';
-  qs('cfg-sso-check').value = '';
+function sameViewerJson(a, b){
+  try{ return JSON.stringify(a) === JSON.stringify(b); }catch(_e){ return false; }
+}
+function syncViewerDraftState(){
+  if(!viewerSettingsInitial) return;
+  var dirty = !sameViewerJson(viewerSettingsInitial, collectSettings());
+  if(qs('draft-title')) qs('draft-title').textContent = dirty ? '有未保存修改' : '当前没有未保存修改';
+  if(qs('draft-meta')) qs('draft-meta').textContent = dirty ? '复选框会立即保存，输入内容需点击保存。' : '当前没有未保存修改。';
+}
+async function saveSettings(opts){
+  opts = opts || {};
+  setStatus('status-settings', opts.checkboxOnly ? '正在保存勾选项...' : '正在保存...', false);
+  var payload = collectSettings({checkboxOnly:!!opts.checkboxOnly});
+  const data = await postJson('/api/settings/save', payload);
+  if(opts.checkboxOnly){
+    viewerSettingsInitial = payload;
+  }else{
+    qs('cfg-auth-pass').value = '';
+    qs('cfg-sso-check').value = '';
+    viewerSettingsInitial = collectSettings();
+  }
   renderHost(data.host || {});
   renderEula(data.eula || {});
   if(data.aggregate && qs('cfg-aggregate-ttl')) qs('cfg-aggregate-ttl').value = numberOrBlank(data.aggregate.cache_ttl_hours || 24);
-  setStatus('status-settings', '已保存。密码 ' + (data.auth.password_configured ? '已配置' : '未配置') + ' · SSO ' + (data.auth.sso_configured ? '已配置' : '未配置'), false);
+  if(data.notify) setStatus('status-notify', '企业微信 ' + (data.notify.wecom_configured ? '已配置' : '未配置'), !data.notify.wecom_configured && !!data.notify.enabled);
+  if(!opts.checkboxOnly) viewerSettingsInitial = collectSettings();
+  syncViewerDraftState();
+  setStatus('status-settings', (opts.checkboxOnly ? '勾选项已保存。' : '已保存。') + '密码 ' + (data.auth.password_configured ? '已配置' : '未配置') + ' · SSO ' + (data.auth.sso_configured ? '已配置' : '未配置'), false);
 }
 function renderAggregateMeta(data){
   data = data || {};
@@ -290,6 +346,11 @@ async function clearAggregate(){
   const data = await postJson('/api/history/aggregate/clear', {});
   if(qs('aggregate-meta')) qs('aggregate-meta').textContent = '已清空缓存: ' + String(data.cleared || 0);
 }
+async function testNotify(){
+  setStatus('status-notify', '正在发送测试通知...', false);
+  const data = await postJson('/api/settings/notify/test', {});
+  setStatus('status-notify', data.message || '测试通知已发送。', false);
+}
 function renderEula(eula){
   setStatus('status-eula', (eula.accepted ? '当前已同意许可协议。' : '当前未同意许可协议。') + '\n状态文件: ' + String(eula.set_path || 'viewer/cfg.db'), !eula.accepted);
   if(qs('btn-eula-revoke')) qs('btn-eula-revoke').disabled = !eula.accepted;
@@ -307,12 +368,13 @@ qs('btn-back').addEventListener('click', function(){ location.href='/'; });
 qs('btn-nodes').addEventListener('click', function(){ location.href='/nodes'; });
 qs('btn-logout').addEventListener('click', async function(){ try{ await postJson('/api/logout', {}); }finally{ location.href='/'; } });
 qs('btn-theme').addEventListener('click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });
-qs('btn-reload-view').addEventListener('click', function(){ loadSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
-qs('btn-refresh-host').addEventListener('click', function(){ loadSettings().catch(function(e){ setStatus('host-meta', e.message || e, true); }); });
+qs('btn-reload-view').addEventListener('click', function(){ withViewerPageLoading('Viewer 设置', '正在读取数据', loadSettings).catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
+qs('btn-refresh-host').addEventListener('click', function(){ withViewerPageLoading('Viewer 主机状态', '正在读取数据', loadSettings).catch(function(e){ setStatus('host-meta', e.message || e, true); }); });
 qs('btn-save-settings').addEventListener('click', function(){ saveSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); }); });
-qs('btn-aggregate-refresh').addEventListener('click', function(){ loadAggregate(true).catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
-qs('btn-aggregate-load').addEventListener('click', function(){ loadAggregate(false).catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
+qs('btn-aggregate-refresh').addEventListener('click', function(){ withViewerPageLoading('历史聚合数据', '正在读取数据', function(){ return loadAggregate(true); }).catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
+qs('btn-aggregate-load').addEventListener('click', function(){ withViewerPageLoading('历史聚合缓存', '正在读取数据', function(){ return loadAggregate(false); }).catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
 qs('btn-aggregate-clear').addEventListener('click', function(){ clearAggregate().catch(function(e){ if(qs('aggregate-meta')) qs('aggregate-meta').textContent = e.message || e; }); });
+qs('btn-notify-test').addEventListener('click', function(){ testNotify().catch(function(e){ setStatus('status-notify', e.message || e, true); }); });
 qs('btn-browser-loc').addEventListener('click', function(){
   if(!navigator.geolocation){ setStatus('status-settings', '浏览器不支持定位。', true); return; }
   navigator.geolocation.getCurrentPosition(function(pos){
@@ -325,7 +387,19 @@ qs('btn-clear-base-loc').addEventListener('click', function(){ qs('cfg-base-lat'
 qs('btn-eula-view').addEventListener('click', function(){ location.href='/eula?next=/settings'; });
 qs('btn-eula-revoke').addEventListener('click', function(){ revokeEula().catch(function(e){ setStatus('status-eula', e.message || e, true); }); });
 qsa('[data-jump]').forEach(function(btn){ btn.addEventListener('click', function(){ jumpTo(btn.getAttribute('data-jump')); }); });
+document.addEventListener('input', function(ev){
+  var target = ev && ev.target;
+  if(target && target.closest && target.closest('.panel[data-tab="visual"]')) syncViewerDraftState();
+});
+document.addEventListener('change', function(ev){
+  var target = ev && ev.target;
+  if(!(target && target.closest && target.closest('.panel[data-tab="visual"]'))) return;
+  syncViewerDraftState();
+  if(String(target.type || '').toLowerCase() === 'checkbox'){
+    saveSettings({checkboxOnly:true}).catch(function(e){ setStatus('status-settings', e.message || e, true); });
+  }
+});
 applyTheme(loadTheme());
-loadSettings().catch(function(e){ setStatus('status-settings', e.message || e, true); });
+withViewerPageLoading('Viewer 设置', '正在读取数据', loadSettings).catch(function(e){ setStatus('status-settings', e.message || e, true); });
 """
     return station_page("Viewer 设置", body, script)

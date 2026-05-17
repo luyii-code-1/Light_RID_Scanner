@@ -269,7 +269,68 @@ def _history_decode_old_payloads(data: bytes) -> dict:
             merged["system"] = decoded.get("system")
     return merged
 
-def _history_decode_raw_packet(data: bytes, hist: dict, target_sn: str) -> tuple[dict | None, str, bytes]:
+def _history_parse_mode_key(mode: str | None) -> str:
+    raw = str(mode or "auto").strip().lower().replace("-", "_")
+    aliases = {
+        "": "auto",
+        "default": "auto",
+        "new": "dji_new",
+        "new_fw": "dji_new",
+        "new_firmware": "dji_new",
+        "dji": "dji_new",
+        "gb": "dji_gb46750",
+        "gb46750": "dji_gb46750",
+        "enterprise": "dji_enterprise",
+        "f119": "dji_enterprise",
+        "private": "dji_enterprise",
+        "old": "odid_legacy",
+        "legacy": "odid_legacy",
+        "odid": "odid_legacy",
+    }
+    raw = aliases.get(raw, raw)
+    return raw if raw in {"auto", "dji_new", "dji_gb46750", "dji_enterprise", "odid_legacy"} else "auto"
+
+def _history_decode_dji_vendor_mode(
+    data: bytes,
+    hist: dict,
+    target_sn: str,
+    mode: str,
+) -> tuple[dict | None, str, bytes]:
+    ssid_hint = _history_ssid_hint(hist, target_sn)
+    model_hint = str(hist.get("model") or "")
+    pos = data.find(DJI_RID_VENDOR_PREFIX)
+    if pos < 0:
+        return None, "", data
+    body = data[pos:]
+    try:
+        if mode == "dji_gb46750":
+            parsed = parse_dji_gb46750(body, ssid_hint)
+            return _dji_vendor_parsed_to_decoded(parsed), "new", body
+        if mode == "dji_enterprise":
+            parsed = parse_dji_enterprise_private(body, ssid_hint, model_hint)
+            return _dji_vendor_parsed_to_decoded(parsed), "new", body
+        decoded = decode_new_firmware_payload(body, ssid_hint, model_hint)
+        return decoded, "new", body
+    except Exception:
+        return None, "", body
+
+def _history_decode_raw_packet(
+    data: bytes,
+    hist: dict,
+    target_sn: str,
+    mode: str | None = "auto",
+) -> tuple[dict | None, str, bytes, str]:
+    mode_key = _history_parse_mode_key(mode)
+    if mode_key == "odid_legacy":
+        decoded = _history_decode_old_payloads(data)
+        if decoded.get("basic_id") or decoded.get("location") or decoded.get("system"):
+            return decoded, "old", data, mode_key
+        return None, "", data, mode_key
+    if mode_key in {"dji_new", "dji_gb46750", "dji_enterprise"}:
+        decoded, firmware_type, body = _history_decode_dji_vendor_mode(data, hist, target_sn, mode_key)
+        if decoded:
+            return decoded, firmware_type, body, mode_key
+        return None, "", body, mode_key
     ssid_hint = _history_ssid_hint(hist, target_sn)
     model_hint = str(hist.get("model") or "")
     try:
@@ -278,17 +339,17 @@ def _history_decode_raw_packet(data: bytes, hist: dict, target_sn: str) -> tuple
         new_payloads = []
     if new_payloads:
         body, decoded = new_payloads[-1]
-        return decoded, "new", bytes(body or b"")
+        return decoded, "new", bytes(body or b""), "auto"
     pos = data.find(DJI_RID_VENDOR_PREFIX)
     if pos >= 0:
         body = data[pos:]
         decoded = decode_new_firmware_payload(body, ssid_hint, model_hint)
         if decoded:
-            return decoded, "new", body
+            return decoded, "new", body, "auto"
     decoded = _history_decode_old_payloads(data)
     if decoded.get("basic_id") or decoded.get("location") or decoded.get("system"):
-        return decoded, "old", data
-    return None, "", data
+        return decoded, "old", data, "auto"
+    return None, "", data, "auto"
 
 def _history_track_replace_latest(record: dict, lat, lon, wall_ts: float) -> None:
     try:
@@ -454,7 +515,7 @@ def reidentify_recent_history_packets(limit: int = HISTORY_RAW_PACKET_LIMIT) -> 
             if len(errors) < 8:
                 errors.append({"sn": target_sn, "error": "raw packet has no usable hex"})
             continue
-        decoded, firmware_type, body = _history_decode_raw_packet(data, hist, target_sn)
+        decoded, firmware_type, body, used_mode = _history_decode_raw_packet(data, hist, target_sn, "auto")
         if not decoded:
             failed_count += 1
             if len(errors) < 8:
@@ -467,7 +528,7 @@ def reidentify_recent_history_packets(limit: int = HISTORY_RAW_PACKET_LIMIT) -> 
         updated_sns.add(sn_now)
         if sn_now and sn_now != target_sn:
             migrated_count += 1
-        fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or "unknown")
+        fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or used_mode or "unknown")
         formats[fmt] = int(formats.get(fmt, 0)) + 1
     saved = save_history_store(force=True)
     _log(
@@ -492,6 +553,45 @@ def reidentify_recent_history_packets(limit: int = HISTORY_RAW_PACKET_LIMIT) -> 
 
 def reidentify_latest_history_packet() -> dict:
     return reidentify_recent_history_packets(limit=HISTORY_RAW_PACKET_LIMIT)
+
+def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict:
+    target_sn = str(sn or "").strip()
+    if not target_sn:
+        return {"ok": False, "error": "sn required"}
+    mode_key = _history_parse_mode_key(mode)
+    with state_lock:
+        hist = history_table.get(target_sn) or state_table.get(target_sn)
+        if not isinstance(hist, dict):
+            return {"ok": False, "error": "aircraft not found", "sn": target_sn, "mode": mode_key}
+        raw_packets = [dict(x) for x in list(hist.get("raw_packets") or []) if isinstance(x, dict) and str(x.get("hex") or "").strip()]
+        hist_copy = dict(hist)
+    if not raw_packets:
+        return {"ok": False, "error": "no raw packet for aircraft", "sn": target_sn, "mode": mode_key}
+    raw = raw_packets[-1]
+    data = _history_raw_hex_to_bytes(str(raw.get("hex") or ""))
+    if not data:
+        return {"ok": False, "error": "raw packet has no usable hex", "sn": target_sn, "mode": mode_key}
+    decoded, firmware_type, body, used_mode = _history_decode_raw_packet(data, hist_copy, target_sn, mode_key)
+    if not decoded:
+        return {"ok": False, "error": "raw packet could not be decoded with selected mode", "sn": target_sn, "mode": mode_key}
+    with state_lock:
+        current_hist = history_table.get(target_sn) or hist_copy
+        record = _history_apply_reidentified_locked(target_sn, current_hist, raw, decoded, firmware_type, body)
+    saved = save_history_store(force=True)
+    sn_now = str(record.get("sn") or target_sn)
+    fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or used_mode)
+    _log(f"[INFO] history packet reidentified: sn={target_sn} -> {sn_now} mode={used_mode} format={fmt}")
+    return {
+        "ok": True,
+        "sn": target_sn,
+        "sn_now": sn_now,
+        "mode": mode_key,
+        "used_mode": used_mode,
+        "firmware_type": firmware_type,
+        "format": fmt,
+        "saved": bool(saved),
+        "message": f"已以 {mode_key} 方式重新解析 {sn_now}",
+    }
 
 def state_update(src_mac: str, decoded: dict, rssi: int | None,
                  ch: int, ch_assumed: bool, pl_sig: int,
@@ -1274,6 +1374,7 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "GET", "path": "/api/v1/drones/{sn}", "desc": "Drone detail"},
         {"method": "GET", "path": "/api/v1/tracks/{sn}", "desc": "Track by SN"},
         {"method": "GET", "path": "/api/v1/aps", "desc": "Realtime AP list"},
+        {"method": "GET", "path": "/api/v1/metrics?window=12h|24h|7d", "desc": "Host metrics for token API clients"},
         {"method": "GET", "path": "/api/v1/logs?type=event|scan|ap&limit=200", "desc": "Logs"},
         {"method": "GET", "path": "/api/settings/export/settings", "desc": "Export settings file"},
         {"method": "GET", "path": "/api/settings/export/scan-data", "desc": "Export scan data"},

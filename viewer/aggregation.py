@@ -43,7 +43,11 @@ def _request_json(
     body: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, int | None]:
     url = base_url.rstrip("/") + path
-    headers = {"Accept": "application/json", "User-Agent": f"LightRIDNodeCenter/{APP_VERSION}"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"LightRIDNodeCenter/{APP_VERSION}",
+        "X-LightRID-Page": "1",
+    }
     if token:
         headers["X-API-Token"] = token
         headers["Authorization"] = "Bearer " + token
@@ -60,6 +64,12 @@ def _request_json(
             return json.loads(raw.decode("utf-8", "replace")), None, int(resp.status)
     except urllib.error.HTTPError as exc:
         msg = exc.read(8192).decode("utf-8", "replace")
+        try:
+            payload = json.loads(msg)
+            if isinstance(payload, dict):
+                msg = str(payload.get("error") or payload.get("message") or msg)
+        except Exception:
+            pass
         return None, msg or exc.reason, int(exc.code)
     except Exception as exc:
         return None, str(exc), None
@@ -254,7 +264,7 @@ def _merge_rows_by_sn(rows: list[dict[str, Any]], *, aggregate_history: bool = F
         best["_node_names"] = names
         best["_node_observations"] = versions
         best["discovered_base_names"] = names
-        best["discovered_base_text"] = "发现的基站:" + "".join("{" + x + "}" for x in names) if names else ""
+        best["discovered_base_text"] = "、".join(names) if names else ""
         best["viewer_aggregate_count"] = len(items)
         best["lost"] = all(bool(x.get("lost")) for x in items)
         best["archived"] = all(bool(x.get("archived")) for x in items)
@@ -406,9 +416,23 @@ def fetch_node_metrics(node: dict[str, Any], window: str = "12h") -> dict[str, A
     payload, err, code = _fetch_json(
         str(node.get("base_url") or ""),
         str(node.get("token") or ""),
-        "/api/settings/metrics?window=" + urllib.parse.quote(raw, safe=""),
+        "/api/v1/metrics?window=" + urllib.parse.quote(raw, safe=""),
     )
+    if payload is None and code in (404, 405):
+        payload, err, code = _fetch_json(
+            str(node.get("base_url") or ""),
+            str(node.get("token") or ""),
+            "/api/settings/metrics?window=" + urllib.parse.quote(raw, safe=""),
+        )
     if payload is None:
+        if str(err or "").strip().lower() == "login required":
+            return {
+                "ok": True,
+                "enabled": False,
+                "error": "子站负载接口需要网页登录会话；请更新子站以提供 /api/v1/metrics Token API。",
+                "status_code": code,
+                "items": [],
+            }
         return {"ok": False, "error": err or "request failed", "status_code": code, "items": []}
     items = payload.get("items")
     if not isinstance(items, list):
@@ -438,7 +462,52 @@ def run_node_operation(node: dict[str, Any], operation: str) -> dict[str, Any]:
         return post_node_json(node, "/api/admin/restart", {"save": False, "args": ""})
     if op == "update_models":
         return post_node_json(node, "/api/settings/models/update", {"url": ""})
+    if op in {"reidentify_recent", "force_reparse"}:
+        return post_node_json(node, "/api/v1/history/reidentify-recent", {"limit": 100})
     return {"ok": False, "error": f"unsupported operation: {operation}"}
+
+
+def reparse_node_aircraft(store: ConfigStore, sn: str, mode: str = "auto") -> dict[str, Any]:
+    target_sn = str(sn or "").strip()
+    if not target_sn:
+        return {"ok": False, "error": "sn required", "results": []}
+    mode_key = str(mode or "auto").strip() or "auto"
+    nodes = [node for node in store.list_nodes(reveal_token=True) if bool(node.get("enabled"))]
+    results: list[dict[str, Any]] = []
+    if nodes:
+        with ThreadPoolExecutor(max_workers=max(1, min(12, len(nodes)))) as pool:
+            futures = {
+                pool.submit(post_node_json, node, "/api/v1/history/reparse", {"sn": target_sn, "mode": mode_key}): node
+                for node in nodes
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                try:
+                    payload = future.result()
+                except Exception as exc:
+                    payload = {"ok": False, "error": str(exc)}
+                results.append(
+                    {
+                        "id": node.get("id"),
+                        "name": node.get("name"),
+                        "base_url": node.get("base_url"),
+                        "ok": bool(payload.get("ok")),
+                        "error": payload.get("error"),
+                        "response": payload,
+                    }
+                )
+    ok_count = sum(1 for item in results if item.get("ok"))
+    if ok_count:
+        store.clear_cache_payload(None)
+    return {
+        "ok": bool(ok_count),
+        "sn": target_sn,
+        "mode": mode_key,
+        "updated_nodes": ok_count,
+        "node_count": len(results),
+        "results": results,
+        "message": f"远程重新解析完成: {ok_count}/{len(results)} 个节点",
+    }
 
 
 def _live_cache_key(store: ConfigStore, include_hw: bool) -> str:
@@ -590,6 +659,7 @@ def viewer_state_snapshot(store: ConfigStore) -> dict[str, Any]:
         "map_drones": [x for x in drones if not bool(x.get("archived"))],
         "logs": logs[-80:],
         "logs_seq": int(time.time()),
+        "viewer_nodes": nodes,
         "aps": [],
         "aps_seq": int(time.time()),
         "aps_total": 0,
@@ -615,5 +685,59 @@ def viewer_state_snapshot(store: ConfigStore) -> dict[str, Any]:
             "sniff_idle_sec": 0,
             "sniff_last_pkt": time.strftime("%H:%M:%S"),
             "settings_path": "/settings",
+        },
+    }
+
+
+def viewer_loading_snapshot(store: ConfigStore) -> dict[str, Any]:
+    """Return an immediate shell snapshot without touching remote stations."""
+    map_cfg = store.map_config()
+    nodes = store.list_nodes(reveal_token=False)
+    enabled = [node for node in nodes if bool(node.get("enabled"))]
+    node_count = len(nodes)
+    enabled_count = len(enabled)
+    target_names = [
+        str(node.get("name") or node.get("base_url") or "").strip()
+        for node in enabled
+        if str(node.get("name") or node.get("base_url") or "").strip()
+    ]
+    return {
+        "ts": time.strftime("%H:%M:%S"),
+        "ch": "node-center",
+        "drones": [],
+        "map_drones": [],
+        "logs": [
+            f"[loading] 正在向节点获取数据: 已配置 {node_count} 个节点，启用 {enabled_count} 个。",
+            "[loading] 首页框架已加载，节点数据返回后会自动更新。",
+        ],
+        "logs_seq": int(time.time()),
+        "aps": [],
+        "aps_seq": int(time.time()),
+        "aps_total": 0,
+        "meta": {
+            "dji_lookup_url": "",
+            "allow_restart": False,
+            "restart_args_current": "",
+            "restart_args_saved": "",
+            "base_name": map_cfg.get("base_name") or "Node Center",
+            "base_lat": map_cfg.get("base_lat"),
+            "base_lon": map_cfg.get("base_lon"),
+            "base_zoom": map_cfg.get("base_zoom") or 5,
+            "heading_ref_deg": map_cfg.get("heading_ref_deg") or 0,
+            "map_auto_center_idle_sec": map_cfg.get("map_auto_center_idle_sec") or 20,
+            "config_path": str(store.path),
+            "iface_selected": "viewer",
+            "scan_wifi_fast": False,
+            "wifi_fast_supported": False,
+            "wifi_fast_msg": "viewer aggregates remote station APIs",
+            "sniff_state": "loading",
+            "sniff_msg": "正在向节点获取数据",
+            "sniff_iface": "node-center",
+            "sniff_idle_sec": 0,
+            "sniff_last_pkt": "",
+            "settings_path": "/settings",
+            "viewer_loading": True,
+            "viewer_loading_targets": target_names[:8],
+            "viewer_loading_timeout_sec": 15,
         },
     }

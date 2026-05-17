@@ -124,21 +124,33 @@ header h1{font-size:20px;font-weight:600;color:var(--txt);letter-spacing:.01em;t
 }
 .security-banner .btn-mini{flex:0 0 auto}
 .banner-stack{
-  position:fixed;top:10px;left:50%;transform:translateX(-50%);
-  display:flex;flex-direction:column;gap:8px;z-index:9998;
-  width:min(92vw, 860px);pointer-events:none;
+  position:fixed;top:74px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:10px;z-index:9998;
+  width:auto;max-width:calc(100vw - 28px);pointer-events:none;
 }
 .banner{
-  opacity:0;transform:translateY(-6px);
-  transition:opacity .18s ease,transform .18s ease;
-  border:1px solid var(--border);border-radius:4px;
-  background:var(--panel);color:var(--txt);
-  padding:9px 12px;font-size:13px;line-height:1.35;
-  box-shadow:0 8px 18px rgba(0,0,0,.16);
+  opacity:0;transform:translateY(-8px) scale(.98);position:relative;overflow:hidden;
+  transition:opacity .2s ease,transform .2s ease;
+  width:min(420px,calc(100vw - 32px));min-height:78px;pointer-events:auto;cursor:pointer;
+  border:1px solid var(--border);border-radius:8px;
+  background:color-mix(in srgb,var(--panel) 92%,transparent);color:var(--txt);
+  padding:14px 16px 14px 18px;font:650 13px/1.45 var(--font-ui);
+  box-shadow:0 16px 42px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.035);
+  backdrop-filter:blur(10px);
 }
-.banner.show{opacity:1;transform:translateY(0)}
+.banner:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--blue)}
+.banner.show{opacity:1;transform:translateY(0) scale(1)}
 .banner.ok{border-color:color-mix(in srgb, var(--green) 40%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--panel));color:color-mix(in srgb, var(--green) 72%, white)}
 .banner.warn{border-color:color-mix(in srgb, var(--yellow) 34%, var(--border));background:color-mix(in srgb, var(--yellow) 10%, var(--panel));color:#ffd9a9}
+.banner.ok:before{background:var(--green)}
+.banner.warn:before{background:var(--yellow)}
+.rid-loading-overlay{position:fixed;inset:0;z-index:2600;display:none;align-items:center;justify-content:center;pointer-events:none;background:radial-gradient(circle at center,color-mix(in srgb,var(--bg) 20%,transparent),transparent 46%)}
+.rid-loading-overlay.show{display:flex}
+.rid-loading-box{min-width:min(360px,calc(100vw - 44px));max-width:min(520px,calc(100vw - 44px));display:grid;justify-items:center;gap:12px;padding:22px 24px;border:1px solid color-mix(in srgb,var(--blue) 32%,var(--border));border-radius:8px;background:color-mix(in srgb,var(--panel) 92%,transparent);box-shadow:0 18px 54px rgba(0,0,0,.36),0 0 0 1px rgba(255,255,255,.04);backdrop-filter:blur(10px)}
+.rid-loading-spinner{width:42px;height:42px;border-radius:50%;border:3px solid color-mix(in srgb,var(--blue) 18%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .82s linear infinite}
+.rid-loading-title{font:700 17px/1.2 var(--font-ui);color:var(--txt)}
+.rid-loading-copy{font:600 13px/1.45 var(--font-ui);color:var(--dim);text-align:center;max-width:44ch}
+@keyframes ridLoadingSpin{to{transform:rotate(360deg)}}
 .notify-center-button{
   position:fixed;right:18px;bottom:18px;z-index:9999;width:54px;height:54px;border-radius:50%;
   border:1px solid color-mix(in srgb, var(--blue) 40%, var(--border));
@@ -637,9 +649,10 @@ body.theme-light .sniff-banner.warn{
   background:color-mix(in srgb, var(--yellow) 12%, var(--panel));
   color:#8a6800;
 }
-body.theme-light .banner{border-color:var(--border);background:rgba(255,255,255,.97);color:var(--txt)}
+body.theme-light .banner{border-color:var(--border);background:rgba(255,255,255,.96);color:var(--txt);box-shadow:0 16px 38px rgba(0,0,0,.12)}
 body.theme-light .banner.ok{border-color:color-mix(in srgb, var(--green) 38%, var(--border));background:color-mix(in srgb, var(--green) 10%, var(--panel));color:#14532d}
 body.theme-light .banner.warn{border-color:color-mix(in srgb, var(--yellow) 34%, var(--border));background:color-mix(in srgb, var(--yellow) 12%, var(--panel));color:#7c2d12}
+body.theme-light .rid-loading-box{background:rgba(255,255,255,.94);box-shadow:0 18px 48px rgba(0,0,0,.14)}
  
 footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
 </style>
@@ -897,18 +910,11 @@ function _trackTsSec(p){
   return (isFinite(ts) && ts > 0) ? ts : null;
 }
 function activeHistoryTrackFilterTs(){
-  var ts = Number(historyTrackFilterTs);
-  return (isFinite(ts) && ts > 0) ? ts : null;
+  return null;
 }
 function filterTrackByHistoryTime(track){
   var arr = Array.isArray(track) ? track.slice() : [];
-  if(currentAppPage() !== 'history') return arr;
-  var start = activeHistoryTrackFilterTs();
-  if(start == null) return arr;
-  return arr.filter(function(p){
-    var ts = _trackTsSec(p);
-    return ts == null ? true : (ts >= start);
-  });
+  return arr;
 }
 function filterTrackForDisplay(track, page, sn){
   if(page !== 'history') return [];
@@ -1506,14 +1512,59 @@ function showBanner(text, kind, timeoutMs, opts){
   }
   var node = document.createElement('div');
   node.className = 'banner ' + (kind || 'info');
+  node.title = '点击关闭';
   node.textContent = String(text || '');
   host.appendChild(node);
   setTimeout(function(){ node.classList.add('show'); }, 10);
   var ttl = Math.max(1200, Number(timeoutMs || 3200));
-  setTimeout(function(){
+  var closed = false;
+  function closeBanner(){
+    if(closed) return;
+    closed = true;
     node.classList.remove('show');
     setTimeout(function(){ if(node.parentNode) node.parentNode.removeChild(node); }, 280);
-  }, ttl);
+  }
+  node.addEventListener('click', closeBanner);
+  setTimeout(closeBanner, ttl);
+}
+var initialLoadingStartedAt = 0;
+var initialLoadingTimeoutSec = 15;
+var initialLoadingTimer = null;
+function loadingTextForTarget(target){
+  if(!initialLoadingStartedAt) initialLoadingStartedAt = Date.now();
+  var elapsed = Math.floor((Date.now() - initialLoadingStartedAt) / 1000);
+  var remain = Math.max(0, initialLoadingTimeoutSec - elapsed);
+  var name = String(target || '本机基站');
+  if(remain > 0) return '正在读取 ' + name + ' 数据，' + remain + 's 后超时';
+  return '读取 ' + name + ' 数据超时，仍在等待返回';
+}
+function showInitialDataLoading(target, title){
+  var host = qs('rid-loading-overlay');
+  if(!host){
+    host = document.createElement('div');
+    host.id = 'rid-loading-overlay';
+    host.className = 'rid-loading-overlay';
+    host.innerHTML = '<div class="rid-loading-box"><div class="rid-loading-spinner"></div><div class="rid-loading-title"></div><div class="rid-loading-copy"></div></div>';
+    document.body.appendChild(host);
+  }
+  var titleEl = host.querySelector('.rid-loading-title');
+  var copyEl = host.querySelector('.rid-loading-copy');
+  function tickLoading(){
+    if(titleEl) titleEl.textContent = String(title || '正在读取数据');
+    if(copyEl) copyEl.textContent = loadingTextForTarget(target);
+  }
+  tickLoading();
+  host.classList.add('show');
+  if(initialLoadingTimer) clearInterval(initialLoadingTimer);
+  initialLoadingTimer = setInterval(tickLoading, 1000);
+}
+function clearInitialDataLoading(){
+  var host = qs('rid-loading-overlay');
+  if(host) host.classList.remove('show');
+  if(initialLoadingTimer){
+    clearInterval(initialLoadingTimer);
+    initialLoadingTimer = null;
+  }
 }
 function notificationKindLabel(kind){
   kind = String(kind || 'info');
@@ -1703,7 +1754,7 @@ function pushWebNotification(title, body, tag){
   }catch(_e){}
 }
 function replayPreviewActive(){
-  return currentAppPage() === 'history' && (!!replaySyncPaused || !!(replayState.points || []).length);
+  return currentAppPage() === 'history' && !!replaySyncPaused;
 }
 function resetDroneNotificationBaseline(list){
   var next = {};
@@ -3450,6 +3501,7 @@ function setWsState(ok){
 }
 
 function onData(d){
+  clearInitialDataLoading();
   buildExtraUi();
   applyMeta((d && d.meta) || {});
   qs('cur-ts').textContent = d.ts;
@@ -3515,6 +3567,7 @@ loadTrackPrefs();
 consumeFreezeOnHomeRequest();
 applyTheme(loadThemePref());
 buildExtraUi();
+showInitialDataLoading('本机基站', '正在读取数据');
 connect();
 
 var map = null, markers = {}, pilotMarkers = {}, trackLines = {}, trackLineSig = {}, twsLines = {}, baseMarker = null;
@@ -4000,7 +4053,6 @@ function replayTsToSlider(ts){
 }
 function replayBuildPoints(){
   var selected = historyVisibleSnList(latestDroneRows);
-  var filterStart = activeHistoryTrackFilterTs();
   var points = [];
   var loadedCount = 0;
   selected.forEach(function(sn){
@@ -4010,7 +4062,6 @@ function replayBuildPoints(){
       var p = tr[i] || {};
       var ts = _trackTsSec(p);
       if(ts == null) continue;
-      if(filterStart != null && ts < Number(filterStart)) continue;
       if(!validMapCoord(p.lat, p.lon)) continue;
       points.push({sn:String(sn), point:p, ts:ts, sourceIndex:i});
     }
@@ -4045,47 +4096,27 @@ function ensureTrackReplayCard(){
   card.id = 'track-replay-card';
   card.className = 'track-replay-card';
   card.innerHTML =
-    '<div class="track-replay-head"><div><div class="track-replay-title">轨迹时间线</div><div id="track-replay-count" class="track-replay-sub">-</div></div><button class="btn-mini" id="btn-replay-play" type="button">播放</button></div>'+
+    '<div class="track-replay-head"><div><div class="track-replay-title">轨迹回放</div><div id="track-replay-count" class="track-replay-sub">-</div></div></div>'+
     '<div class="track-replay-time" id="track-history-filter-time">-</div>'+
-    '<div class="track-replay-ranges">'+
-    '  <input id="history-filter-progress" type="range" min="0" max="1000" step="1" value="0" aria-label="轨迹时间线过滤">'+
-    '</div>'+
-    '<div class="track-replay-controls">'+
-    '  <button class="btn-mini" id="btn-history-filter-reset" type="button">显示全部</button>'+
-    '</div>'+
     '<div class="track-replay-time" id="track-replay-time">-</div>'+
     '<div class="track-replay-ranges">'+
       '  <input id="replay-progress" type="range" min="0" max="1000" step="1" value="0" aria-label="重放进度">'+
     '</div>'+
     '<div class="track-replay-controls">'+
-    '  <button class="btn-mini" id="btn-replay-reset" type="button">重放起点</button>'+
-    '  <button class="btn-mini" id="btn-replay-apply-live" type="button">更新实时</button>'+
+    '  <button class="btn-mini" id="btn-replay-play" type="button">播放</button>'+
+    '  <button class="btn-mini warn" id="btn-replay-exit" type="button" style="display:none">退出回放</button>'+
     '  <label class="track-speed-label"><span>速度</span><input id="replay-speed" type="range" min="1" max="10" step="0.1" value="1" aria-label="重放速度"><span id="replay-speed-value" class="track-speed-value">1.0x</span></label>'+
     '  <button class="btn-mini" id="btn-replay-100x" type="button">100x</button>'+
     '</div>'+
-    '<div class="track-replay-status" id="track-replay-status">勾选飞机后，重放进度按轨迹点逐点回放。</div>';
+    '<div class="track-replay-status" id="track-replay-status">勾选飞机后，默认显示最后位置和完整轨迹。</div>';
   panel.appendChild(card);
-  var historyFilter = qs('history-filter-progress');
-  if(historyFilter) historyFilter.addEventListener('input', onHistoryTrackFilterInput);
-  var historyReset = qs('btn-history-filter-reset');
-  if(historyReset) historyReset.addEventListener('click', resetHistoryTrackFilter);
   var progress = qs('replay-progress');
   if(progress) progress.addEventListener('input', onReplayRangeInput);
   var play = qs('btn-replay-play');
   if(play) play.addEventListener('click', function(){ setReplayPlaying(!replayState.playing); });
-  var reset = qs('btn-replay-reset');
-  if(reset) reset.addEventListener('click', resetReplayRange);
-  var applyLive = qs('btn-replay-apply-live');
-  if(applyLive) applyLive.addEventListener('click', function(){
-    clearReplaySelection({render:false});
-    var applied = applyPendingLiveData();
-    if(!applied){
-      renderReplayCard();
-      renderDroneTable(Array.isArray(latestDroneRows) ? latestDroneRows : []);
-      if(replaySyncPaused) renderReplayFrame();
-      else updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
-    }
-    showBanner(applied ? '已手动更新到最新实时数据。' : '当前没有待更新的实时数据。', applied ? 'ok' : 'warn', 2600, {persist:false});
+  var exit = qs('btn-replay-exit');
+  if(exit) exit.addEventListener('click', function(){
+    exitReplayToLatest();
   });
   var speed = qs('replay-speed');
   if(speed) speed.addEventListener('input', function(){
@@ -4215,8 +4246,8 @@ function refreshReplayBounds(keepRange){
   replayState.start = b.min;
   replayState.end = b.max;
   if(!keepRange || replayState.cursorIndex == null || replayState.cursorIndex < 0 || replayState.cursorIndex > b.endIndex){
-    replayState.cursorIndex = 0;
-    replayState.cursor = replayState.start;
+    replayState.cursorIndex = b.endIndex;
+    replayState.cursor = replayState.max;
   }else{
     replayState.cursorIndex = Math.max(0, Math.min(b.endIndex, Math.round(Number(replayState.cursorIndex))));
     replayState.cursor = replayState.points[replayState.cursorIndex] ? Number(replayState.points[replayState.cursorIndex].ts) : replayState.start;
@@ -4230,7 +4261,6 @@ function renderReplayCard(){
   card.style.display = (page === 'history') ? '' : 'none';
   var historyBounds = collectHistoryTrackBounds();
   normalizeHistoryTrackFilterTs(historyBounds);
-  var activeFilter = activeHistoryTrackFilterTs();
   var b = collectReplayBounds();
   var pointCount = Number(b.count || 0);
   var selectedCount = Number(b.visibleCount || 0);
@@ -4240,26 +4270,15 @@ function renderReplayCard(){
     else if(selectedCount) countEl.textContent = '已勾选 ' + selectedCount + ' 架 · 等待轨迹点';
     else countEl.textContent = '默认仅勾选 12 小时内飞机';
   }
-  var historyFilterEl = qs('history-filter-progress');
   var hasHistoryRange = historyBounds.min != null && historyBounds.max != null && historyBounds.max > historyBounds.min;
-  if(historyFilterEl){
-    historyFilterEl.disabled = !hasHistoryRange;
-    historyFilterEl.value = String(historyFilterTsToSlider(historyBounds, activeFilter));
-  }
-  var historyFilterReset = qs('btn-history-filter-reset');
-  if(historyFilterReset){
-    historyFilterReset.disabled = !hasHistoryRange || activeFilter == null;
-  }
   var historyTime = qs('track-history-filter-time');
   if(historyTime){
     if(!historyBounds.selectedCount){
-      historyTime.textContent = '进入历史记录后默认只勾选 12 小时内飞机。勾选目标后，可拖动时间线仅显示指定时间点后的轨迹。';
+      historyTime.textContent = '进入历史记录后默认显示最后位置和完整轨迹。';
     }else if(!hasHistoryRange){
-      historyTime.textContent = historyBounds.loadedCount ? '已勾选飞机的轨迹点不足，暂不能按时间线过滤。' : '正在加载已勾选飞机的轨迹...';
-    }else if(activeFilter == null){
-      historyTime.textContent = '当前显示全部已勾选轨迹\\n范围 ' + fmtReplayTime(historyBounds.min) + '  ~  ' + fmtReplayTime(historyBounds.max);
+      historyTime.textContent = historyBounds.loadedCount ? '已勾选飞机的轨迹点不足。' : '正在加载已勾选飞机的轨迹...';
     }else{
-      historyTime.textContent = '当前显示 ' + fmtReplayTime(activeFilter) + ' 之后的轨迹\\n范围 ' + fmtReplayTime(historyBounds.min) + '  ~  ' + fmtReplayTime(historyBounds.max);
+      historyTime.textContent = '完整轨迹范围 ' + fmtReplayTime(historyBounds.min) + '  ~  ' + fmtReplayTime(historyBounds.max);
     }
   }
   var progressEl = qs('replay-progress');
@@ -4277,10 +4296,8 @@ function renderReplayCard(){
     play.disabled = !hasRange;
     play.textContent = replayState.playing ? '暂停' : '播放';
   }
-  var reset = qs('btn-replay-reset');
-  if(reset) reset.disabled = !hasRange;
-  var applyLive = qs('btn-replay-apply-live');
-  if(applyLive) applyLive.disabled = !replaySyncPaused && !frozenPendingData;
+  var exit = qs('btn-replay-exit');
+  if(exit) exit.style.display = replaySyncPaused ? '' : 'none';
   var speed = qs('replay-speed');
   if(speed){
     speed.disabled = !hasRange;
@@ -4307,8 +4324,8 @@ function renderReplayCard(){
     var speedText = speedValue ? speedValue.textContent : ((Number(replayState.speed || 1) === 100) ? '100x' : (Number(replayState.speed || 1).toFixed(1) + 'x'));
     if(!selectedCount) status.textContent = '请先在历史列表中勾选要重放的飞机。';
     else if(!hasRange) status.textContent = '已勾选飞机的轨迹正在加载或没有有效轨迹点。';
-    else if(replaySyncPaused) status.textContent = replayState.playing ? ('按轨迹点重放中，实时数据同步已暂停。倍速 ' + speedText + '。') : '手动重放预览中，实时数据只缓存，不会自动更新列表/卡片或触发通知。';
-    else status.textContent = '拖动重放进度会按轨迹点手动重放勾选飞机，列表和地图只显示勾选飞机。';
+    else if(replaySyncPaused) status.textContent = replayState.playing ? ('按轨迹点重放中，实时数据同步已暂停。倍速 ' + speedText + '。') : '回放已暂停，卡片和地图显示当前回放点。';
+    else status.textContent = '默认显示最后位置和完整轨迹；拖动进度或播放后进入回放。';
   }
   updateReplaySyncUi();
 }
@@ -4334,8 +4351,8 @@ function resetReplayRange(){
   replayState.endIndex = b.endIndex;
   replayState.start = b.min;
   replayState.end = b.max;
-  replayState.cursorIndex = 0;
-  replayState.cursor = replayState.start;
+  replayState.cursorIndex = b.endIndex;
+  replayState.cursor = replayState.max;
   replayState.userRange = false;
   renderReplayFrame();
 }
@@ -4363,6 +4380,17 @@ function applyPendingLiveData(){
   onData(d);
   return true;
 }
+function exitReplayToLatest(){
+  var hadPending = !!frozenPendingData;
+  clearReplaySelection({render:false});
+  if(!hadPending || !applyPendingLiveData()){
+    renderDroneTable(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    renderMapMiniList(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    refreshReplayBounds(false);
+    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+  }
+  showBanner('已退出回放，恢复最后状态。', 'ok', 2400, {persist:false});
+}
 function setReplaySyncPaused(paused){
   var next = !!paused;
   if(replaySyncPaused === next){
@@ -4378,8 +4406,11 @@ function setReplaySyncPaused(paused){
 function setReplayPlaying(on){
   if(!on){
     stopReplayTimer();
-    renderReplayCard();
-    updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    if(replaySyncPaused) renderReplayFrame();
+    else {
+      renderReplayCard();
+      updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    }
     return;
   }
   var b = collectReplayBounds();
@@ -4419,7 +4450,7 @@ function setReplayPlaying(on){
     replayState.cursor = Number(points[idx].ts);
     if(idx >= points.length - 1){
       stopReplayTimer();
-      showBanner('轨迹重演已结束。实时数据仍保持缓存，可手动更新。', 'ok', 2600, {persist:false});
+      showBanner('轨迹回放已结束。', 'ok', 2600, {persist:false});
     }
     renderReplayFrame();
   }, 250);
@@ -4432,17 +4463,7 @@ function replayWindowEnd(){
 }
 function filterTrackByReplay(track, sn){
   var arr = Array.isArray(track) ? track.slice() : [];
-  if(currentAppPage() !== 'history') return arr;
-  var selectedSet = replaySelectedSet();
-  if(!selectedSet[String(sn || '')]) return arr;
-  if(replayState.start == null || replayState.end == null) return arr;
-  var start = Number(replayState.start);
-  var end = Number(replayWindowEnd());
-  if(!isFinite(start) || !isFinite(end) || end < start) return arr;
-  return arr.filter(function(p){
-    var ts = _trackTsSec(p);
-    return ts == null ? true : (ts >= start && ts <= end);
-  });
+  return arr;
 }
 function replayRowsAtCursor(){
   var selectedSet = replaySelectedSet();
@@ -4485,7 +4506,7 @@ function replayRowsAtCursor(){
 function renderReplayFrame(){
   var mapRows = replayRowsAtCursor();
   renderReplayCard();
-  renderDroneTable(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+  renderDroneTable(mapRows);
   updateMap(mapRows);
 }
 function clearReplayMarkers(){
@@ -4498,7 +4519,7 @@ function clearReplayMarkers(){
 function updateReplayMarkers(){
   if(!map) return;
   var selected = Array.isArray(replayState.snList) ? replayState.snList : [];
-  if(currentAppPage() !== 'history' || !selected.length || replayState.start == null || replayWindowEnd() == null){
+  if(currentAppPage() !== 'history' || !replaySyncPaused || !selected.length || replayState.start == null || replayWindowEnd() == null){
     clearReplayMarkers();
     return;
   }
@@ -4587,7 +4608,7 @@ function updateMap(drones){
   var autoState = mapAutoState();
   var page = currentAppPage();
   var rows = Array.isArray(drones) ? drones : [];
-  var replaySelected = (page === 'history' && (replaySyncPaused || (replayState.points || []).length) && (replayState.snList || []).length)
+  var replaySelected = (page === 'history' && replaySyncPaused && (replayState.snList || []).length)
     ? (replayState.snList || []).slice()
     : null;
   var selected = replaySelected || ((page === 'history') ? historyVisibleSnList(rows) : selectedSnList());
@@ -5293,7 +5314,7 @@ body[data-page="history"] .app-page[data-page="history"]{display:block}
 #map-panel .panel-hdr,#log-panel .panel-hdr,#ap-panel .panel-hdr{cursor:default!important}
 .app-page .panel{border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08);animation:officeFade .16s ease-out both}
 .app-page .panel-hdr{font-size:13px;letter-spacing:.01em}
-.tbl-wrap,.app-page .panel,.map-mini-list,.banner{
+.tbl-wrap,.app-page .panel,.map-mini-list{
   border-radius:4px;
 }
 .tbl-wrap{
@@ -5328,6 +5349,9 @@ body.zone-alert-active header.app-shell-header,body.zone-alert-active header{box
 .info-block h3{font:600 15px/1 var(--font-ui);letter-spacing:.01em;margin-bottom:12px;color:var(--txt)}
 .info-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
 .info-actions .btn-mini{padding:7px 12px}
+.detail-reparse-box{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--yellow) 36%,var(--border));border-radius:4px;background:color-mix(in srgb,var(--yellow) 8%,var(--panel2));font:600 13px/1.4 var(--font-ui)}
+.detail-reparse-box select{min-width:150px;background:var(--panel);color:var(--txt);border:1px solid var(--border);border-radius:4px;padding:6px 8px}
+.detail-reparse-status{flex:1 1 100%;color:var(--muted);font-size:12px}
 .info-model-cell{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .info-model-na{font:700 13px/1 var(--font-mono);color:var(--dim)}
 .model-row-actions{display:inline-flex;gap:6px;flex-wrap:wrap;vertical-align:middle}
@@ -5667,6 +5691,68 @@ _MAIN_PAGE_PATCH_JS = r"""
     var v = String(model || '').trim().toUpperCase();
     return !v || v === 'N/A' || v === 'NA' || v === '-';
   }
+  function isMissingDetailValue(v){
+    if(v == null) return true;
+    var s = String(v).trim().toUpperCase();
+    return !s || s === 'N/A' || s === 'NA' || s === '-' || s === '--';
+  }
+  function detailNeedsReparse(e){
+    e = e || {};
+    var raws = Array.isArray(e.raw_packets) ? e.raw_packets : [];
+    if(!raws.length) return false;
+    if(isUnknownModel(e.model)) return true;
+    if(e.lat == null || e.lon == null) return true;
+    if(isMissingDetailValue(e.rid_format || e.dji_rid_kind || e.kind)) return true;
+    return false;
+  }
+  function detailReparseModeOptions(){
+    return [
+      ['auto', '自动分配'],
+      ['dji_new', 'DJI 新固件/私有'],
+      ['dji_gb46750', 'GB46750'],
+      ['dji_enterprise', 'DJI F119/企业私有'],
+      ['odid_legacy', 'OpenDroneID/旧固件']
+    ].map(function(item){
+      return '<option value="'+escAttr(item[0])+'">'+esc(item[1])+'</option>';
+    }).join('');
+  }
+  function detailReparseControls(e){
+    e = e || {};
+    if(!detailNeedsReparse(e)) return '';
+    var sn = String(e.sn || '');
+    return '<div class="detail-reparse-box" data-sn="'+escAttr(sn)+'">'
+      + '<span>以</span><select class="detail-reparse-mode" data-sn="'+escAttr(sn)+'">'+detailReparseModeOptions()+'</select><span>方式重新解析</span>'
+      + '<button class="btn-mini warn detail-reparse-btn" type="button" data-sn="'+escAttr(sn)+'">重试</button>'
+      + '<div class="detail-reparse-status" data-sn="'+escAttr(sn)+'">自动批量重新解析仍会按默认分配覆盖这些结果。</div>'
+      + '</div>';
+  }
+  function detailReparseApiUrl(){
+    return String(window.LIGHT_RID_DETAIL_REPARSE_API || '/api/history/reparse');
+  }
+  async function retryDetailReparse(btn){
+    if(!btn) return;
+    var sn = String(btn.getAttribute('data-sn') || '').trim();
+    if(!sn) return;
+    var root = btn.closest ? btn.closest('.detail-reparse-box') : null;
+    var sel = root ? root.querySelector('.detail-reparse-mode') : null;
+    var status = root ? root.querySelector('.detail-reparse-status') : null;
+    var mode = String((sel && sel.value) || 'auto');
+    btn.disabled = true;
+    if(status) status.textContent = '正在重新解析...';
+    try{
+      var data = await postJson(detailReparseApiUrl(), {sn:sn, mode:mode});
+      var msg = data.message || ('重新解析完成: ' + String(data.mode || mode));
+      if(status) status.textContent = msg;
+      showBanner(msg, 'ok', 2800, {persist:false});
+      try{ if(ws) ws.close(); }catch(_e){}
+    }catch(e){
+      var err = (e && e.message) ? e.message : String(e || 'failed');
+      if(status) status.textContent = '重新解析失败: ' + err;
+      showBanner('重新解析失败: ' + err, 'warn', 4200, {persist:false});
+    }finally{
+      btn.disabled = false;
+    }
+  }
   function modelActionCell(e){
     e = e || {};
     var model = String(e.model || 'N/A');
@@ -5764,6 +5850,13 @@ _MAIN_PAGE_PATCH_JS = r"""
       var addBtn = ev.target && ev.target.closest ? ev.target.closest('.model-map-add') : null;
       var issueBtn = ev.target && ev.target.closest ? ev.target.closest('.model-map-issue') : null;
       var prBtn = ev.target && ev.target.closest ? ev.target.closest('.model-map-pr') : null;
+      var reparseBtn = ev.target && ev.target.closest ? ev.target.closest('.detail-reparse-btn') : null;
+      if(reparseBtn){
+        ev.preventDefault();
+        ev.stopPropagation();
+        retryDetailReparse(reparseBtn);
+        return;
+      }
       var btn = addBtn || issueBtn || prBtn;
       if(!btn) return;
       ev.preventDefault();
@@ -5825,7 +5918,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       var html = '<div class="info-actions">'+
         '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(actionSn)+'">导出轨迹</button>'+
         '<button class="btn-mini warn delete-history-btn" type="button" data-sn="'+escAttr(actionSn)+'">删除历史</button>'+
-        '</div><div class="info-sections">';
+        '</div>'+detailReparseControls(e)+'<div class="info-sections">';
       html += buildInfoSection('飞机位置信息', dronePos);
       html += buildInfoSection('飞手位置信息', pilotPos);
       html += buildInfoSection('其他信息', base);
@@ -6499,7 +6592,7 @@ body.theme-light{
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
 body{min-height:var(--app-vh);background:linear-gradient(180deg,var(--bg),var(--bg2) 18%,var(--bg))}
 .wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
-.settings-sticky-head{position:relative;z-index:1;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 94%,transparent));padding-top:clamp(8px,1.2vw,14px)}
+.settings-sticky-head{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,var(--bg),color-mix(in srgb,var(--bg) 94%,transparent));padding-top:clamp(8px,1.2vw,14px);padding-bottom:2px}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
 .title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
 .sub{color:var(--muted);margin-top:5px;max-width:780px;line-height:1.45}
@@ -6735,8 +6828,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
     </div>
     <div class="draft-actions">
       <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
-      <button class="btn warn" id="btn-save-visual" type="button" disabled>测试并保存</button>
-      <button class="btn ghost" id="btn-save-visual-direct" type="button">直接保存</button>
+      <button class="btn warn" id="btn-save-visual" type="button" disabled>保存设置</button>
     </div>
   </div>
   <div class="tabs">
@@ -7295,6 +7387,7 @@ var modelMapRows = [];
 var modelMapPath = '';
 var settingsState = {visualLoaded:false, rawLoaded:false, rawUnlocked:false, rawRoot:'', rawTree:null, rawSelectedPath:'', rawSelectedRel:'', channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}, authConfigured:false, networkBindings:null, interfaceItems:[]};
 var metricsState = {window:'12h', zoom:1, panSec:0, hover:null, drag:null, chartMeta:{}, items:[]};
+var visualCheckboxSaveTimer = null;
 var SETTINGS_DRAFT_SECTIONS = [
   {key:'capture', label:'采集'},
   {key:'map', label:'地图与基站'},
@@ -8621,6 +8714,33 @@ function collectVisualPayload(){
     network_bindings: collectNetworkBindings()
   };
 }
+function mergeCheckboxValues(base, current){
+  if(typeof current === 'boolean') return current;
+  if(Array.isArray(base) || Array.isArray(current)){
+    var baseArr = Array.isArray(base) ? base : [];
+    var curArr = Array.isArray(current) ? current : [];
+    return baseArr.map(function(item, idx){
+      return mergeCheckboxValues(item, curArr[idx]);
+    });
+  }
+  if(base && typeof base === 'object'){
+    var out = cloneJson(base);
+    if(current && typeof current === 'object'){
+      Object.keys(current).forEach(function(key){
+        if(Object.prototype.hasOwnProperty.call(out, key)){
+          out[key] = mergeCheckboxValues(out[key], current[key]);
+        }
+      });
+    }
+    return out;
+  }
+  return base;
+}
+function collectCheckboxOnlyVisualPayload(){
+  var base = settingsState.visualInitial ? cloneJson(settingsState.visualInitial) : collectVisualPayload();
+  var current = collectVisualPayload();
+  return mergeCheckboxValues(base, current);
+}
 function visualPayloadSections(payload){
   payload = payload || {};
   return {
@@ -8658,15 +8778,14 @@ function setDraftUi(dirtyMap){
   });
   if(qs('btn-test-visual')) qs('btn-test-visual').disabled = !settingsState.visualDirty;
   if(qs('btn-save-visual')) qs('btn-save-visual').disabled = !settingsState.visualDirty;
-  if(qs('btn-save-visual-direct')) qs('btn-save-visual-direct').disabled = false;
   if(qs('draft-title')) qs('draft-title').textContent = settingsState.visualDirty ? '有未保存修改' : '当前没有未保存修改';
   if(qs('draft-meta')){
     var names = SETTINGS_DRAFT_SECTIONS
       .filter(function(item){ return !!dirtyMap[item.key]; })
       .map(function(item){ return item.label; });
     qs('draft-meta').textContent = settingsState.visualDirty
-      ? ('已改动: ' + names.join('、') + '。测试结果独立于保存动作。')
-      : '未保存改动按配置分组标记；测试结果独立于配置文件。';
+      ? ('已改动: ' + names.join('、') + '。复选框会立即保存，输入内容需点击保存。')
+      : '当前没有未保存修改。';
   }
 }
 function updateVisualDraftState(){
@@ -8693,9 +8812,30 @@ function bindVisualDraftTracking(){
   root.addEventListener('input', function(ev){
     updateVisualDraftState();
   });
-  root.addEventListener('change', function(){
+  root.addEventListener('change', function(ev){
     updateVisualDraftState();
+    var target = ev && ev.target;
+    if(target && String(target.type || '').toLowerCase() === 'checkbox'){
+      scheduleVisualCheckboxSave();
+    }
   });
+}
+function scheduleVisualCheckboxSave(){
+  if(!settingsState.visualLoaded) return;
+  if(visualCheckboxSaveTimer) clearTimeout(visualCheckboxSaveTimer);
+  visualCheckboxSaveTimer = window.setTimeout(async function(){
+    visualCheckboxSaveTimer = null;
+    try{
+      setVisualActionBusy(true);
+      setStatus('status-visual', '正在保存勾选项...', false);
+      await saveVisual({auto:true, checkboxOnly:true});
+    }catch(e){
+      setStatus('status-visual', e.message || e, true);
+      showNotice(e.message || e, 'warn', 3800);
+    }finally{
+      setVisualActionBusy(false);
+    }
+  }, 160);
 }
 function setVisualActionBusy(busy){
   ['btn-test-visual','btn-save-visual','btn-save-visual-direct','btn-reload-view'].forEach(function(id){
@@ -8703,8 +8843,6 @@ function setVisualActionBusy(busy){
     if(!el) return;
     if(id === 'btn-test-visual' || id === 'btn-save-visual'){
       el.disabled = !!busy || (!settingsState.visualDirty);
-    }else if(id === 'btn-save-visual-direct'){
-      el.disabled = !!busy;
     }else{
       el.disabled = !!busy;
     }
@@ -9612,15 +9750,21 @@ async function loadVisual(){
 async function loadRawLegacyUnused(){
   return loadRaw();
 }
-async function saveVisual(){
-  const payload = collectVisualPayload();
+async function saveVisual(opts){
+  opts = (opts && typeof opts === 'object') ? opts : {};
+  const payload = opts.checkboxOnly ? collectCheckboxOnlyVisualPayload() : collectVisualPayload();
   const data = await postJson('/api/settings/visual/save', payload);
-  var msg = '测试并保存成功: ' + String(data.saved_to || '-');
+  var msg = (opts.auto ? '勾选项已保存: ' : '保存成功: ') + String(data.saved_to || '-');
   if(data.backup_path) msg += '\\n备份: ' + String(data.backup_path);
   if(data.reload_msg) msg += '\\n' + String(data.reload_msg);
   setStatus('status-visual', msg, false);
-  showNotice('配置已保存并生效。', 'ok', 3600);
-  await loadVisual();
+  showNotice(opts.auto ? '勾选项已保存。' : '配置已保存并生效。', 'ok', opts.auto ? 2200 : 3000);
+  if(opts.auto){
+    settingsState.visualInitial = cloneJson(payload);
+    updateVisualDraftState();
+  }else{
+    await loadVisual();
+  }
 }
 async function testVisual(){
   const payload = collectVisualPayload();
@@ -10604,6 +10748,18 @@ def http_server_thread() -> None:
                     "items": items,
                 }, 200)
                 return
+            if path == "/api/v1/metrics":
+                raw_window = str((query.get("window") or ["24h"])[0] or "24h").strip().lower()
+                if raw_window in ("12h", "12"):
+                    window_sec = 12 * 3600
+                elif raw_window in ("7d", "7"):
+                    window_sec = 7 * 86400
+                else:
+                    window_sec = 24 * 3600
+                payload = _host_metrics_payload(window_sec=window_sec)
+                payload["api"] = _api_meta()
+                self._send_json(payload, 200)
+                return
             if path.startswith("/api/v1/drones/"):
                 sn = unquote(path[len("/api/v1/drones/"):]).strip()
                 if not sn:
@@ -11186,6 +11342,35 @@ def http_server_thread() -> None:
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 500)
                 return
+            if path == "/api/v1/history/reparse":
+                body = self._read_json_body()
+                sn = str(body.get("sn") or "").strip() if isinstance(body, dict) else ""
+                mode = str(body.get("mode") or "auto") if isinstance(body, dict) else "auto"
+                try:
+                    rsp = reidentify_history_packet_for_sn(sn, mode=mode)
+                    rsp["api"] = _api_meta()
+                    _op_log("api-v1-history-reparse", f"sn={sn} mode={mode} ok={bool(rsp.get('ok'))}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                    self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                except Exception as e:
+                    _op_log("api-v1-history-reparse", f"sn={sn} mode={mode} error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e), "api": _api_meta()}, 500)
+                return
+            if path == "/api/v1/history/reidentify-recent":
+                body = self._read_json_body()
+                try:
+                    limit = int(body.get("limit") or HISTORY_RAW_PACKET_LIMIT) if isinstance(body, dict) else HISTORY_RAW_PACKET_LIMIT
+                except Exception:
+                    limit = HISTORY_RAW_PACKET_LIMIT
+                try:
+                    rsp = reidentify_recent_history_packets(limit=limit)
+                    rsp["api"] = _api_meta()
+                    summary = f"aircraft={rsp.get('updated_aircraft')}/{rsp.get('aircraft_count')} packets={rsp.get('decoded')}/{rsp.get('packet_count')}"
+                    _op_log("api-v1-history-reidentify-recent", str(rsp.get("error") or summary), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                    self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                except Exception as e:
+                    _op_log("api-v1-history-reidentify-recent", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e), "api": _api_meta()}, 500)
+                return
             if path == "/api/history/clear":
                 self._read_json_body()
                 try:
@@ -11208,6 +11393,17 @@ def http_server_thread() -> None:
                 removed = delete_history_item(sn)
                 _op_log("history-delete", f"sn={sn} removed={removed}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({"ok": True, "sn": sn, "removed": bool(removed)}, 200)
+            elif path == "/api/history/reparse":
+                body = self._read_json_body()
+                sn = str(body.get("sn") or "").strip() if isinstance(body, dict) else ""
+                mode = str(body.get("mode") or "auto") if isinstance(body, dict) else "auto"
+                try:
+                    rsp = reidentify_history_packet_for_sn(sn, mode=mode)
+                    _op_log("history-reparse", f"sn={sn} mode={mode} ok={bool(rsp.get('ok'))}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                    self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                except Exception as e:
+                    _op_log("history-reparse", f"sn={sn} mode={mode} error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e)}, 500)
             elif path in ("/api/settings/history/reidentify-recent", "/api/settings/history/reidentify-latest"):
                 body = self._read_json_body()
                 try:

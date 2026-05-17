@@ -29,13 +29,7 @@ jobs:
           - edition: station
             target: x86_64
             runner: ubuntu-24.04
-          - edition: portable
-            target: x86_64
-            runner: ubuntu-24.04
           - edition: station
-            target: arm64
-            runner: ubuntu-24.04-arm
-          - edition: portable
             target: arm64
             runner: ubuntu-24.04-arm
 
@@ -117,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        edition: [station, portable]
+        edition: [station]
 
     steps:
       - name: Checkout code
@@ -190,7 +184,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        edition: [station, portable]
+        edition: [station]
 
     steps:
       - name: Checkout code

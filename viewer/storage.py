@@ -201,6 +201,26 @@ class ConfigStore:
             "cache_ttl_hours": _int_clamped(self.get_setting("aggregate.cache_ttl_hours", "24"), 24, 1, 168),
         }
 
+    def notify_config(self, *, reveal_secret: bool = False) -> dict[str, Any]:
+        key = self.get_setting("notify.wecom_key", "")
+        return {
+            "enabled": self.get_setting("notify.enabled", "0") == "1",
+            "wecom_configured": bool(key),
+            "wecom_key": key if reveal_secret else "",
+            "node_status_enabled": self.get_setting("notify.node_status_enabled", "1") == "1",
+        }
+
+    def save_notify_config(self, body: dict[str, Any]) -> dict[str, Any]:
+        src = body if isinstance(body, dict) else {}
+        current = self.notify_config(reveal_secret=True)
+        enabled = bool(src.get("enabled"))
+        node_status_enabled = bool(src.get("node_status_enabled", True))
+        key = str(src.get("wecom_key") or "").strip() or str(current.get("wecom_key") or "")
+        self.set_setting("notify.enabled", "1" if enabled else "0")
+        self.set_setting("notify.node_status_enabled", "1" if node_status_enabled else "0")
+        self.set_setting("notify.wecom_key", key)
+        return self.notify_config(reveal_secret=False)
+
     def save_aggregate_config(self, body: dict[str, Any]) -> dict[str, Any]:
         src = body if isinstance(body, dict) else {}
         ttl = _int_clamped(src.get("cache_ttl_hours"), 24, 1, 168)

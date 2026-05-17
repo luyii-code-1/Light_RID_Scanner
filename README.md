@@ -9,13 +9,13 @@ Light RID Scanner is a fixed-station Remote ID / OpenDroneID Wi-Fi monitor desig
 - `station_edition/`
   Full fixed-station build. It contains the source runtime, web UI, security/auth controls, systemd/AP maintenance, and Raspberry Pi deployment defaults.
 - `portable_edition/`
-  Minimal mobile deployment entrypoint. It reuses the scanner and web core but forces web login, API tokens, SSO links, passkeys, host monitoring, and Enterprise WeCom notifications off.
+  WIP (Work in Progress). The portable runtime code has been removed while the product policy is being revised; the directory currently contains only a WIP README.
 - Root `run.py`
   Compatibility wrapper for `station_edition/run.py`.
 - Root `rid-models.json`
   Public GitHub Raw model map. Binaries also embed this file and restore it if runtime download fails.
 
-Each edition is meant to be usable from its own directory. Runtime files such as `config.json`, `history-cache.json`, and `rid-models.json` are resolved relative to the current working directory unless explicit paths are passed.
+The station edition is meant to be usable from its own directory. Runtime files such as `config.json`, `history-cache.json`, and `rid-models.json` are resolved relative to the current working directory unless explicit paths are passed.
 
 ## Highlights
 
@@ -62,15 +62,7 @@ python -m pip install -r ../requirements.txt
 python run.py --no-tui
 ```
 
-Run the portable edition from source:
-
-```bash
-cd portable_edition
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r ../requirements.txt
-python pe.py --no-tui
-```
+The portable edition is currently WIP and has no runnable source entrypoint.
 
 Deploy a station Linux binary:
 
@@ -148,8 +140,8 @@ Operationally, this makes multi-NIC deployments much safer: the scanner keeps us
   Station edition source/build entry point.
 - `station_edition/light_rid/`
   Split scanner, parser, HTTP/WS server, embedded pages, API handlers, settings, auth, hardware, and CLI/TUI modules.
-- `portable_edition/pe.py`
-  Portable edition source/build entry point.
+- `portable_edition/README.md`
+  Portable edition WIP notice.
 - `rid-models.json`
   GitHub Raw model prefix mapping and source for the embedded binary resource.
 - `station_edition/config.example.json`
@@ -524,14 +516,12 @@ The UI version string is shown as:
 commit:<git-short-commit>#<local-build-number>
 ```
 
-`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces 6 one-file Linux artifacts: station and portable editions for `x86_64`, `x32`, and `arm64`.
+`rid_build_info.json` stores the current short commit and local build number. The CI workflow produces station one-file Linux artifacts for `x86_64`, `x32`, `arm64`, and `armv7`; portable artifacts are paused while the portable edition is WIP.
 
 Local builds can use either the shared root entrypoint or an edition-local wrapper:
 
 ```bash
 python pytools/build_release.py --edition station --target arm64
-python pytools/build_release.py --edition portable --target x86_64
-python pytools/build_release.py --edition portable --target x32
 cd station_edition
 python pytools/build.py --target arm64
 ```

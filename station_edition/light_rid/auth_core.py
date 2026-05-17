@@ -1199,7 +1199,7 @@ def _auth_sso_public_links(auth_cfg: dict | None = None, *, include_paths: bool 
     from urllib.parse import quote
     source = auth_cfg if isinstance(auth_cfg, dict) else AUTH_CFG
     out: list[dict] = []
-    for item in _normalize_sso_links(source.get("sso_links")):
+    for item in _prune_expired_sso_links(source.get("sso_links")):
         check = str(item.get("check") or "").strip()
         next_path = str(item.get("next") or "/")
         path = (
@@ -1231,7 +1231,7 @@ def _auth_check_sso_link(check: str | None) -> dict | None:
     raw_check = str(check or "").strip()
     if not raw_check:
         return None
-    for item in _normalize_sso_links(AUTH_CFG.get("sso_links")):
+    for item in _prune_expired_sso_links(AUTH_CFG.get("sso_links")):
         if hmac.compare_digest(str(item.get("check") or ""), raw_check) and bool(_sso_link_state(item).get("active")):
             return dict(item)
     return None
@@ -1319,8 +1319,8 @@ def _auth_mutate_sso_links(mutator, *, tag: str = "sso") -> tuple[bool, str, lis
             if not isinstance(auth, dict):
                 auth = {}
                 cfg["auth"] = auth
-            links = _normalize_sso_links(auth.get("sso_links"))
-            auth["sso_links"] = _normalize_sso_links(mutator(list(links)))
+            links = _prune_expired_sso_links(auth.get("sso_links"))
+            auth["sso_links"] = _prune_expired_sso_links(mutator(list(links)))
             cfg, guard_err = _prepare_security_cfg_for_save(cfg)
             if guard_err:
                 return False, guard_err, _auth_sso_public_links()

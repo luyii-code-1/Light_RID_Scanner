@@ -2,28 +2,6 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-## 节点中心 Viewer
-
-`viewer/server.py` 是独立 node-center 服务，用于聚合多个 `station_edition` 子站。
-
-```bash
-python viewer/server.py --host 0.0.0.0 --port 4700
-```
-
-打开：
-
-- `http://<中心节点IP>:4700/`
-
-Viewer 使用 `viewer/cfg.db` 保存自身配置：节点 API 地址、节点 API Token，以及可选的 Viewer 密码登录 / SSO check 登录设置。远端飞机、基站、AP、轨迹和健康状态不会落库；每次刷新都会从各子站 API 实时读取并聚合显示。
-
-Viewer 的实时/历史主界面直接复用 `station_edition/light_rid/web_server.py` 的 Station 页面模板；viewer 代码只替换数据/API 层，并从 DOM 中删除 Station 专用控制项。`/settings` 复用 Station 设置页风格，只保留 Viewer 主机状态、地图默认位置/缩放、密码登录、SSO check 登录和许可协议。节点管理单独放在 `/nodes`，支持节点卡片、负载曲线、扫描统计、一键生成子站 SSO 登录 URL，以及多节点批量重启程序 / 更新识别库。
-
-Viewer 二进制由单独的 `.github/workflows/build-viewer.yml` 构建，覆盖 Linux `x86_64`、Linux `x32`、Linux `arm64`、Windows `windows-x86_64` 和 Windows `windows-x32`。本地构建命令：
-
-```bash
-python pytools/build_viewer.py --target x86_64
-```
-
 Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定式 Remote ID / OpenDroneID Wi-Fi 监测器。
 
 
@@ -163,57 +141,6 @@ ExecStart=/opt/light-rid/light_rid_station-arm64 --config /opt/light-rid/config.
 
 - `http://<设备IP>:4600/`
 
-## 固定网卡绑定与 OOBE
-
-- 扫描器不再自动递增轮换网卡。
-- `basic.iface` 现在被视为固定绑定项；如果这张网卡不存在，服务会保持降级运行并提示配置，而不是悄悄切到别的网卡。
-- `basic.lost_timeout` 用于配置飞机离线判定时间，默认 15 秒。
-- OOBE 和设置页提供“自定义网卡绑定”，可以把每张网卡设置为 `scan`（扫描）、`web`（网页服务）、`ap_web`（AP 热点网页服务）、`disabled`（禁用）、`idle`（闲置）或 `none`；`scan` 会同步写回 `basic.iface`。
-- `ap_web` 会通过 `hostapd` 配置热点，使用内置 DHCP 在 `172.16.0.0/24` 分配地址，并在服务具备所需 Linux capability 时把网页服务暴露到 `172.16.0.1:80`。
-- 如果 `config.json` 缺失、损坏，或者还没有绑定默认网卡，网页会进入 `/oobe` 初始化流程。
-- OOBE 用来完成最小可运行配置：
-  - 选择默认无线网卡
-  - 设置 RID 信道
-  - 可选填写基站坐标
-  - 可选设置网页登录账号和密码
-这样做的目的很直接：多网卡环境下不再抓错卡，启动异常也会直接暴露为配置问题，方便固定基站长期稳定运行。
-
-## 主要页面
-
-- `/`
-  主页面，包含地图、飞机列表、AP/日志视图切换。
-- `/settings`
-  可视化设置、账号密码 / 通行密钥登录控制、原始配置编辑、运行时安全修复、配置 / 版本更新工具、通知设置、报警区域设置、API 说明。
-- `/hardware-assistant`
-  网卡状态、`iw` 检查、监控/托管模式切换、信道调整、网卡重启、主程序重启。
-
-## 关键文件
-
-- `run.py`
-  基站版本兼容入口。
-- `station_edition/run.py`
-  基站版本源码和构建入口。
-- `station_edition/light_rid/`
-  拆分后的扫描、解析、HTTP/WS 服务、内嵌页面、API、设置、认证、硬件辅助和 CLI/TUI 模块。
-- `portable_edition/README.md`
-  移动版 WIP 说明。
-- `rid-models.json`
-  GitHub Raw 机型前缀映射表，也是二进制内置资源的源文件。
-- `station_edition/config.example.json`
-  可提交到 Git 的安全示例配置。
-- `config.json`
-  实际运行配置，不应提交。
-- `EULA.md`
-  内置 EULA 同意页面显示的源文本。
-- `history-cache.json`
-  运行时生成的历史 / 轨迹缓存。
-- `config.json.rollback`
-  配置文件回滚副本。
-- `rid_build_info.json`
-  本地构建版本标记，用于页面版本号，例如 `commit:ba15d57#3`。
-- 临时目录 `light_rid_scanner/host_metrics.jsonl`
-  运行期主机负载趋势数据。不存在会自动创建，不应提交。
-
 ## 配置结构
 
 运行配置分为以下几个主分区：
@@ -276,10 +203,12 @@ ExecStart=/opt/light-rid/light_rid_station-arm64 --config /opt/light-rid/config.
 示例：
 
 ```bash
-cp station_edition/config.example.json config.json
-```
+# 方式一：自定义请求头
+curl -H "X-API-Token: YOUR_TOKEN" http://0.0.0.0:4600/api/v1/snapshot
 
-然后根据你的硬件和部署需求编辑 `config.json`。
+# 方式二：Bearer Token
+curl -H "Authorization: Bearer YOUR_TOKEN" http://0.0.0.0:4600/api/v1/drones
+```
 
 ### 运行时文件解析规则
 
@@ -434,68 +363,11 @@ print("pass:", hash_secret("your_password"))
 PY
 ```
 
-如果你只保留 `api.token_hash`，外部 API 仍然可用，但设置页面将无法显示或复制当前 Token，因为系统只拿到了哈希。
-
-### 推荐使用方式
-
-建议这样做：
-
-- 在本地生成一个随机 Token
-- 如果希望后续能在设置页里再次显示/复制 Token，就让 `api.token` 和 `api.token_hash` 一起保存并保持一致
-- 如果调用端 IP 范围固定，建议打开白名单模式
-- 明文 Token 只保留在脚本、客户端、密码管理器或密钥管理系统里
-- 不要把真实 Token 提交到 Git
-
-### 一个重要行为
-
-如果 `api.enabled = false`，那么 `/api/docs`、`/api/health` 和 `/api/v1/*` 不再默认对局域网开放，而是只允许当前内置页面通过会话方式调用。
-
-这意味着：
-
-- 外部脚本必须等你显式开启外部 API 后才能访问
-- Light RID Scanner 自带页面仍可正常工作
-- 网页登录会话不会直接放行 Token API 路径
-
 ## 网页登录鉴权 与 Token API 鉴权的区别
 
-这两套机制是分开的。
+网页登录鉴权和 Token API 鉴权是分开的两套机制。
 
-### 网页登录鉴权
-
-它用于浏览器页面和基于当前会话的辅助接口。浏览器现在使用 `/login` 登录页和会话 Cookie，不再弹出 HTTP Basic 登录框。
-
-配置示例：
-
-```json
-{
-  "auth": {
-    "enabled": true,
-    "username_hash": "<scrypt(username)>",
-    "password_hash": "<scrypt(password)>",
-    "session_ttl_min": 30,
-    "realm": "Light RID Scanner"
-  }
-}
-```
-
-生成和程序一致的用户名 / 密码 scrypt 哈希：
-
-```bash
-python3 - <<'PY'
-import base64, hashlib, secrets
-def hash_secret(text):
-    salt = secrets.token_bytes(16)
-    digest = hashlib.scrypt(text.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
-    return "scrypt$16384$8$1$%s$%s" % (
-        base64.urlsafe_b64encode(salt).decode().rstrip("="),
-        base64.urlsafe_b64encode(digest).decode().rstrip("="),
-    )
-print("user:", hash_secret("your_user"))
-print("pass:", hash_secret("your_pass"))
-PY
-```
-
-受信任的外部启动器可以使用 SSO 形式登录。URL 只使用服务端保存的 `check` 校验码：
+网页登录鉴权使用 `/login` 页面和会话 Cookie，用于浏览器和会话辅助接口（配置方式见上方「鉴权系统」章节）。受信任的外部启动器可以使用 SSO 形式登录，URL 只使用服务端保存的 `check` 校验码：
 
 ```text
 /login?check=<server-check-code>

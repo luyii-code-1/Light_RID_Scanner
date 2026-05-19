@@ -23,6 +23,9 @@ rid_config.local.json
 *.secrets.json
 viewer/cfg.db
 viewer/cfg.db-*
+cfg.db
+cfg.db-*
+_tmp_viewer*.log
 EULA.set
 tools
 # Runtime data

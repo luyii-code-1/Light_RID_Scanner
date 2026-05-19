@@ -33,6 +33,81 @@ def _copy_new_fw_detail(dst: dict, src: dict | None) -> None:
         if key in src:
             dst[key] = src.get(key)
 
+def _role_coord_valid(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    try:
+        return bool(_coord_pair_valid(float(item.get("lat")), float(item.get("lon"))))
+    except Exception:
+        return False
+
+def _aircraft_position_from_decoded(loc: dict | None, meta: dict | None = None) -> dict | None:
+    if isinstance(meta, dict):
+        pos = meta.get("aircraft_position")
+        if _role_coord_valid(pos):
+            return dict(pos)
+    if not isinstance(loc, dict) or loc.get("lat") is None or loc.get("lon") is None:
+        return None
+    try:
+        lat = float(loc.get("lat"))
+        lon = float(loc.get("lon"))
+    except Exception:
+        return None
+    if not _coord_pair_valid(lat, lon):
+        return None
+    return {
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "alt": loc.get("alt_geodetic"),
+        "role": "aircraft",
+        "source": "ODID_LOCATION",
+        "offset": None,
+        "coordinate_system": "WGS84",
+    }
+
+def _operator_positions_from_decoded(sys_loc: dict | None, meta: dict | None = None) -> list[dict]:
+    if isinstance(meta, dict):
+        positions = [dict(x) for x in (meta.get("operator_positions") or []) if _role_coord_valid(x)]
+        if positions:
+            return positions
+    if not isinstance(sys_loc, dict) or sys_loc.get("pilot_lat") is None or sys_loc.get("pilot_lon") is None:
+        return []
+    try:
+        lat = float(sys_loc.get("pilot_lat"))
+        lon = float(sys_loc.get("pilot_lon"))
+    except Exception:
+        return []
+    if not _coord_pair_valid(lat, lon):
+        return []
+    return [{
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "alt": sys_loc.get("pilot_alt"),
+        "role": "operator",
+        "source": "ODID_SYSTEM",
+        "offset": None,
+        "coordinate_system": "WGS84",
+    }]
+
+def _apply_decoded_role_positions(dst: dict, loc: dict | None, sys_loc: dict | None, meta: dict | None = None) -> None:
+    aircraft = _aircraft_position_from_decoded(loc, meta)
+    if aircraft:
+        dst["aircraft_position"] = aircraft
+        dst["pos_a_lat"] = aircraft.get("lat")
+        dst["pos_a_lon"] = aircraft.get("lon")
+    operators = _operator_positions_from_decoded(sys_loc, meta)
+    if operators:
+        dst["operator_positions"] = operators
+        first = operators[0]
+        dst["pos_b_lat"] = first.get("lat")
+        dst["pos_b_lon"] = first.get("lon")
+    raw_coords = []
+    if aircraft:
+        raw_coords.append(aircraft)
+    raw_coords.extend(operators)
+    if raw_coords:
+        dst["raw_coords"] = raw_coords
+
 def _history_merge(dst: dict, src: dict) -> None:
     if not src:
         return
@@ -465,6 +540,7 @@ def _history_apply_reidentified_locked(
     elif record["firmware_type"] == "new":
         for key in ("pilot_lat", "pilot_lon", "pilot_alt", "pilot_loc_type", "pilot_loc_type_text"):
             record[key] = None if key != "pilot_loc_type_text" else ""
+    _apply_decoded_role_positions(record, loc, sys_loc, meta if isinstance(meta, dict) else None)
     if update_track and record.get("lat") is not None and record.get("lon") is not None:
         _history_track_replace_latest(record, record.get("lat"), record.get("lon"), cap_wall or time.time())
     history_table[sn] = record
@@ -893,6 +969,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                     e["pilot_loc_type_text"] = str(sys_loc.get("pilot_loc_type_text") or "")
             except Exception:
                 pass
+
+        _apply_decoded_role_positions(e, loc, sys_loc, meta if isinstance(meta, dict) else None)
 
         alarm_zone_hits = _alarm_zone_names_for_point(e.get("lat"), e.get("lon"))
         prev_alarm_zone_hits = {str(x) for x in (e.get("_alarm_zone_hits_current") or [])}

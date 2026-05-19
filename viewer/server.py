@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import platform
+import socket
 import struct
 import sys
 import time
@@ -263,7 +264,12 @@ document.getElementById('accept').onclick = async function(){{
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class ViewerHandler(BaseHTTPRequestHandler):
@@ -273,7 +279,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
     listen_label: str = ""
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[{_utc_text()}] {self.address_string()} {fmt % args}")
+        print(f"[{_utc_text()}] {self.address_string()} {fmt % args}", flush=True)
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -754,12 +760,23 @@ class ViewerHandler(BaseHTTPRequestHandler):
 def run(host: str, port: int, db_path: Path) -> None:
     ViewerHandler.store = ConfigStore(db_path)
     ViewerHandler.listen_label = f"{host}:{port}"
-    httpd = ThreadingHTTPServer((host, port), ViewerHandler)
-    print(f"[INFO] {APP_NAME} listening on http://{host}:{port}/ using {db_path}")
+    try:
+        httpd = ThreadingHTTPServer((host, port), ViewerHandler)
+    except OSError as exc:
+        print(f"[ERROR] {APP_NAME} failed to listen on {host}:{port}: {exc}", file=sys.stderr, flush=True)
+        if getattr(exc, "winerror", None) == 10013:
+            print("[ERROR] Windows denied the bind; check firewall/security policy or choose another port.", file=sys.stderr, flush=True)
+        elif getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in {48, 98, 10048}:
+            print("[ERROR] The port is already in use; close the old Viewer process or choose another port.", file=sys.stderr, flush=True)
+        raise SystemExit(2) from exc
+    open_url = f"http://127.0.0.1:{port}/" if host in {"0.0.0.0", "::", ""} else f"http://{host}:{port}/"
+    print(f"[INFO] {APP_NAME} listening on http://{host}:{port}/ using {db_path}", flush=True)
+    if open_url != f"http://{host}:{port}/":
+        print(f"[INFO] Open Viewer at {open_url}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[INFO] stopped")
+        print("\n[INFO] stopped", flush=True)
     finally:
         httpd.server_close()
 

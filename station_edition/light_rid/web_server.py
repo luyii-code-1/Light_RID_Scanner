@@ -4673,16 +4673,54 @@ function homeAuxLocations(e){
   return locs;
 }
 
+function aircraftMapCoord(e){
+  e = e || {};
+  var aircraft = (e.aircraft_position && typeof e.aircraft_position === 'object') ? e.aircraft_position : null;
+  if(aircraft && validMapCoord(aircraft.lat, aircraft.lon)){
+    return {lat:aircraft.lat, lon:aircraft.lon, source:String(aircraft.source || 'aircraft_position')};
+  }
+  if(validMapCoord(e.lat, e.lon)){
+    return {lat:e.lat, lon:e.lon, source:'lat_lon'};
+  }
+  return null;
+}
+
+function primaryOperatorCoord(e){
+  e = e || {};
+  var ops = Array.isArray(e.operator_positions) ? e.operator_positions : [];
+  for(var i=0;i<ops.length;i++){
+    var op = ops[i] || {};
+    if(validMapCoord(op.lat, op.lon)){
+      return {
+        lat:op.lat,
+        lon:op.lon,
+        typeText:String(op.source || op.role || 'operator'),
+        source:String(op.source || 'operator_positions')
+      };
+    }
+  }
+  if(validMapCoord(e.pilot_lat, e.pilot_lon)){
+    return {
+      lat:e.pilot_lat,
+      lon:e.pilot_lon,
+      typeText:String(e.pilot_loc_type_text || e.pilot_loc_type || 'operator'),
+      source:'pilot_fields'
+    };
+  }
+  return null;
+}
+
 function operatorLocationEntries(e){
   e = e || {};
   var locs = [];
-  if(validMapCoord(e.pilot_lat, e.pilot_lon)){
+  var op = primaryOperatorCoord(e);
+  if(op){
     locs.push({
       kind:'remote',
       label:'遥控站位置',
-      lat:e.pilot_lat,
-      lon:e.pilot_lon,
-      typeText:String(e.pilot_loc_type_text || e.pilot_loc_type || 'unknown'),
+      lat:op.lat,
+      lon:op.lon,
+      typeText:op.typeText,
       icon:'pilot'
     });
   }
@@ -4739,7 +4777,7 @@ function updateMap(drones){
     var sn = String((e && e.sn) || '');
     if(!sn) return false;
     if(page === 'history' && !selectedSet[sn]) return false;
-    return validMapCoord(e.lat, e.lon);
+    return !!aircraftMapCoord(e);
   });
   var liveOperatorLocations = [];
   (page === 'live' ? recentRows : rows).forEach(function(e){
@@ -4777,11 +4815,13 @@ function updateMap(drones){
   liveAir.forEach(function(e, idx){
     var sn = String(e.sn || '');
     if(!sn) return;
+    var airCoord = aircraftMapCoord(e);
+    if(!airCoord) return;
     activeAir[sn] = true;
     var col = colorIdx[sn];
     var isSel = !!selectedSet[sn];
     var inAlarmZone = !!zoneAlarmSnSet[sn];
-    var latRaw = Number(e.lat), lonRaw = Number(e.lon);
+    var latRaw = Number(airCoord.lat), lonRaw = Number(airCoord.lon);
     var prev = motionState[sn] || {};
     var heading = null;
     var headingDelta = null;
@@ -4805,7 +4845,7 @@ function updateMap(drones){
     motionState[sn] = {lat:latRaw, lon:lonRaw, heading:heading, ts:nowSec};
 
     var popup = '<b>'+sn+'</b><br>'+e.model+'<br>'
-      +(validMapCoord(e.lat, e.lon)?Number(e.lat).toFixed(5):'-')+', '+(validMapCoord(e.lat, e.lon)?Number(e.lon).toFixed(5):'-')
+      +(validMapCoord(latRaw, lonRaw)?Number(latRaw).toFixed(5):'-')+', '+(validMapCoord(latRaw, lonRaw)?Number(lonRaw).toFixed(5):'-')
       +'<br>高度: '+(e.alt!=null?e.alt.toFixed(1)+'m':'N/A')
       +'<br>速度: '+(e.spd!=null?e.spd.toFixed(1)+'m/s':'N/A')
       +'<br>信号: '+(e.rssi!=null?e.rssi+'dBm':'N/A')
@@ -4951,7 +4991,10 @@ function updateMap(drones){
   }
 
   // Keep all visible aircraft in range; use history tracks only when no aircraft position is displayable.
-  var aircraftLatLngs = liveAir.map(function(e){ return safeMapLatLng(e.lat, e.lon); }).filter(function(x){ return !!x; });
+  var aircraftLatLngs = liveAir.map(function(e){
+    var c = aircraftMapCoord(e);
+    return c ? safeMapLatLng(c.lat, c.lon) : null;
+  }).filter(function(x){ return !!x; });
   var latlngs = aircraftLatLngs.length ? aircraftLatLngs : (page === 'history' ? trackLatLngsAll : []);
   if(latlngs.length && autoState.allow){
     var singleZoom = aircraftLatLngs.length ? baseFromMeta(metaState).zoom : 15;

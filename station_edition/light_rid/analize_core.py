@@ -135,7 +135,7 @@ def parse_raw_packet(
             "result": result,
         }
 
-    return {
+    payload = {
         "ok": True,
         "mode": mode_key,
         "used_mode": mode_key,
@@ -145,6 +145,19 @@ def parse_raw_packet(
         "decoded": decoded,
         "result": result,
     }
+    for key in (
+        "sub_format",
+        "sn",
+        "uas_id",
+        "aircraft_position",
+        "operator_positions",
+        "raw_coords",
+        "coordinate_system",
+        "parse_level",
+        "warnings",
+    ):
+        payload[key] = result.get(key)
+    return payload
 
 
 def parse_raw_packet_string(

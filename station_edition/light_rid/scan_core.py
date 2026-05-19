@@ -694,7 +694,7 @@ def parse_legacy_odid_payload(data: bytes, ssid: str | None = None) -> dict:
             float(loc.get("lat")),
             float(loc.get("lon")),
             role="aircraft",
-            source="legacy_odid_location",
+            source="ODID_LOCATION",
             offset=None,
             alt=loc.get("alt_geodetic"),
         )
@@ -705,7 +705,7 @@ def parse_legacy_odid_payload(data: bytes, ssid: str | None = None) -> dict:
             float(sys_loc.get("pilot_lat")),
             float(sys_loc.get("pilot_lon")),
             role="operator",
-            source="legacy_odid_system",
+            source="ODID_SYSTEM",
             offset=None,
             alt=sys_loc.get("pilot_alt"),
         )

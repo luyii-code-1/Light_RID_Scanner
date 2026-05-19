@@ -1108,6 +1108,30 @@ def _local_group_exists(name: str) -> bool:
 def _sudo_available() -> bool:
     return bool(_is_linux_host() and _command_path("sudo"))
 
+def _current_user_may_sudo() -> bool:
+    if not _sudo_available():
+        return False
+    if _is_root_user():
+        return True
+    user = _username_for_uid(_current_uid())
+    if user == RUNTIME_SERVICE_USER:
+        return False
+    sudo = _command_path("sudo")
+    ok, out, _rc = _run_program([sudo, "-n", "true"], timeout=5)
+    if ok:
+        return True
+    text = str(out or "").lower()
+    ok_groups, groups_out, _rc_groups = _run_program(["id", "-nG"], timeout=4)
+    groups = set(str(groups_out or "").split()) if ok_groups else set()
+    if groups.intersection({"sudo", "wheel", "admin"}) and (
+        "password" in text or "a password is required" in text or "a terminal is required" in text
+    ):
+        return True
+    return False
+
+def _can_run_privileged_actions() -> bool:
+    return bool(_is_root_user() or _current_user_may_sudo())
+
 def _sudo_password_from_body(body: dict | None) -> str:
     if not isinstance(body, dict):
         return ""
@@ -1160,6 +1184,44 @@ def _systemctl(args: list[str], timeout: int = 20, sudo_password: str | None = N
 def _systemctl_privileged(args: list[str], timeout: int = 20, sudo_password: str | None = None) -> tuple[bool, str, int]:
     return _systemctl(args, timeout=timeout, sudo_password=sudo_password, privileged=True)
 
+def _systemctl_value_or_fallback(out: str, ok: bool, known: set[str], fallback: str) -> str:
+    line = (str(out or "").splitlines() or [""])[0].strip()
+    if line in known:
+        return line
+    if ok and line:
+        return line
+    return fallback
+
+def _systemd_enabled_fallback() -> str:
+    if not os.path.exists(SYSTEMD_SERVICE_PATH):
+        return "not-found"
+    wants_root = "/etc/systemd/system"
+    try:
+        for name in os.listdir(wants_root):
+            if not name.endswith(".wants"):
+                continue
+            link_path = os.path.join(wants_root, name, SYSTEMD_SERVICE_NAME)
+            if os.path.exists(link_path):
+                return "enabled"
+    except Exception:
+        pass
+    return "disabled"
+
+def _current_process_in_systemd_service() -> bool:
+    if not _is_linux_host():
+        return False
+    try:
+        with open("/proc/self/cgroup", "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        return SYSTEMD_SERVICE_NAME in text
+    except Exception:
+        return False
+
+def _systemd_active_fallback() -> str:
+    if _current_process_in_systemd_service():
+        return "active"
+    return "unknown"
+
 def _iw_manual_install_hint() -> str:
     return "请手动安装: sudo apt-get update && sudo apt-get install -y iw hostapd"
 
@@ -1202,7 +1264,7 @@ def _iw_status_payload(refresh: bool = True) -> dict:
         with iw_check_lock:
             snap = dict(IW_CHECK_STATE)
     snap["sudo_available"] = _sudo_available()
-    snap["can_install"] = bool(_is_linux_host() and (_is_root_user() or _sudo_available()) and _command_path("apt-get"))
+    snap["can_install"] = bool(_is_linux_host() and _can_run_privileged_actions() and _command_path("apt-get"))
     snap["package"] = IW_PACKAGE_NAME
     return snap
 
@@ -1222,7 +1284,7 @@ def _install_iw_package(sudo_password: str | None = None) -> dict:
     if not _command_path("apt-get"):
         snap = _refresh_iw_check_state("未检测到 apt-get，无法通过网页自动安装无线工具。")
         return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
-    if not (_is_root_user() or _sudo_available()):
+    if not _can_run_privileged_actions():
         snap = _refresh_iw_check_state("网页安装无线工具需要 root 或 sudo 提权。")
         return {"ok": False, "installed": False, "error": snap.get("message"), "iw": snap}
 
@@ -1413,7 +1475,7 @@ def _runtime_security_payload(unit_text: str | None = None) -> dict:
         "service_user": actual_service_user,
         "service_uses_dedicated_user": actual_service_user == RUNTIME_SERVICE_USER,
         "sudo_available": bool(sudo_available),
-        "can_elevate": bool(_is_linux_host() and (running_as_root or sudo_available)),
+        "can_elevate": bool(_is_linux_host() and _can_run_privileged_actions()),
         "password_saved": False,
     }
 
@@ -1628,7 +1690,7 @@ def repair_runtime_security(sudo_password: str | None = None) -> dict:
     steps: list[dict] = []
     if not supported:
         return {"ok": False, "error": reason, "status": _systemd_service_status_payload(), "steps": steps}
-    if not (_is_root_user() or _sudo_available()):
+    if not _can_run_privileged_actions():
         return {"ok": False, "error": "创建专用运行账号需要 root 或 sudo 提权。", "status": _systemd_service_status_payload(), "steps": steps}
     if not _local_user_exists(RUNTIME_SERVICE_USER):
         shell_path = "/usr/sbin/nologin" if os.path.exists("/usr/sbin/nologin") else "/bin/false"
@@ -1684,9 +1746,19 @@ def _systemd_service_status_payload() -> dict:
         unit_matches = (unit_text.strip() == str(spec.get("unit_text") or "").strip())
     if supported and registered:
         ok_enabled, out_enabled, _rc_enabled = _systemctl(["is-enabled", SYSTEMD_SERVICE_NAME], timeout=8)
-        enabled = (out_enabled.splitlines() or ["enabled" if ok_enabled else "disabled"])[0].strip() or ("enabled" if ok_enabled else "disabled")
+        enabled = _systemctl_value_or_fallback(
+            out_enabled,
+            ok_enabled,
+            {"enabled", "disabled", "static", "indirect", "generated", "transient", "masked", "linked", "alias", "not-found"},
+            _systemd_enabled_fallback(),
+        )
         ok_active, out_active, _rc_active = _systemctl(["is-active", SYSTEMD_SERVICE_NAME], timeout=8)
-        active = (out_active.splitlines() or ["active" if ok_active else "inactive"])[0].strip() or ("active" if ok_active else "inactive")
+        active = _systemctl_value_or_fallback(
+            out_active,
+            ok_active,
+            {"active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance", "unknown"},
+            _systemd_active_fallback(),
+        )
     security = _runtime_security_payload(unit_text=unit_text)
     return {
         "ok": True,
@@ -1724,7 +1796,7 @@ def register_systemd_service(sudo_password: str | None = None, require_dedicated
             "status": _systemd_service_status_payload(),
             "steps": steps,
         }
-    if not (_is_root_user() or _sudo_available()):
+    if not _can_run_privileged_actions():
         return {"ok": False, "error": "注册 systemd 服务需要 root 或临时 sudo 提权。", "status": _systemd_service_status_payload(), "steps": steps}
     spec = _systemd_service_spec()
     unit_text = str(spec.get("unit_text") or "")

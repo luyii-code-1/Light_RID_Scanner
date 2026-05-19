@@ -60,15 +60,15 @@ DJI_RID_VENDOR_TYPE  = 0x0D
 DJI_RID_VENDOR_PREFIX = ODID_OUI + bytes([DJI_RID_VENDOR_TYPE])
 RID_NEW_FW_BODY_MIN  = 83
 RID_DJI_VENDOR_MIN   = 10
-RID_DJI_GB46750_MIN  = 83
-RID_DJI_ENTERPRISE_PRIVATE_MIN = 68
+RID_DJI_GB46750_MIN  = 68
 RID_NEW_FW_SN_LEN    = 20
 RID_NEW_FW_UAS_LEN   = 8
 RID_NEW_FW_GB_OFF    = 5
 RID_NEW_FW_GB_MIN    = 78
 RID_NEW_FW_ALL_IDENTIFIERS = b"\xff\xff\xfe"
-RID_DJI_GB46750_HEADER = b"\xff\x20\x48\xff\xff\xfe"
-RID_DJI_ENTERPRISE_PRIVATE_HEADER = b"\xf1\x19\x03\x01\x12"
+RID_NEW_FW_EXT_MARKER = b"\xff\x20\x48\xff\xff\xfe"
+RID_GB_FF2048_MARKER = RID_NEW_FW_EXT_MARKER
+RID_DJI_GB46750_HEADER = b"\xf1\x19\x03"
 RID_NEW_FW_SN_OFF    = 11
 RID_NEW_FW_UAS_OFF   = 31
 RID_NEW_FW_PILOT_LON_OFF = 42
@@ -765,8 +765,14 @@ def _history_disk_items_locked() -> list[dict]:
             "id_type": e.get("id_type"),
             "uas_id": _uas_id_clean(e.get("uas_id")),
             "kind": e.get("kind"),
+            "format": e.get("format"),
             "rid_format": e.get("rid_format"),
             "dji_rid_kind": e.get("dji_rid_kind"),
+            "sub_format": e.get("sub_format"),
+            "parse_level": e.get("parse_level"),
+            "confidence": e.get("confidence"),
+            "coordinate_system": e.get("coordinate_system"),
+            "warnings": e.get("warnings"),
             "parse_note": e.get("parse_note"),
             "raw_vendor": e.get("raw_vendor"),
             "model": _resolve_model_name(sn, e.get("scan_type"), e.get("model")),
@@ -787,6 +793,8 @@ def _history_disk_items_locked() -> list[dict]:
             "gb_data_type": e.get("gb_data_type"),
             "gb_version_raw": e.get("gb_version_raw"),
             "gb_data_len": e.get("gb_data_len"),
+            "gb_header": e.get("gb_header"),
+            "gb_basic_like": e.get("gb_basic_like"),
             "dji_dynamic": e.get("dji_dynamic"),
             "reg_mark": e.get("reg_mark"),
             "status": e.get("status"),
@@ -801,10 +809,10 @@ def _history_disk_items_locked() -> list[dict]:
             "pos_a_lon": e.get("pos_a_lon"),
             "pos_b_lat": e.get("pos_b_lat"),
             "pos_b_lon": e.get("pos_b_lon"),
-            "alt_candidates": e.get("alt_candidates"),
-            "enterprise_model": e.get("enterprise_model"),
-            "enterprise_dynamic": e.get("enterprise_dynamic"),
-            "enterprise_signature": e.get("enterprise_signature"),
+            "operator_positions": e.get("operator_positions"),
+            "raw_coords": e.get("raw_coords"),
+            "aircraft_position": e.get("aircraft_position"),
+            "marker_offset": e.get("marker_offset"),
             "capture_type": e.get("capture_type"),
             "firmware_type": _firmware_type_key(e.get("firmware_type")),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
@@ -837,7 +845,6 @@ def load_history_store(path: str | None) -> None:
             return
         loaded = 0
         repaired_model = 0
-        repaired_enterprise = 0
         compat_dirty = False
         with state_lock:
             for raw in items:
@@ -861,13 +868,6 @@ def load_history_store(path: str | None) -> None:
                 if new_model != (old_model if old_model else "N/A"):
                     h["model"] = new_model
                     repaired_model += 1
-                enterprise_refresh = globals().get("_refresh_enterprise_private_record")
-                if callable(enterprise_refresh):
-                    try:
-                        if enterprise_refresh(h, h.get("model")):
-                            repaired_enterprise += 1
-                    except Exception:
-                        pass
                 h["raw_packets"] = list(h.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:]
                 h["track"] = _sanitize_track(h.get("track") or [])
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
@@ -879,14 +879,12 @@ def load_history_store(path: str | None) -> None:
             history_persist_dirty = False
             history_persist_last_save_wall = time.time()
         _log(f"[INFO] history cache loaded: {path} ({loaded} items)")
-        if repaired_model or repaired_enterprise or compat_dirty:
+        if repaired_model or compat_dirty:
             _history_mark_dirty()
         if compat_dirty:
             _log("[INFO] history cache upgraded for firmware/UAS fields")
         if repaired_model:
             _log(f"[INFO] history model repaired from SN map: {repaired_model}")
-        if repaired_enterprise:
-            _log(f"[INFO] history enterprise RID coordinates repaired: {repaired_enterprise}")
     except Exception as e:
         _log(f"[WARN] history cache load failed: {e}")
 
@@ -1013,9 +1011,10 @@ def clear_track_store(sn: str | None = None) -> int:
 HISTORY_DETAIL_KEYS = (
     "src_mac","id_type","uas_id","model","last_ch","ch_assumed","lat","lon",
     "alt","speed","vspeed","pilot_lat","pilot_lon","pilot_loc_type","pilot_loc_type_text",
-    "kind","rid_format","dji_rid_kind","parse_note","raw_vendor",
+    "kind","format","rid_format","dji_rid_kind","sub_format","parse_level","confidence",
+    "coordinate_system","warnings","parse_note","raw_vendor",
     "gb_version","gb_identifiers",
-    "gb_data_type","gb_version_raw","gb_data_len","dji_dynamic",
+    "gb_data_type","gb_version_raw","gb_data_len","gb_header","gb_basic_like","dji_dynamic",
     "reg_mark","status","coord_type",
     "operation_category","operation_category_text",
     "aircraft_category","aircraft_category_text",
@@ -1027,7 +1026,7 @@ HISTORY_DETAIL_KEYS = (
     "timestamp_ms","timestamp_accuracy","timestamp_accuracy_text",
     "home_lat","home_lon","aux_lat","aux_lon",
     "pos_a_lat","pos_a_lon","pos_b_lat","pos_b_lon",
-    "alt_candidates","enterprise_model","enterprise_dynamic","enterprise_signature",
+    "operator_positions","raw_coords","aircraft_position","marker_offset",
     "rssi","move_dir","ssid",
     "capture_type","firmware_type","last_capture_wall_ts","raw_packets",
     "scan_type","track","track_updated_wall_ts",

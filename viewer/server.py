@@ -25,6 +25,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from viewer.aggregation import (
+    aggregate_aircraft_detail,
     aggregate_history,
     aggregate_nodes,
     aggregate_track_for_sn,
@@ -480,6 +481,13 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 return
             snap = viewer_state_snapshot(self.store)
             self._send_json({"ok": True, "count": len(snap.get("drones") or []), "items": snap.get("drones") or []})
+            return
+        if path.startswith("/api/v1/drones/"):
+            if not self._require_auth():
+                return
+            sn = urllib.parse.unquote(path[len("/api/v1/drones/"):]).strip()
+            payload = aggregate_aircraft_detail(self.store, sn, force=False)
+            self._send_json(payload, 200 if payload.get("ok") else 404)
             return
         if path == "/api/v1/aps":
             self._send_json({"ok": True, "seq": int(time.time()), "total": 0, "count": 0, "items": []})

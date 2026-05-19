@@ -241,6 +241,8 @@ def _valid_msg_header_byte(b: int) -> bool:
 
 def _valid_payload(p: bytes) -> bool:
     if not p or len(p) < 1: return False
+    if RID_NEW_FW_EXT_MARKER in bytes(p):
+        return False
     if not _valid_msg_header_byte(p[0]):
         return False
     mt = (p[0]>>4)&0xF
@@ -258,6 +260,8 @@ def _valid_payload(p: bytes) -> bool:
 def decode_odid(payload: bytes) -> dict:
     res: dict = {"basic_id": None, "location": None, "system": None}
     if not payload: return res
+    if RID_NEW_FW_EXT_MARKER in bytes(payload):
+        return res
     mt = (payload[0]>>4)&0xF
     if mt == MSG_TYPE_PACK:
         layout = _decode_odid_pack_layout(payload)
@@ -308,6 +312,8 @@ def _pick_payload_candidate(buf: bytes) -> bytes | None:
     """
     if not buf:
         return None
+    if RID_NEW_FW_EXT_MARKER in bytes(buf):
+        return None
     cands: list[tuple[int, int, bytes]] = []
     for off in (1, 0):  # Prefer skipping service-info counter first.
         if off >= len(buf):
@@ -321,57 +327,107 @@ def _pick_payload_candidate(buf: bytes) -> bytes | None:
     cands.sort(reverse=True)
     return cands[0][2]
 
-def _new_fw_ascii_printable(raw: bytes) -> str:
+def _rid_ascii(raw: bytes) -> str:
+    raw_b = bytes(raw or b"")
+    if not raw_b or raw_b == b"\xff" * len(raw_b):
+        return ""
     try:
-        return "".join(chr(b) for b in bytes(raw or b"") if 32 <= int(b) <= 126).strip()
+        text = raw_b.decode("ascii", errors="ignore").rstrip("\x00").strip()
     except Exception:
         return ""
+    return "".join(ch for ch in text if 32 <= ord(ch) <= 126).strip()
 
 def _new_fw_ssid_rid(ssid_sn: str | None) -> str:
     s = str(ssid_sn or "").strip()
     if len(s) != RID_NEW_FW_SN_LEN:
         return ""
-    if not re.fullmatch(r"[A-Za-z0-9]{20}", s):
-        return ""
-    return s
+    return s if re.fullmatch(r"[A-Za-z0-9]{20}", s) else ""
 
-def _new_fw_read_rid_at(buf: bytes, off: int) -> str:
-    if off < 0 or off + RID_NEW_FW_SN_LEN > len(buf):
-        return ""
-    s = _new_fw_ascii_printable(buf[off:off + RID_NEW_FW_SN_LEN])
-    if len(s) != RID_NEW_FW_SN_LEN:
-        return ""
-    if not re.fullmatch(r"[A-Za-z0-9]{20}", s):
-        return ""
-    return s
+def _dji_vendor_ssid_matches(sn: str | None, ssid: str | None) -> bool:
+    ssid_rid = _new_fw_ssid_rid(ssid)
+    return not ssid_rid or not sn or str(sn) == ssid_rid
 
-def _new_fw_read_uas_id(buf: bytes, off: int) -> str:
-    if off < 0 or off + RID_NEW_FW_UAS_LEN > len(buf):
-        return ""
-    raw = bytes(buf[off:off + RID_NEW_FW_UAS_LEN])
-    if raw == b"\xff" * RID_NEW_FW_UAS_LEN:
-        return ""
-    s = _new_fw_ascii_printable(raw).rstrip("\x00").strip()
-    return s[:RID_NEW_FW_UAS_LEN]
+def _rid_unknown(
+    warnings: list[str] | None = None,
+    *,
+    body: bytes | None = None,
+    sub_format: str = "",
+) -> dict:
+    return {
+        "ok": False,
+        "format": "UNKNOWN",
+        "sub_format": sub_format,
+        "sn": None,
+        "uas_id": None,
+        "aircraft_position": None,
+        "operator_positions": [],
+        "raw_coords": [],
+        "coordinate_system": "WGS84",
+        "parse_level": "unknown",
+        "warnings": list(warnings or []),
+        "body_hex": bytes(body or b"").hex(),
+    }
 
-def _new_fw_read_ascii(buf: bytes, off: int, ln: int) -> str:
-    if off < 0 or ln <= 0 or off + ln > len(buf):
-        return ""
-    raw = bytes(buf[off:off + ln])
-    if raw == b"\xff" * ln:
-        return ""
-    try:
-        return raw.decode("ascii", errors="ignore").rstrip("\x00").strip()
-    except Exception:
-        return ""
+def _rid_result(
+    fmt: str,
+    sub_format: str,
+    *,
+    sn: str | None = None,
+    uas_id: str | None = None,
+    aircraft_position: dict | None = None,
+    operator_positions: list[dict] | None = None,
+    raw_coords: list[dict] | None = None,
+    parse_level: str,
+    warnings: list[str] | None = None,
+    body: bytes | None = None,
+    extra: dict | None = None,
+) -> dict:
+    result = {
+        "ok": True,
+        "format": fmt,
+        "sub_format": sub_format,
+        "sn": sn or None,
+        "uas_id": uas_id if uas_id else None,
+        "aircraft_position": aircraft_position,
+        "operator_positions": list(operator_positions or []),
+        "raw_coords": list(raw_coords or []),
+        "coordinate_system": "WGS84",
+        "parse_level": parse_level,
+        "warnings": list(warnings or []),
+        "body_hex": bytes(body or b"").hex(),
+    }
+    if extra:
+        result.update(extra)
+    return result
 
-def _new_fw_decode_coord_pair(buf: bytes, off: int) -> dict | None:
+def _rid_coord(
+    lat: float,
+    lon: float,
+    *,
+    role: str,
+    source: str,
+    offset: int | None,
+    alt: float | None = None,
+) -> dict | None:
+    if not _coord_pair_valid(lat, lon):
+        return None
+    return {
+        "lat": round(float(lat), 7),
+        "lon": round(float(lon), 7),
+        "alt": alt,
+        "role": role,
+        "source": source,
+        "offset": offset,
+        "coordinate_system": "WGS84",
+    }
+
+def _rid_decode_lon_lat_coord(buf: bytes, off: int, role: str, source: str) -> dict | None:
     if off < 0 or off + 8 > len(buf):
         return None
-    chunk = bytes(buf[off:off + 8])
-    if chunk == b"\xff" * 8 or chunk[:4] == b"\xff" * 4 or chunk[4:] == b"\xff" * 4:
+    raw = bytes(buf[off:off + 8])
+    if raw == b"\x00" * 8 or raw == b"\xff" * 8:
         return None
-    if _coord_raw_bytes_invalid(chunk[:4]) or _coord_raw_bytes_invalid(chunk[4:]):
+    if _coord_raw_bytes_invalid(raw[:4]) or _coord_raw_bytes_invalid(raw[4:]):
         return None
     try:
         lon_raw = struct.unpack_from("<i", buf, off)[0]
@@ -380,280 +436,15 @@ def _new_fw_decode_coord_pair(buf: bytes, off: int) -> dict | None:
         return None
     if _coord_raw_invalid(lon_raw) or _coord_raw_invalid(lat_raw):
         return None
-    lon = float(lon_raw) * 1e-7
-    lat = float(lat_raw) * 1e-7
-    if not _coord_pair_valid(lat, lon):
-        return None
-    return {
-        "lat": round(lat, 7),
-        "lon": round(lon, 7),
-        "_coord_off": off,
-    }
+    return _rid_coord(lat_raw * 1e-7, lon_raw * 1e-7, role=role, source=source, offset=off)
 
-def _new_fw_decode_coord_pair_at(buf: bytes, lon_off: int, lat_off: int) -> dict | None:
-    if lon_off < 0 or lat_off < 0 or lon_off + 4 > len(buf) or lat_off + 4 > len(buf):
-        return None
-    lon_b = bytes(buf[lon_off:lon_off + 4])
-    lat_b = bytes(buf[lat_off:lat_off + 4])
-    if _coord_raw_bytes_invalid(lon_b) or _coord_raw_bytes_invalid(lat_b):
-        return None
-    try:
-        lon_raw = struct.unpack_from("<i", buf, lon_off)[0]
-        lat_raw = struct.unpack_from("<i", buf, lat_off)[0]
-    except Exception:
-        return None
-    if _coord_raw_invalid(lon_raw) or _coord_raw_invalid(lat_raw):
-        return None
-    lon = float(lon_raw) * 1e-7
-    lat = float(lat_raw) * 1e-7
-    if not _coord_pair_valid(lat, lon):
-        return None
-    return {
-        "lat": round(lat, 7),
-        "lon": round(lon, 7),
-        "_coord_off": min(lon_off, lat_off),
-    }
-
-def _new_fw_decode_altitude(buf: bytes, off: int) -> float | None:
-    if off < 0 or off + 2 > len(buf):
-        return None
-    try:
-        raw = struct.unpack_from("<H", buf, off)[0]
-    except Exception:
-        return None
-    return round(float(raw) * 0.5 - 1000.0, 1)
-
-def _new_fw_decode_u16_scaled(buf: bytes, off: int, scale: float, offset: float,
-                              invalid: int | None = None) -> float | None:
-    if off < 0 or off + 2 > len(buf):
-        return None
-    try:
-        raw = struct.unpack_from("<H", buf, off)[0]
-    except Exception:
-        return None
-    if invalid is not None and raw == invalid:
-        return None
-    return round(float(raw) * float(scale) + float(offset), 1)
-
-def _new_fw_decode_track_deg(buf: bytes, off: int) -> float | None:
-    if off < 0 or off + 2 > len(buf):
-        return None
-    try:
-        raw = struct.unpack_from("<H", buf, off)[0]
-    except Exception:
-        return None
-    if raw == 0xFFFF or raw > 3599:
-        return None
-    return round(float(raw) / 10.0, 1)
-
-def _new_fw_decode_ground_speed(buf: bytes, off: int) -> float | None:
-    return _new_fw_decode_u16_scaled(buf, off, 0.1, 0.0, invalid=0xFFFF)
-
-def _new_fw_decode_vertical_speed(buf: bytes, off: int) -> float | None:
-    if off < 0 or off >= len(buf):
-        return None
-    raw = int(buf[off])
-    if raw == 0xFF:
-        return None
-    speed = float(raw & 0x7F) / 2.0
-    if raw & 0x80:
-        speed = -speed
-    return round(speed, 1)
-
-def _new_fw_decode_uint48_le(buf: bytes, off: int) -> int | None:
-    if off < 0 or off + 6 > len(buf):
-        return None
-    raw = bytes(buf[off:off + 6])
-    if raw == b"\x00" * 6:
-        return None
-    return int.from_bytes(raw, "little", signed=False)
-
-def _new_fw_identifier_present(identifiers: bytes, index: int) -> bool:
-    if index < 1 or index > 21 or len(identifiers) != 3:
-        return False
-    bits = int.from_bytes(identifiers, "big")
-    return bool(bits & (1 << (24 - index)))
-
-RID_NEW_FW_GB_FIELDS = [
-    (1, "sn", 20),
-    (2, "uas_id", 8),
-    (3, "operation_category", 1),
-    (4, "aircraft_category", 1),
-    (5, "pilot_loc_type", 1),
-    (6, "pilot_coord", 8),
-    (7, "pilot_alt", 2),
-    (8, "drone_coord", 8),
-    (9, "track_deg", 2),
-    (10, "ground_speed", 2),
-    (11, "relative_alt", 2),
-    (12, "vertical_speed", 1),
-    (13, "geoid_alt", 2),
-    (14, "baro_alt", 2),
-    (15, "operation_state", 1),
-    (16, "coord_sys", 1),
-    (17, "horizontal_accuracy", 1),
-    (18, "vertical_accuracy", 1),
-    (19, "speed_accuracy", 1),
-    (20, "timestamp_ms", 6),
-    (21, "timestamp_accuracy", 1),
-]
-
-RID_NEW_FW_OPERATION_CATEGORY = {0: "未定义", 1: "开放类", 2: "特定类", 3: "审定类"}
-RID_NEW_FW_AIRCRAFT_CATEGORY = {0: "微型", 1: "轻型", 2: "小型", 3: "中型", 4: "大型"}
-RID_NEW_FW_PILOT_LOC_TYPE = {0: "起飞点位置", 1: "遥控站位置"}
-RID_NEW_FW_OPERATION_STATE = {
-    0: "未报告",
-    1: "地面",
-    2: "空中",
-    3: "紧急",
-    4: "运行识别失效/非紧急",
-    5: "运行识别失效/紧急",
-}
-RID_NEW_FW_COORD_SYS = {0: "WGS-84", 1: "CGCS2000"}
-RID_NEW_FW_TS_ACCURACY = {
-    0: ">0.5s 或未知",
-    1: "<=0.5s",
-    2: "<=0.4s",
-    3: "<=0.3s",
-    4: "<=0.2s",
-    5: "<=0.1s",
-    6: "<=50ms",
-    7: "<=20ms",
-    8: "<=10ms",
-}
-
-def _new_fw_label(mapping: dict, value) -> str:
-    try:
-        v = int(value)
-    except Exception:
-        return ""
-    return str(mapping.get(v, v))
-
-def _decode_new_fw_gb_items(vendor: bytes) -> dict | None:
-    if len(vendor) < RID_NEW_FW_BODY_MIN:
-        return None
-    if vendor[0:3] != ODID_OUI or int(vendor[3]) != DJI_RID_VENDOR_TYPE:
-        return None
-    gb = bytes(vendor[RID_NEW_FW_GB_OFF:])
-    if len(gb) < 6 or int(gb[0]) != 0xFF:
-        return None
-    data_len = int(gb[2])
-    identifiers = bytes(gb[3:6])
-    cursor = RID_NEW_FW_GB_OFF + 6
-    data_end = min(len(vendor), cursor + data_len)
-    fields: dict = {
-        "dji_prefix": vendor[0:5].hex(" "),
-        "gb_data_type": int(gb[0]),
-        "gb_version_raw": int(gb[1]),
-        "gb_version": f"V{int(gb[1]) >> 5}.{int(gb[1]) & 0x1F}",
-        "gb_data_len": data_len,
-        "gb_identifiers": identifiers.hex(" "),
-    }
-    for index, name, ln in RID_NEW_FW_GB_FIELDS:
-        if not _new_fw_identifier_present(identifiers, index):
-            continue
-        if cursor + ln > len(vendor) or cursor + ln > data_end:
-            return None
-        off = cursor
-        raw = bytes(vendor[off:off + ln])
-        cursor += ln
-        if name == "sn":
-            fields["sn"] = _new_fw_read_ascii(vendor, off, ln)
-        elif name == "uas_id":
-            fields["uas_id"] = _new_fw_read_ascii(vendor, off, ln)
-        elif name == "operation_category":
-            fields["operation_category"] = int(raw[0])
-            fields["operation_category_text"] = _new_fw_label(RID_NEW_FW_OPERATION_CATEGORY, raw[0])
-        elif name == "aircraft_category":
-            fields["aircraft_category"] = int(raw[0])
-            fields["aircraft_category_text"] = _new_fw_label(RID_NEW_FW_AIRCRAFT_CATEGORY, raw[0])
-        elif name == "pilot_loc_type":
-            fields["pilot_loc_type"] = int(raw[0])
-            fields["pilot_loc_type_text"] = _new_fw_label(RID_NEW_FW_PILOT_LOC_TYPE, raw[0])
-        elif name == "pilot_coord":
-            fields["pilot_coord"] = _new_fw_decode_coord_pair(vendor, off)
-        elif name == "pilot_alt":
-            fields["pilot_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0)
-        elif name == "drone_coord":
-            fields["drone_coord"] = _new_fw_decode_coord_pair(vendor, off)
-        elif name == "track_deg":
-            fields["track_deg"] = _new_fw_decode_track_deg(vendor, off)
-        elif name == "ground_speed":
-            fields["ground_speed"] = _new_fw_decode_ground_speed(vendor, off)
-        elif name == "relative_alt":
-            fields["relative_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -9000.0, invalid=0)
-        elif name == "vertical_speed":
-            fields["vertical_speed"] = _new_fw_decode_vertical_speed(vendor, off)
-        elif name == "geoid_alt":
-            fields["geoid_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0)
-        elif name == "baro_alt":
-            fields["baro_alt"] = _new_fw_decode_u16_scaled(vendor, off, 0.5, -1000.0, invalid=0)
-        elif name == "operation_state":
-            fields["operation_state"] = int(raw[0])
-            fields["operation_state_text"] = _new_fw_label(RID_NEW_FW_OPERATION_STATE, raw[0])
-        elif name == "coord_sys":
-            fields["coord_sys"] = int(raw[0])
-            fields["coord_sys_text"] = _new_fw_label(RID_NEW_FW_COORD_SYS, raw[0])
-        elif name == "horizontal_accuracy":
-            fields["horizontal_accuracy"] = int(raw[0])
-        elif name == "vertical_accuracy":
-            fields["vertical_accuracy"] = int(raw[0])
-        elif name == "speed_accuracy":
-            fields["speed_accuracy"] = int(raw[0])
-        elif name == "timestamp_ms":
-            fields["timestamp_ms"] = _new_fw_decode_uint48_le(vendor, off)
-        elif name == "timestamp_accuracy":
-            fields["timestamp_accuracy"] = int(raw[0])
-            fields["timestamp_accuracy_text"] = _new_fw_label(RID_NEW_FW_TS_ACCURACY, raw[0])
-    return fields
-
-def _new_fw_coord_rank(coord: dict) -> tuple[int, int]:
-    try:
-        lat = float(coord.get("lat"))
-        lon = float(coord.get("lon"))
-        off = int(coord.get("_coord_off") or 0)
-    except Exception:
-        return (9, 999999)
-    # When only one group exists, byte-by-byte fallback can otherwise treat
-    # status bytes as a coordinate. Prefer the operating region before offset.
-    in_cn_region = 3.0 <= lat <= 55.0 and 70.0 <= lon <= 140.0
-    return (0 if in_cn_region else 1, off)
-
-def _new_fw_find_coord_groups(buf: bytes, start: int) -> tuple[dict | None, dict | None]:
-    if start < 0 or start + 8 > len(buf):
-        return None, None
-    max_off = min(len(buf) - 8, start + RID_NEW_FW_COORD_SEARCH_MAX)
-    singles: list[dict] = []
-    paired: list[tuple[float, int, dict, dict]] = []
-    for off in range(start, max_off + 1):
-        first = _new_fw_decode_coord_pair(buf, off)
-        if not first:
-            continue
-        second = _new_fw_decode_coord_pair(buf, off + 8)
-        if second:
-            try:
-                dist = _haversine(first["lat"], first["lon"], second["lat"], second["lon"])
-            except Exception:
-                dist = 1_000_000_000.0
-            paired.append((float(dist), off, first, second))
-        singles.append(first)
-    if paired:
-        paired.sort(key=lambda item: (item[0], item[1]))
-        return paired[0][2], paired[0][3]
-    if singles:
-        singles.sort(key=_new_fw_coord_rank)
-        return singles[0], None
-    return None, None
-
-def _new_fw_decode_lat_lon_pair(buf: bytes, off: int) -> dict | None:
+def _rid_decode_lat_lon_coord(buf: bytes, off: int, role: str, source: str) -> dict | None:
     if off < 0 or off + 8 > len(buf):
         return None
-    chunk = bytes(buf[off:off + 8])
-    if chunk == b"\xff" * 8:
+    raw = bytes(buf[off:off + 8])
+    if raw == b"\x00" * 8 or raw == b"\xff" * 8:
         return None
-    lat_b = chunk[:4]
-    lon_b = chunk[4:]
-    if _coord_raw_bytes_invalid(lat_b) or _coord_raw_bytes_invalid(lon_b):
+    if _coord_raw_bytes_invalid(raw[:4]) or _coord_raw_bytes_invalid(raw[4:]):
         return None
     try:
         lat_raw = struct.unpack_from("<i", buf, off)[0]
@@ -662,347 +453,416 @@ def _new_fw_decode_lat_lon_pair(buf: bytes, off: int) -> dict | None:
         return None
     if _coord_raw_invalid(lat_raw) or _coord_raw_invalid(lon_raw):
         return None
-    lat = float(lat_raw) * 1e-7
-    lon = float(lon_raw) * 1e-7
-    if not _coord_pair_valid(lat, lon):
+    return _rid_coord(lat_raw * 1e-7, lon_raw * 1e-7, role=role, source=source, offset=off)
+
+def _rid_dedup_coords(items: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[tuple[float, float, str]] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            key = (float(item["lat"]), float(item["lon"]), str(item.get("role") or ""))
+        except Exception:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+def _rid_vendor_starts(vendor: bytes) -> bool:
+    return (
+        len(vendor) >= 4
+        and vendor[0:3] == ODID_OUI
+        and int(vendor[3]) == DJI_RID_VENDOR_TYPE
+    )
+
+def _find_dji_vendor_payloads(data: bytes) -> list[bytes]:
+    raw = bytes(data or b"")
+    out: list[bytes] = []
+    seen: set[int] = set()
+    idx = 0
+    while True:
+        pos = raw.find(DJI_RID_VENDOR_PREFIX, idx)
+        if pos < 0:
+            break
+        if pos not in seen:
+            seen.add(pos)
+            out.append(raw[pos:])
+        idx = pos + 1
+    if out:
+        return out
+    idx = 0
+    while True:
+        pos = raw.find(ODID_OUI, idx)
+        if pos < 0:
+            break
+        if pos + 4 <= len(raw) and int(raw[pos + 3]) == DJI_RID_VENDOR_TYPE and pos not in seen:
+            seen.add(pos)
+            out.append(raw[pos:])
+        idx = pos + 1
+    return out
+
+def _rid_vendor_is_ff2048(vendor: bytes) -> bool:
+    return _rid_vendor_starts(vendor) and len(vendor) >= 11 and vendor[5:11] == RID_GB_FF2048_MARKER
+
+def _rid_vendor_is_odid_like_gb(vendor: bytes) -> bool:
+    return (
+        _rid_vendor_starts(vendor)
+        and len(vendor) >= RID_DJI_GB46750_MIN
+        and int(vendor[4]) == 0x24
+        and vendor[5:8] == RID_DJI_GB46750_HEADER
+        and ((int(vendor[8]) >> 4) & 0x0F) == MSG_TYPE_BASIC_ID
+    )
+
+def _rid_vendor_is_gb_candidate(vendor: bytes) -> bool:
+    return _rid_vendor_is_ff2048(vendor) or _rid_vendor_is_odid_like_gb(vendor)
+
+def _dji_vendor_is_gb46750(vendor: bytes) -> bool:
+    return _rid_vendor_is_gb_candidate(bytes(vendor or b""))
+
+def _dji_vendor_should_skip_legacy_odid(vendor: bytes) -> bool:
+    vendor = bytes(vendor or b"")
+    if len(vendor) < RID_DJI_VENDOR_MIN:
+        return False
+    return RID_GB_FF2048_MARKER in vendor or _rid_vendor_is_gb_candidate(vendor)
+
+def _parse_gb_vendor(vendor: bytes, ssid: str | None = None) -> dict:
+    vendor = bytes(vendor or b"")
+    if not _rid_vendor_starts(vendor):
+        return _rid_unknown(["not a DJI RID vendor payload"], body=vendor)
+
+    if _rid_vendor_is_ff2048(vendor):
+        dynamic = int(vendor[4])
+        sn = _rid_ascii(vendor[11:31])
+        uas_id = _rid_ascii(vendor[31:39])
+        warnings: list[str] = []
+        if sn and not _dji_vendor_ssid_matches(sn, ssid):
+            warnings.append("SSID RID does not match GB SN")
+        if dynamic == 0x29:
+            aircraft = _rid_decode_lon_lat_coord(vendor, 42, "aircraft", "gb_ff2048_aircraft")
+            operator = _rid_decode_lon_lat_coord(vendor, 52, "operator", "gb_ff2048_operator")
+            if aircraft is None:
+                warnings.append("GB 0x29 aircraft coordinate missing or invalid")
+            operator_positions = _rid_dedup_coords([operator] if operator else [])
+            raw_coords = _rid_dedup_coords(([aircraft] if aircraft else []) + operator_positions)
+            return _rid_result(
+                "GB46750_2025",
+                "FF2048_EXTENDED_COORD_PAIR",
+                sn=sn,
+                uas_id=uas_id,
+                aircraft_position=aircraft,
+                operator_positions=operator_positions,
+                raw_coords=raw_coords,
+                parse_level="strict",
+                warnings=warnings,
+                body=vendor,
+                extra={
+                    "raw_vendor": vendor.hex(),
+                    "gb_header": vendor[5:11].hex(" "),
+                    "dji_dynamic": dynamic,
+                },
+            )
+        if dynamic == 0x2E:
+            operator = _rid_decode_lon_lat_coord(vendor, 42, "operator", "gb_ff2048_operator")
+            if operator is None:
+                warnings.append("GB 0x2e operator coordinate missing or invalid")
+            operator_positions = _rid_dedup_coords([operator] if operator else [])
+            return _rid_result(
+                "GB46750_2025",
+                "FF2048_EXTENDED_SINGLE_OR_OPERATOR_ONLY",
+                sn=sn,
+                uas_id=uas_id,
+                aircraft_position=None,
+                operator_positions=operator_positions,
+                raw_coords=operator_positions,
+                parse_level="strict",
+                warnings=warnings,
+                body=vendor,
+                extra={
+                    "raw_vendor": vendor.hex(),
+                    "gb_header": vendor[5:11].hex(" "),
+                    "dji_dynamic": dynamic,
+                },
+            )
+        return _rid_unknown(
+            [f"unsupported GB ff2048 dynamic byte 0x{dynamic:02x}; legacy ODID blocked"],
+            body=vendor,
+            sub_format="GB_FF2048_UNSUPPORTED",
+        )
+
+    if _rid_vendor_is_odid_like_gb(vendor):
+        sn = _rid_ascii(vendor[10:30])
+        warnings: list[str] = []
+        if sn and not _dji_vendor_ssid_matches(sn, ssid):
+            warnings.append("SSID RID does not match GB SN")
+        loc = _rid_decode_lat_lon_coord(vendor, 38, "operator", "gb_odid_like_location")
+        sys_pos = _rid_decode_lat_lon_coord(vendor, 60, "operator", "gb_odid_like_system")
+        operator_positions = _rid_dedup_coords([x for x in (loc, sys_pos) if x])
+        return _rid_result(
+            "GB46750_2025",
+            "ODID_LIKE_GB_BUNDLE",
+            sn=sn,
+            uas_id=None,
+            aircraft_position=None,
+            operator_positions=operator_positions,
+            raw_coords=operator_positions,
+            parse_level="strict",
+            warnings=warnings,
+            body=vendor,
+            extra={
+                "raw_vendor": vendor.hex(),
+                "gb_header": vendor[5:8].hex(" "),
+                "gb_basic_like": vendor[8:10].hex(" "),
+                "dji_dynamic": int(vendor[4]),
+            },
+        )
+
+    return _rid_unknown(["not a supported GB46750_2025 profile"], body=vendor)
+
+def parse_gb46750_2025(data: bytes, ssid: str | None = None) -> dict:
+    raw = bytes(data or b"")
+    candidates = _find_dji_vendor_payloads(raw)
+    if _rid_vendor_starts(raw):
+        candidates.insert(0, raw)
+    for vendor in candidates:
+        if _rid_vendor_is_gb_candidate(vendor):
+            return _parse_gb_vendor(vendor, ssid)
+    return _rid_unknown(["GB46750_2025 profile not found"], body=raw)
+
+def _legacy_payload_candidates(data: bytes) -> list[bytes]:
+    raw = bytes(data or b"")
+    candidates: list[bytes] = []
+    seen: set[int] = set()
+
+    def add(payload: bytes | None) -> None:
+        if not payload:
+            return
+        payload = bytes(payload)
+        if not _valid_payload(payload):
+            return
+        sig = zlib.crc32(payload) & 0xFFFFFFFF
+        if sig in seen:
+            return
+        seen.add(sig)
+        candidates.append(payload)
+
+    add(raw)
+    for vendor in _find_dji_vendor_payloads(raw):
+        if _rid_vendor_is_gb_candidate(vendor):
+            continue
+        pack_pos = vendor.find(b"\xf1\x19\x03", 4)
+        if pack_pos >= 0:
+            add(vendor[pack_pos:])
+        if _rid_vendor_starts(vendor):
+            add(_pick_payload_candidate(vendor[4:]))
+    return candidates
+
+def parse_legacy_odid_payload(data: bytes, ssid: str | None = None) -> dict:
+    del ssid
+    merged: dict = {"basic_id": None, "location": None, "system": None}
+    sub_format = ""
+    body = bytes(data or b"")
+    for payload in _legacy_payload_candidates(body):
+        decoded = decode_odid(payload)
+        if decoded.get("basic_id") and not merged["basic_id"]:
+            merged["basic_id"] = decoded.get("basic_id")
+        if decoded.get("location") and not merged["location"]:
+            merged["location"] = decoded.get("location")
+        if decoded.get("system") and not merged["system"]:
+            merged["system"] = decoded.get("system")
+        mt = (payload[0] >> 4) & 0x0F if payload else -1
+        if mt == MSG_TYPE_PACK:
+            sub_format = "LEGACY_ODID_PACK"
+        elif mt == MSG_TYPE_BASIC_ID and not sub_format:
+            sub_format = "BASIC_ID_ONLY"
+        elif not sub_format:
+            sub_format = "LEGACY_ODID_FRAGMENT"
+    if not any(merged.values()):
+        return _rid_unknown(["legacy DJI ODID payload not found"], body=body)
+
+    basic = merged.get("basic_id") if isinstance(merged.get("basic_id"), dict) else {}
+    loc = merged.get("location") if isinstance(merged.get("location"), dict) else {}
+    sys_loc = merged.get("system") if isinstance(merged.get("system"), dict) else {}
+    sn = str(basic.get("uas_id") or "").strip() or None
+    aircraft = None
+    operator = None
+    raw_coords: list[dict] = []
+    if loc.get("lat") is not None and loc.get("lon") is not None:
+        aircraft = _rid_coord(
+            float(loc.get("lat")),
+            float(loc.get("lon")),
+            role="aircraft",
+            source="legacy_odid_location",
+            offset=None,
+            alt=loc.get("alt_geodetic"),
+        )
+        if aircraft:
+            raw_coords.append(aircraft)
+    if sys_loc.get("pilot_lat") is not None and sys_loc.get("pilot_lon") is not None:
+        operator = _rid_coord(
+            float(sys_loc.get("pilot_lat")),
+            float(sys_loc.get("pilot_lon")),
+            role="operator",
+            source="legacy_odid_system",
+            offset=None,
+            alt=sys_loc.get("pilot_alt"),
+        )
+        if operator:
+            raw_coords.append(operator)
+    operator_positions = _rid_dedup_coords([operator] if operator else [])
+    if not sub_format:
+        sub_format = "LEGACY_ODID"
+    return _rid_result(
+        "DJI_OLD_ODID",
+        sub_format,
+        sn=sn,
+        uas_id=None,
+        aircraft_position=aircraft,
+        operator_positions=operator_positions,
+        raw_coords=_rid_dedup_coords(raw_coords),
+        parse_level="legacy",
+        body=body,
+    )
+
+def _has_gb_blocking_marker(data: bytes) -> bool:
+    raw = bytes(data or b"")
+    if RID_GB_FF2048_MARKER in raw:
+        return True
+    return any(_rid_vendor_is_gb_candidate(vendor) for vendor in _find_dji_vendor_payloads(raw))
+
+def parse_rid_payload(
+    data: bytes,
+    mode: str | None = "auto",
+    *,
+    ssid_sn: str | None = None,
+    model_hint: str | None = None,
+) -> dict:
+    del model_hint
+    raw = bytes(data or b"")
+    mode_key = str(mode or "auto").strip().lower().replace("-", "_")
+    if mode_key in ("gb", "gb46750", "dji_gb46750"):
+        mode_key = "gb46750_2025"
+    elif mode_key in ("old", "legacy", "odid", "odid_legacy"):
+        mode_key = "dji_old_odid"
+    elif mode_key not in ("auto", "gb46750_2025", "dji_old_odid"):
+        mode_key = "auto"
+
+    if mode_key in ("auto", "gb46750_2025"):
+        gb = parse_gb46750_2025(raw, ssid_sn)
+        if gb.get("ok") or _has_gb_blocking_marker(raw):
+            return gb
+        if mode_key == "gb46750_2025":
+            return gb
+    if mode_key in ("auto", "dji_old_odid"):
+        old = parse_legacy_odid_payload(raw, ssid_sn)
+        if old.get("ok") or mode_key == "dji_old_odid":
+            return old
+    return _rid_unknown(["RID payload did not match GB46750_2025 or DJI_OLD_ODID"], body=raw)
+
+def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
+    if not isinstance(result, dict) or not result.get("ok"):
         return None
-    return {
-        "lat": round(lat, 7),
-        "lon": round(lon, 7),
-        "_coord_off": off,
+    sn = str(result.get("sn") or "").strip()
+    basic = {"uas_id": sn, "id_type": "Serial"} if sn else None
+    aircraft = result.get("aircraft_position") if isinstance(result.get("aircraft_position"), dict) else None
+    loc = None
+    if aircraft:
+        loc = {
+            "lat": aircraft.get("lat"),
+            "lon": aircraft.get("lon"),
+            "alt_geodetic": aircraft.get("alt"),
+            "speed_ms": None,
+            "vspeed_ms": None,
+            "direction_deg": None,
+        }
+    operators = result.get("operator_positions") if isinstance(result.get("operator_positions"), list) else []
+    first_op = operators[0] if operators and isinstance(operators[0], dict) else None
+    system = None
+    if first_op:
+        system = {
+            "pilot_lat": first_op.get("lat"),
+            "pilot_lon": first_op.get("lon"),
+            "pilot_alt": first_op.get("alt"),
+            "pilot_loc_type": None,
+            "pilot_loc_type_text": "operator",
+        }
+    fmt = str(result.get("format") or "UNKNOWN")
+    metadata = {
+        "kind": fmt,
+        "format": fmt,
+        "rid_format": fmt,
+        "dji_rid_kind": fmt,
+        "sub_format": result.get("sub_format"),
+        "parse_level": result.get("parse_level"),
+        "coordinate_system": "WGS84",
+        "coord_sys": 0,
+        "coord_sys_text": "WGS84",
+        "warnings": result.get("warnings") or [],
+        "operator_positions": operators,
+        "raw_coords": result.get("raw_coords") or [],
+        "aircraft_position": aircraft,
     }
-
-def _dji_vendor_parse_note_unknown() -> str:
-    return "\u65e0\u6cd5\u89e3\u6790\u5185\u5bb9\uff08\u672a\u77e5\u683c\u5f0f\uff09"
-
-def _dji_vendor_ssid_matches(sn: str, ssid: str | None) -> bool:
-    ssid_rid = _new_fw_ssid_rid(ssid)
-    return not ssid_rid or not sn or sn == ssid_rid
+    for key in ("raw_vendor", "gb_header", "gb_basic_like", "dji_dynamic"):
+        if key in result:
+            metadata[key] = result.get(key)
+    if result.get("uas_id"):
+        metadata["reg_mark"] = result.get("uas_id")
+    if aircraft:
+        metadata["pos_a_lat"] = aircraft.get("lat")
+        metadata["pos_a_lon"] = aircraft.get("lon")
+    if first_op:
+        metadata["pos_b_lat"] = first_op.get("lat")
+        metadata["pos_b_lon"] = first_op.get("lon")
+    return {
+        "basic_id": basic,
+        "uas_id": str(result.get("uas_id") or ""),
+        "location": loc,
+        "system": system,
+        "metadata": metadata,
+    }
 
 def parse_dji_gb46750(vendor: bytes, ssid: str | None = None) -> dict | None:
-    vendor = bytes(vendor or b"")
-    if len(vendor) < RID_DJI_GB46750_MIN:
-        return None
-    if vendor[0:3] != ODID_OUI or int(vendor[3]) != DJI_RID_VENDOR_TYPE:
-        return None
-    if vendor[5:11] != RID_DJI_GB46750_HEADER:
-        return None
-
-    sn = _new_fw_read_ascii(vendor, 11, 20)
-    if not sn or not _dji_vendor_ssid_matches(sn, ssid):
-        return None
-    reg_mark = _new_fw_read_ascii(vendor, 31, 8)
-    pilot_coord = _new_fw_decode_coord_pair(vendor, 42)
-    air_coord = _new_fw_decode_coord_pair(vendor, 52)
-    track_deg = _new_fw_decode_track_deg(vendor, 60)
-    speed = _new_fw_decode_ground_speed(vendor, 62)
-    relative_alt = _new_fw_decode_u16_scaled(vendor, 64, 0.5, -9000.0, invalid=0)
-    vspeed = _new_fw_decode_vertical_speed(vendor, 66)
-    geoid_alt = _new_fw_decode_u16_scaled(vendor, 67, 0.5, -1000.0, invalid=0)
-    baro_alt = _new_fw_decode_u16_scaled(vendor, 69, 0.5, -1000.0, invalid=0)
-    ts_raw = _new_fw_decode_uint48_le(vendor, 76)
-    operation_category = int(vendor[39])
-    aircraft_category = int(vendor[40])
-    pilot_loc_type = int(vendor[41])
-    status = int(vendor[71])
-    coord_type = int(vendor[72])
-
-    return {
-        "kind": "DJI_GB46750",
-        "rid_format": "DJI_GB46750",
-        "dji_rid_kind": "DJI_GB46750",
-        "ssid": ssid,
-        "sn": sn,
-        "uas_id": reg_mark,
-        "reg_mark": reg_mark,
-        "lat": air_coord["lat"] if air_coord else None,
-        "lon": air_coord["lon"] if air_coord else None,
-        "alt": geoid_alt,
-        "baro_alt": baro_alt,
-        "relative_alt": relative_alt,
-        "speed": speed,
-        "vspeed": vspeed,
-        "move_dir": track_deg,
-        "pilot_lat": pilot_coord["lat"] if pilot_coord else None,
-        "pilot_lon": pilot_coord["lon"] if pilot_coord else None,
-        "pilot_alt": _new_fw_decode_u16_scaled(vendor, 50, 0.5, -1000.0, invalid=0),
-        "pilot_loc_type": pilot_loc_type,
-        "pilot_loc_type_text": _new_fw_label(RID_NEW_FW_PILOT_LOC_TYPE, pilot_loc_type),
-        "operation_category": operation_category,
-        "operation_category_text": _new_fw_label(RID_NEW_FW_OPERATION_CATEGORY, operation_category),
-        "aircraft_category": aircraft_category,
-        "aircraft_category_text": _new_fw_label(RID_NEW_FW_AIRCRAFT_CATEGORY, aircraft_category),
-        "status": status,
-        "operation_state": status,
-        "operation_state_text": _new_fw_label(RID_NEW_FW_OPERATION_STATE, status),
-        "coord_type": coord_type,
-        "coord_sys": coord_type,
-        "coord_sys_text": _new_fw_label(RID_NEW_FW_COORD_SYS, coord_type),
-        "h_acc": int(vendor[73]),
-        "v_acc": int(vendor[74]),
-        "speed_acc": int(vendor[75]),
-        "horizontal_accuracy": int(vendor[73]),
-        "vertical_accuracy": int(vendor[74]),
-        "speed_accuracy": int(vendor[75]),
-        "timestamp_ms": ts_raw,
-        "timestamp_acc": int(vendor[82]),
-        "timestamp_accuracy": int(vendor[82]),
-        "timestamp_accuracy_text": _new_fw_label(RID_NEW_FW_TS_ACCURACY, int(vendor[82])),
-        "gb_version": "V1.0",
-        "gb_identifiers": vendor[8:11].hex(" "),
-        "gb_data_type": int(vendor[5]),
-        "gb_version_raw": int(vendor[6]),
-        "gb_data_len": int(vendor[7]),
-        "dji_dynamic": int(vendor[4]),
-        "track_deg": track_deg,
-        "ground_speed": speed,
-        "vertical_speed": vspeed,
-        "alt_relative": relative_alt,
-        "alt_geoid": geoid_alt,
-        "alt_baro": baro_alt,
-        "raw_vendor": vendor.hex(),
-    }
-
-def _dji_enterprise_valid_lat_lon(lat, lon) -> bool:
-    try:
-        lat_f = float(lat)
-        lon_f = float(lon)
-    except Exception:
-        return False
-    return -90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0
-
-def _decode_dji_enterprise_lat_lon(raw: bytes) -> tuple[float | None, float | None]:
-    raw = bytes(raw or b"")
-    if len(raw) != 8 or raw == b"\xff" * 8:
-        return None, None
-    try:
-        lat = int.from_bytes(raw[0:4], "little", signed=True) / 1e7
-        lon = int.from_bytes(raw[4:8], "little", signed=True) / 1e7
-    except Exception:
-        return None, None
-    if not _dji_enterprise_valid_lat_lon(lat, lon):
-        return None, None
-    return round(float(lat), 7), round(float(lon), 7)
-
-def _decode_dji_enterprise_alt_candidate(raw: bytes) -> float | None:
-    raw = bytes(raw or b"")
-    if len(raw) != 2:
-        return None
-    try:
-        value = int.from_bytes(raw, "little", signed=False)
-    except Exception:
-        return None
-    if value == 0:
-        return None
-    return round(value / 2.0 - 1000.0, 1)
-
-def detect_enterprise_model(sn: str, model_hint: str | None = None) -> str:
-    candidates = [str(model_hint or "")]
-    model_from_sn = globals().get("_model_from_sn")
-    if callable(model_from_sn):
-        try:
-            candidates.append(str(model_from_sn(sn) or ""))
-        except Exception:
-            pass
-    for text in candidates:
-        model = re.sub(r"[^0-9A-Z]+", "", str(text or "").upper())
-        if "MINI4K" in model:
-            return "MINI_4K"
-        if "M350" in model or "MATRICE350" in model:
-            return "M350_RTK"
-        if "M400" in model or "MATRICE400" in model:
-            return "M400"
-    return ""
-
-def parse_dji_enterprise_private(
-    vendor: bytes,
-    ssid: str | None = None,
-    model_hint: str | None = None,
-) -> dict | None:
-    vendor = bytes(vendor or b"")
-    if len(vendor) < RID_DJI_ENTERPRISE_PRIVATE_MIN:
-        return None
-    if vendor[0:3] != ODID_OUI or int(vendor[3]) != DJI_RID_VENDOR_TYPE:
-        return None
-    if vendor[5:10] != RID_DJI_ENTERPRISE_PRIVATE_HEADER:
-        return None
-
-    sn = _new_fw_read_ascii(vendor, 10, 20)
-    if not sn or not _dji_vendor_ssid_matches(sn, ssid):
-        return None
-    pos_a_lat, pos_a_lon = _decode_dji_enterprise_lat_lon(vendor[38:46])
-    pos_b_lat, pos_b_lon = _decode_dji_enterprise_lat_lon(vendor[60:68])
-    alt_candidates = [
-        _decode_dji_enterprise_alt_candidate(vendor[46:48]),
-        _decode_dji_enterprise_alt_candidate(vendor[48:50]),
-        _decode_dji_enterprise_alt_candidate(vendor[50:52]),
-    ]
-
-    model = detect_enterprise_model(sn, model_hint)
-    air_lat = air_lon = None
-    pilot_lat = pilot_lon = None
-    home_lat = home_lon = None
-    aux_lat = aux_lon = None
-
-    if model in ("M350_RTK", "MINI_4K"):
-        air_lat, air_lon = pos_a_lat, pos_a_lon
-        pilot_lat, pilot_lon = pos_b_lat, pos_b_lon
-    elif model == "M400":
-        air_lat, air_lon = pos_b_lat, pos_b_lon
-        home_lat, home_lon = pos_a_lat, pos_a_lon
-        aux_lat, aux_lon = pos_a_lat, pos_a_lon
-
-    return {
-        "kind": "DJI_ENTERPRISE_PRIVATE",
-        "rid_format": "DJI_ENTERPRISE_PRIVATE",
-        "dji_rid_kind": "DJI_ENTERPRISE_PRIVATE",
-        "ssid": ssid,
-        "sn": sn,
-        "uas_id": "",
-        "lat": air_lat,
-        "lon": air_lon,
-        "alt": None,
-        "speed": None,
-        "vspeed": None,
-        "move_dir": None,
-        "pilot_lat": pilot_lat,
-        "pilot_lon": pilot_lon,
-        "pilot_alt": None,
-        "coord_sys": 0,
-        "coord_sys_text": "WGS-84",
-        "home_lat": home_lat,
-        "home_lon": home_lon,
-        "aux_lat": aux_lat,
-        "aux_lon": aux_lon,
-        "pos_a_lat": pos_a_lat,
-        "pos_a_lon": pos_a_lon,
-        "pos_b_lat": pos_b_lat,
-        "pos_b_lon": pos_b_lon,
-        "alt_candidates": alt_candidates,
-        "enterprise_model": model,
-        "enterprise_dynamic": int(vendor[4]),
-        "enterprise_signature": vendor[5:10].hex(),
-        "raw_vendor": vendor.hex(),
-    }
+    result = parse_gb46750_2025(bytes(vendor or b""), ssid)
+    return result if result.get("ok") else None
 
 def parse_dji_vendor(
     vendor: bytes,
     ssid: str | None = None,
     model_hint: str | None = None,
 ) -> dict | None:
-    vendor = bytes(vendor or b"")
-    if len(vendor) < RID_DJI_VENDOR_MIN:
-        return None
-    if vendor[0:3] != ODID_OUI:
-        return None
-    if int(vendor[3]) != DJI_RID_VENDOR_TYPE:
-        return None
-    if len(vendor) >= RID_DJI_GB46750_MIN and vendor[5:11] == RID_DJI_GB46750_HEADER:
-        return parse_dji_gb46750(vendor, ssid)
-    if (
-        len(vendor) >= RID_DJI_ENTERPRISE_PRIVATE_MIN
-        and vendor[5:10] == RID_DJI_ENTERPRISE_PRIVATE_HEADER
-    ):
-        return parse_dji_enterprise_private(vendor, ssid, model_hint)
-    ssid_rid = _new_fw_ssid_rid(ssid)
-    return {
-        "kind": "DJI_UNKNOWN_RID",
-        "rid_format": "DJI_UNKNOWN_RID",
-        "dji_rid_kind": "DJI_UNKNOWN_RID",
-        "ssid": ssid,
-        "sn": ssid_rid,
-        "uas_id": "",
-        "parse_note": _dji_vendor_parse_note_unknown(),
-        "raw_vendor": vendor.hex(),
-    }
+    result = parse_rid_payload(vendor, mode="gb46750_2025", ssid_sn=ssid, model_hint=model_hint)
+    return result if result.get("ok") else None
 
 def _dji_vendor_parsed_to_decoded(parsed: dict | None) -> dict | None:
-    if not isinstance(parsed, dict):
-        return None
-    sn = str(parsed.get("sn") or "").strip()
-    basic = {"uas_id": sn, "id_type": "Serial"} if sn else None
-    loc = None
-    if any(parsed.get(k) is not None for k in ("lat", "lon", "alt", "speed", "vspeed", "move_dir")):
-        loc = {
-            "lat": parsed.get("lat"),
-            "lon": parsed.get("lon"),
-            "alt_geodetic": parsed.get("alt"),
-            "alt_relative": parsed.get("relative_alt"),
-            "alt_geoid": parsed.get("alt"),
-            "alt_baro": parsed.get("baro_alt"),
-            "speed_ms": parsed.get("speed"),
-            "vspeed_ms": parsed.get("vspeed"),
-            "direction_deg": parsed.get("move_dir"),
-        }
-    system = None
-    if parsed.get("pilot_lat") is not None and parsed.get("pilot_lon") is not None:
-        system = {
-            "pilot_lat": parsed.get("pilot_lat"),
-            "pilot_lon": parsed.get("pilot_lon"),
-            "pilot_alt": parsed.get("pilot_alt"),
-            "pilot_loc_type": parsed.get("pilot_loc_type"),
-            "pilot_loc_type_text": str(parsed.get("pilot_loc_type_text") or ""),
-        }
-    metadata = {}
-    for key in (
-        "kind", "rid_format", "dji_rid_kind", "parse_note", "raw_vendor",
-        "reg_mark", "gb_version", "gb_identifiers", "gb_data_type",
-        "gb_version_raw", "gb_data_len", "dji_dynamic",
-        "operation_category", "operation_category_text",
-        "aircraft_category", "aircraft_category_text",
-        "track_deg", "ground_speed", "vertical_speed",
-        "relative_alt", "alt_relative", "alt_geoid", "baro_alt", "alt_baro",
-        "pilot_alt", "status", "operation_state", "operation_state_text",
-        "coord_type", "coord_sys", "coord_sys_text",
-        "h_acc", "v_acc", "speed_acc", "horizontal_accuracy",
-        "vertical_accuracy", "speed_accuracy", "timestamp_ms",
-        "timestamp_acc", "timestamp_accuracy", "timestamp_accuracy_text",
-        "home_lat", "home_lon", "aux_lat", "aux_lon",
-        "pos_a_lat", "pos_a_lon", "pos_b_lat", "pos_b_lon",
-        "alt_candidates", "enterprise_model", "enterprise_dynamic", "enterprise_signature",
-    ):
-        if key in parsed:
-            metadata[key] = parsed.get(key)
-    return {
-        "basic_id": basic,
-        "uas_id": str(parsed.get("uas_id") or ""),
-        "location": loc,
-        "system": system,
-        "metadata": metadata,
-    }
+    return rid_parse_result_to_decoded(parsed)
 
-def _new_fw_payload_sig(body: bytes) -> int:
+def _gb_payload_sig(body: bytes) -> int:
     head = bytes(body or b"")[:RID_NEW_FW_SIG_BYTES]
     return zlib.crc32(head) & 0xFFFFFFFF
 
-def decode_new_firmware_payload(
+def decode_gb46750_payload(
     buf: bytes,
     ssid_sn: str | None = None,
     model_hint: str | None = None,
 ) -> dict | None:
-    """Decode DJI's newer Beacon vendor body starting at FA:0B:BC:0D.
+    """Decode only the supported GB46750_2025 DJI vendor profiles."""
+    result = parse_rid_payload(buf, mode="gb46750_2025", ssid_sn=ssid_sn, model_hint=model_hint)
+    return rid_parse_result_to_decoded(result)
 
-    This path is intentionally separate from the standard ODID decoder. DJI's
-    subtype 0x0d Beacon has multiple incompatible inner layouts, so dispatch
-    by the format signature before reading fixed offsets.
-    """
-    if not buf or len(buf) < RID_DJI_VENDOR_MIN:
-        return None
-    vendor = bytes(buf)
-    parsed = parse_dji_vendor(vendor, ssid_sn, model_hint)
-    return _dji_vendor_parsed_to_decoded(parsed)
-
-def _append_new_firmware_result(
+def _append_gb46750_result(
     results: list[tuple[bytes, dict]],
     dedup: set[int],
     body: bytes,
     ssid_sn: str | None,
     model_hint: str | None = None,
 ) -> None:
-    decoded = decode_new_firmware_payload(body, ssid_sn=ssid_sn, model_hint=model_hint)
+    result = parse_rid_payload(body, mode="gb46750_2025", ssid_sn=ssid_sn, model_hint=model_hint)
+    decoded = rid_parse_result_to_decoded(result)
     if not decoded:
         return
-    sig = _new_fw_payload_sig(body)
+    sig = _gb_payload_sig(body)
     if sig in dedup:
         return
     dedup.add(sig)
@@ -1020,6 +880,14 @@ def extract_from_ies(pkt) -> list[bytes]:
             info = bytes(elt.info) if elt.info else b""
             # Standard OUI prefix: 4 bytes (OUI + subtype).
             if len(info) >= 4 and info[:3] == ODID_OUI:
+                if _dji_vendor_should_skip_legacy_odid(info):
+                    try:
+                        nxt = elt.payload
+                        if not isinstance(nxt, Dot11Elt): break
+                        elt = nxt
+                        continue
+                    except Exception:
+                        break
                 p = _pick_payload_candidate(info[4:])
                 if p:
                     sig = zlib.crc32(p) & 0xFFFFFFFF
@@ -1032,6 +900,9 @@ def extract_from_ies(pkt) -> list[bytes]:
                 while True:
                     pos = info.find(ODID_OUI, idx)
                     if pos < 0: break
+                    if _dji_vendor_should_skip_legacy_odid(info[pos:]):
+                        idx = pos + 1
+                        continue
                     p = _pick_payload_candidate(info[pos+4:])
                     if p:
                         sig = zlib.crc32(p) & 0xFFFFFFFF
@@ -1057,6 +928,9 @@ def extract_from_raw(pkt) -> list[bytes]:
     while True:
         pos = raw.find(ODID_OUI, idx)
         if pos < 0: break
+        if _dji_vendor_should_skip_legacy_odid(raw[pos:pos + RID_NEW_FW_SIG_BYTES]):
+            idx = pos + 1
+            continue
         p = _pick_payload_candidate(raw[pos+4 : pos+4+2+9*ODID_MSG_SIZE+2])
         if p:
             sig = zlib.crc32(p) & 0xFFFFFFFF
@@ -1066,7 +940,7 @@ def extract_from_raw(pkt) -> list[bytes]:
         idx = pos + 1
     return results
 
-def extract_new_firmware_from_ies(
+def extract_gb46750_from_ies(
     pkt,
     ssid_sn: str | None = None,
     model_hint: str | None = None,
@@ -1083,7 +957,7 @@ def extract_new_firmware_from_ies(
                 if pos < 0:
                     break
                 if pos < len(info):
-                    _append_new_firmware_result(results, dedup, info[pos:], ssid_sn, model_hint)
+                    _append_gb46750_result(results, dedup, info[pos:], ssid_sn, model_hint)
                 idx = pos + 1
         try:
             nxt = elt.payload
@@ -1094,7 +968,7 @@ def extract_new_firmware_from_ies(
             break
     return results
 
-def extract_new_firmware_from_raw(
+def extract_gb46750_from_raw(
     pkt,
     ssid_sn: str | None = None,
     model_hint: str | None = None,
@@ -1112,7 +986,7 @@ def extract_new_firmware_from_raw(
         if pos < 0:
             break
         if pos < len(raw):
-            _append_new_firmware_result(
+            _append_gb46750_result(
                 results, dedup, raw[pos:pos + RID_NEW_FW_SIG_BYTES], ssid_sn, model_hint
             )
         idx = pos + 1

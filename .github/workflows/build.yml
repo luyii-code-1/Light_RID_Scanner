@@ -4,20 +4,12 @@ permissions:
   contents: write
 
 on:
-  push:
-  pull_request:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Optional tag to build and upload to release"
-        required: false
-        default: ""
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
-  BUILD_REF: ${{ github.event.release.tag_name || github.event.inputs.tag || github.sha }}
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+  BUILD_REF: ${{ github.event.release.tag_name }}
 
 jobs:
   linux-native:
@@ -86,16 +78,7 @@ jobs:
           file "$DST"
           ls -lah release-upload
 
-      - name: Upload workflow artifact
-        if: ${{ env.RELEASE_TAG == '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: light_rid_${{ matrix.edition }}-linux-${{ matrix.target }}
-          path: release-upload/*
-          if-no-files-found: error
-
       - name: Upload binary to GitHub Release
-        if: ${{ env.RELEASE_TAG != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -159,16 +142,7 @@ jobs:
           file "$DST"
           ls -lah release-upload
 
-      - name: Upload workflow artifact
-        if: ${{ env.RELEASE_TAG == '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: light_rid_${{ matrix.edition }}-linux-x32
-          path: release-upload/*
-          if-no-files-found: error
-
       - name: Upload binary to GitHub Release
-        if: ${{ env.RELEASE_TAG != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -237,16 +211,7 @@ jobs:
           file "$DST"
           ls -lah release-upload
 
-      - name: Upload workflow artifact
-        if: ${{ env.RELEASE_TAG == '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: light_rid_${{ matrix.edition }}-linux-armv7
-          path: release-upload/*
-          if-no-files-found: error
-
       - name: Upload binary to GitHub Release
-        if: ${{ env.RELEASE_TAG != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

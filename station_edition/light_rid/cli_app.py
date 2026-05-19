@@ -45,11 +45,11 @@ def parse_frame(pkt) -> None:
             except Exception:
                 pass
 
-        # ODID 载荷提取。旧 ODID 和新版 DJI Beacon payload 保持两套解析路径。
+        # Parse GB46750_2025 vendor bodies before legacy DJI ODID fragments.
         payloads = extract_from_ies(pkt)
         ssid_rid = _ssid_to_sn(ssid or "")
-        new_fw_payloads = extract_new_firmware_from_ies(pkt, ssid_rid) if d11.subtype == 8 else []
-        new_fw_frame = bool(new_fw_payloads)
+        gb_payloads = extract_gb46750_from_ies(pkt, ssid_rid) if d11.subtype == 8 else []
+        gb_frame = bool(gb_payloads)
         if d11.subtype in (13, 5, 8):   # Extra: also scan raw payload for all mgmt subtypes
             raw_p = extract_from_raw(pkt)
             # 去重
@@ -58,20 +58,20 @@ def parse_frame(pkt) -> None:
                 if (zlib.crc32(p)&0xFFFFFFFF) not in sigs:
                     payloads.append(p)
             if d11.subtype == 8:
-                new_raw = extract_new_firmware_from_raw(pkt, ssid_rid)
-                new_sigs = {_new_fw_payload_sig(p[0]) for p in new_fw_payloads}
-                for p in new_raw:
-                    sig = _new_fw_payload_sig(p[0])
-                    if sig not in new_sigs:
-                        new_sigs.add(sig)
-                        new_fw_payloads.append(p)
+                gb_raw = extract_gb46750_from_raw(pkt, ssid_rid)
+                gb_sigs = {_gb_payload_sig(p[0]) for p in gb_payloads}
+                for p in gb_raw:
+                    sig = _gb_payload_sig(p[0])
+                    if sig not in gb_sigs:
+                        gb_sigs.add(sig)
+                        gb_payloads.append(p)
                 if ssid_rid:
                     try:
-                        new_fw_frame = bool(new_fw_payloads or (DJI_RID_VENDOR_PREFIX in bytes(pkt)))
+                        gb_frame = bool(gb_payloads or (DJI_RID_VENDOR_PREFIX in bytes(pkt)))
                     except Exception:
-                        new_fw_frame = bool(new_fw_payloads)
-        if new_fw_frame and payloads:
-            # New-firmware DJI Beacon vendor bodies contain byte sequences that
+                        gb_frame = bool(gb_payloads)
+        if gb_frame and payloads:
+            # GB46750 DJI vendor bodies contain byte sequences that
             # can look like legacy ODID fragments. Keep both parser paths
             # separate so those fragments cannot create fake positions.
             payloads = []
@@ -85,8 +85,8 @@ def parse_frame(pkt) -> None:
             if payloads:
                 types = [f"{((p[0]>>4)&0xF):X}" for p in payloads if p]
                 odid_s = f" ODID={len(payloads)}[{','.join(types)}]"
-            if new_fw_payloads:
-                odid_s += f" NEWFW={len(new_fw_payloads)}"
+            if gb_payloads:
+                odid_s += f" GB46750={len(gb_payloads)}"
             _scan(f"[FRAME] {subtype_name} src={src_mac} {rssi_s} {ch_s}{ssid_s}{odid_s}")
 
         is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
@@ -96,7 +96,7 @@ def parse_frame(pkt) -> None:
         except Exception:
             frame_hex = ""
 
-        if not payloads and not new_fw_payloads:
+        if not payloads and not gb_payloads:
             # Even without ODID payload, if SSID contains RID SN, still refresh last_seen_ts.
             if is_wifi_fast:
                 state_update(src_mac, {"basic_id": {"uas_id": _wifi_fast_sn(src_mac), "id_type": "SSID"}, "location": None, "system": None},
@@ -152,10 +152,10 @@ def parse_frame(pkt) -> None:
                     if l: _scan(f"  -> Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
                                 f"alt={l.get('alt_geodetic'):.1f}m spd={l.get('speed_ms')}")
                     if s: _scan(f"  -> System(pilot): lat={s.get('pilot_lat')} lon={s.get('pilot_lon')} type={s.get('pilot_loc_type_text')}")
-        for body, decoded in new_fw_payloads:
+        for body, decoded in gb_payloads:
             if not body or not decoded:
                 continue
-            sig = _new_fw_payload_sig(body)
+            sig = _gb_payload_sig(body)
             state_update(src_mac, decoded, rssi=rssi, ch=ch,
                          ch_assumed=ch_assumed, pl_sig=sig,
                          scan_type="rid", ssid=ssid, capture_type=subtype_name,
@@ -164,9 +164,9 @@ def parse_frame(pkt) -> None:
             if DEBUG_MODE:
                 b = decoded.get("basic_id")
                 l = decoded.get("location")
-                if b: _scan(f"  -> NewFW BasicID: {b}")
+                if b: _scan(f"  -> GB BasicID: {b}")
                 if l and l.get("lat") is not None and l.get("lon") is not None:
-                    _scan(f"  -> NewFW Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
+                    _scan(f"  -> GB Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f} "
                           f"alt={l.get('alt_geodetic')}m")
     except Exception as ex:
         if DEBUG_MODE:

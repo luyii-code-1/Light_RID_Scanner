@@ -4,20 +4,12 @@ permissions:
   contents: write
 
 on:
-  push:
-  pull_request:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Optional tag to build and upload to release"
-        required: false
-        default: ""
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || '' }}
-  BUILD_REF: ${{ github.event.release.tag_name || github.event.inputs.tag || github.sha }}
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+  BUILD_REF: ${{ github.event.release.tag_name }}
 
 jobs:
   viewer:
@@ -81,16 +73,7 @@ jobs:
           cp "release/viewer/${{ matrix.target }}"/* release-upload/
           ls -lah release-upload
 
-      - name: Upload workflow artifact
-        if: ${{ env.RELEASE_TAG == '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: viewer-${{ matrix.target }}
-          path: release-upload/*
-          if-no-files-found: error
-
       - name: Upload binary to GitHub Release
-        if: ${{ env.RELEASE_TAG != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -141,16 +124,7 @@ jobs:
           cp "release/viewer/x32"/* release-upload/
           ls -lah release-upload
 
-      - name: Upload workflow artifact
-        if: ${{ env.RELEASE_TAG == '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: viewer-x32
-          path: release-upload/*
-          if-no-files-found: error
-
       - name: Upload binary to GitHub Release
-        if: ${{ env.RELEASE_TAG != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

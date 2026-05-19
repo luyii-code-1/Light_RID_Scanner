@@ -22,6 +22,17 @@ _LIVE_CACHE_LOCK = threading.Lock()
 _LIVE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+def _clear_live_cache(store: ConfigStore | None = None) -> None:
+    prefix = str(getattr(store, "path", "") or "")
+    with _LIVE_CACHE_LOCK:
+        if not prefix:
+            _LIVE_CACHE.clear()
+            return
+        for key in list(_LIVE_CACHE):
+            if key.startswith(prefix + "|"):
+                _LIVE_CACHE.pop(key, None)
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         if value in (None, ""):
@@ -409,6 +420,32 @@ def aggregate_track_for_sn(store: ConfigStore, sn: str, *, force: bool = False) 
     return payload
 
 
+def aggregate_aircraft_detail(store: ConfigStore, sn: str, *, force: bool = False) -> dict[str, Any]:
+    target_sn = str(sn or "").strip()
+    if not target_sn:
+        return {"ok": False, "error": "sn required", "item": None, "track": []}
+    aggregate = aggregate_nodes(store, force=force)
+    item = None
+    for row in aggregate.get("drones") or []:
+        if isinstance(row, dict) and str(row.get("sn") or "").strip() == target_sn:
+            item = dict(row)
+            break
+    if not item:
+        return {"ok": False, "error": "sn not found", "sn": target_sn, "item": None, "track": []}
+    track_payload = aggregate_track_for_sn(store, target_sn, force=force)
+    track = track_payload.get("track") if isinstance(track_payload.get("track"), list) else []
+    return {
+        "ok": True,
+        "sn": target_sn,
+        "sn_now": target_sn,
+        "item": item,
+        "track_count": len(track),
+        "track": track,
+        "nodes": track_payload.get("nodes") or [],
+        "cached": bool(aggregate.get("cached") or track_payload.get("cached")),
+    }
+
+
 def fetch_node_metrics(node: dict[str, Any], window: str = "12h") -> dict[str, Any]:
     raw = str(window or "12h").strip().lower()
     if raw not in {"12h", "24h", "7d"}:
@@ -499,13 +536,27 @@ def reparse_node_aircraft(store: ConfigStore, sn: str, mode: str = "auto") -> di
     ok_count = sum(1 for item in results if item.get("ok"))
     if ok_count:
         store.clear_cache_payload(None)
+        _clear_live_cache(store)
+    sn_now = target_sn
+    for item in results:
+        response = item.get("response") if isinstance(item.get("response"), dict) else {}
+        candidate = str(response.get("sn_now") or response.get("sn") or "").strip()
+        if item.get("ok") and candidate:
+            sn_now = candidate
+            break
+    detail = aggregate_aircraft_detail(store, sn_now, force=True) if ok_count else {}
     return {
         "ok": bool(ok_count),
         "sn": target_sn,
+        "sn_now": sn_now,
         "mode": mode_key,
         "updated_nodes": ok_count,
         "node_count": len(results),
         "results": results,
+        "refresh": bool(ok_count),
+        "item": detail.get("item") if isinstance(detail, dict) else None,
+        "track": detail.get("track") if isinstance(detail, dict) else [],
+        "track_count": detail.get("track_count", 0) if isinstance(detail, dict) else 0,
         "message": f"远程重新解析完成: {ok_count}/{len(results)} 个节点",
     }
 

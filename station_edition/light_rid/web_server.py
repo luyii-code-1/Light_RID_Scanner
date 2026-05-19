@@ -144,12 +144,12 @@ header h1{font-size:20px;font-weight:600;color:var(--txt);letter-spacing:.01em;t
 .banner.warn{border-color:color-mix(in srgb, var(--yellow) 34%, var(--border));background:color-mix(in srgb, var(--yellow) 10%, var(--panel));color:#ffd9a9}
 .banner.ok:before{background:var(--green)}
 .banner.warn:before{background:var(--yellow)}
-.rid-loading-overlay{position:fixed;inset:0;z-index:2600;display:none;align-items:center;justify-content:center;pointer-events:none;background:radial-gradient(circle at center,color-mix(in srgb,var(--bg) 20%,transparent),transparent 46%)}
+.rid-loading-overlay{position:fixed;inset:0;z-index:2600;display:none;align-items:flex-start;justify-content:center;pointer-events:none;padding-top:74px;background:transparent}
 .rid-loading-overlay.show{display:flex}
-.rid-loading-box{min-width:min(360px,calc(100vw - 44px));max-width:min(520px,calc(100vw - 44px));display:grid;justify-items:center;gap:12px;padding:22px 24px;border:1px solid color-mix(in srgb,var(--blue) 32%,var(--border));border-radius:8px;background:color-mix(in srgb,var(--panel) 92%,transparent);box-shadow:0 18px 54px rgba(0,0,0,.36),0 0 0 1px rgba(255,255,255,.04);backdrop-filter:blur(10px)}
-.rid-loading-spinner{width:42px;height:42px;border-radius:50%;border:3px solid color-mix(in srgb,var(--blue) 18%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .82s linear infinite}
-.rid-loading-title{font:700 17px/1.2 var(--font-ui);color:var(--txt)}
-.rid-loading-copy{font:600 13px/1.45 var(--font-ui);color:var(--dim);text-align:center;max-width:44ch}
+.rid-loading-box{width:min(420px,calc(100vw - 28px));min-height:78px;display:grid;grid-template-columns:28px minmax(0,1fr);gap:6px 12px;align-items:start;padding:12px 14px;border:1px solid color-mix(in srgb,var(--blue) 32%,var(--border));border-left:4px solid var(--blue);border-radius:8px;background:color-mix(in srgb,var(--panel) 94%,transparent);box-shadow:0 12px 30px rgba(0,0,0,.26);backdrop-filter:blur(12px)}
+.rid-loading-spinner{grid-row:1/3;width:22px;height:22px;margin-top:2px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 18%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .82s linear infinite}
+.rid-loading-title{font:700 14px/1.2 var(--font-ui);color:var(--txt)}
+.rid-loading-copy{font:600 12px/1.45 var(--font-ui);color:var(--dim);text-align:left;max-width:44ch}
 @keyframes ridLoadingSpin{to{transform:rotate(360deg)}}
 .notify-center-button{
   position:fixed;right:18px;bottom:18px;z-index:9999;width:54px;height:54px;border-radius:50%;
@@ -708,6 +708,7 @@ var uiFrozen = false;
 var frozenPendingData = null;
 var homeFreezeAfterFirstRender = false;
 var uiTheme = 'dark';
+var activeInfoSn = '';
 var infoCardEscBound = false;
 var infoCardDragState = {x:null, y:null, pointerId:null, startX:0, startY:0, cardX:0, cardY:0};
 var webNotifyEnabled = false;
@@ -1023,10 +1024,12 @@ function buildInfoHtml(e){
   html += infoRowHtml('包数', String(e.pkts==null?0:e.pkts));
   html += infoRowHtml('纬度', fmt(e.lat,6,''));
   html += infoRowHtml('经度', fmt(e.lon,6,''));
-  html += infoRowHtml('飞手纬度', fmt(e.pilot_lat,6,''));
-  html += infoRowHtml('飞手经度', fmt(e.pilot_lon,6,''));
-  html += infoRowHtml('Home/Aux 纬度', fmt(e.home_lat ?? e.aux_lat,6,''));
-  html += infoRowHtml('Home/Aux 经度', fmt(e.home_lon ?? e.aux_lon,6,''));
+  html += infoRowHtml('遥控站纬度', fmt(e.pilot_lat,6,''));
+  html += infoRowHtml('遥控站经度', fmt(e.pilot_lon,6,''));
+  var homeAuxRows = appendHomeAuxRows([], e);
+  homeAuxRows.forEach(function(row){
+    html += infoRowHtml(row[0], row[1]);
+  });
   html += infoRowHtml('飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-'));
   html += infoRowHtml('高度', fmt(e.alt,1,'m'));
   html += infoRowHtml('相对高度', fmt(e.alt_relative,1,'m'));
@@ -1274,6 +1277,7 @@ function hideInfoCard(){
   var modal = qs('info-modal');
   if(!modal) return;
   modal.classList.remove('show');
+  activeInfoSn = '';
 }
 function clampInfoCardPosition(card, x, y){
   var margin = 8;
@@ -1367,6 +1371,32 @@ function showInfoCard(msg, asHtml){
   }
   modal.classList.add('show');
   applyInfoCardDragPosition();
+}
+function showDroneInfoCard(e){
+  e = e || {};
+  activeInfoSn = String(e.sn || '');
+  showInfoCard(buildInfoHtml(e), true);
+}
+function findDisplayRowBySn(rows, sn){
+  sn = String(sn || '');
+  if(!sn) return null;
+  var arr = Array.isArray(rows) ? rows : [];
+  for(var i=0;i<arr.length;i++){
+    var row = arr[i] || {};
+    if(String(row.sn || '') === sn) return row;
+  }
+  return null;
+}
+function refreshActiveInfoCard(rows){
+  var modal = qs('info-modal');
+  var body = qs('info-card-body');
+  var sn = String(activeInfoSn || '');
+  if(!modal || !body || !sn || !modal.classList.contains('show')) return;
+  var row = findDisplayRowBySn(rows, sn) || latestDroneMap[sn] || null;
+  if(!row) return;
+  var oldScroll = body.scrollTop;
+  body.innerHTML = stripUnsafeHtml(buildInfoHtml(row));
+  body.scrollTop = oldScroll;
 }
 function fieldKey(sn, field){ return String(sn||'') + '|' + String(field||''); }
 function markFieldHighlight(sn, field, ms){
@@ -2731,7 +2761,7 @@ function buildExtraUi(){
           return;
         }
         var e = latestDroneMap[sn];
-        if(e) showInfoCard(buildInfoHtml(e), true);
+        if(e) showDroneInfoCard(e);
       }, 220);
     }
   });
@@ -3390,7 +3420,8 @@ function renderLiveCards(list){
     var rssi = e.rssi == null ? 'N/A' : (String(e.rssi) + 'dBm');
     var model = String(e.model || 'N/A');
     var latlon = (e.lat == null || e.lon == null) ? 'N/A' : (fmt(e.lat,6,'') + ', ' + fmt(e.lon,6,''));
-    var pilot = (e.pilot_lat == null || e.pilot_lon == null) ? 'N/A' : (fmt(e.pilot_lat,6,'') + ', ' + fmt(e.pilot_lon,6,''));
+    var pilot = coordText(e.pilot_lat, e.pilot_lon, 6);
+    var homeAux = homeAuxCoordText(e);
     var alt = fmt(e.alt,1,'m');
     var spd = fmt(e.spd,2,'m/s');
     var heading = String(e.dir || '-');
@@ -3415,7 +3446,8 @@ function renderLiveCards(list){
       +   '<div class="live-card-item"><div class="k">高度</div><div class="v">'+esc(alt)+'</div></div>'
       +   '<div class="live-card-item"><div class="k">速度</div><div class="v">'+esc(spd)+'</div></div>'
       +   '<div class="live-card-item"><div class="k">航向</div><div class="v">'+esc(heading)+'</div></div>'
-      +   '<div class="live-card-item"><div class="k">飞手坐标</div><div class="v">'+esc(pilot)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">遥控站位置</div><div class="v">'+esc(pilot)+'</div></div>'
+      +   '<div class="live-card-item"><div class="k">Aux/Home</div><div class="v">'+esc(homeAux)+'</div></div>'
       +   '<div class="live-card-item"><div class="k">信号 / 更新</div><div class="v">'+esc(rssi + ' / ' + String(e.age_text || fmtAge(e.age)))+'</div></div>'
       + '</div>'
       + '<div class="live-card-foot"><span>最后数据包 '+esc(String(e.last_pkt_time || e.capture_time || '-'))+'</span><span>#'+(idx+1)+'</span></div>'
@@ -3477,6 +3509,7 @@ function renderDroneTable(list){
   renderLiveCards(list);
   renderMapMiniList(list);
   refreshTrackMgrOptions(list);
+  refreshActiveInfoCard(list);
 }
 
 function connect(){
@@ -3703,7 +3736,7 @@ function focusLiveAircraft(sn){
   setSnSelected(sn, true, {exclusive:true});
   var e = latestDroneMap[sn];
   if(e){
-    showInfoCard(buildInfoHtml(e), true);
+    showDroneInfoCard(e);
     focusEntryOnMap(e, 16);
   }
 }
@@ -3713,7 +3746,7 @@ function focusHistoryAircraft(sn){
   setHistoryVisibleSet([sn], {keepReplay:false});
   var e = latestDroneMap[sn];
   if(e){
-    showInfoCard(buildInfoHtml(e), true);
+    showDroneInfoCard(e);
     focusEntryOnMap(e, 16);
   }
 }
@@ -4602,6 +4635,92 @@ function pilotIcon(color, lost){
   });
 }
 
+function homeAuxIcon(color, lost){
+  var op = lost ? 0.4 : 1.0;
+  var fill = color || '#ffb84d';
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24">'
+    +'<rect x="3.5" y="3.5" width="17" height="17" rx="4" ry="4" fill="'+fill+'" fill-opacity="'+op+'" stroke="#fff" stroke-width="1.4"/>'
+    +'<path d="M6.8 12.1 12 7.6l5.2 4.5M8.3 11.2v5.5h7.4v-5.5" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>'
+    +'<path d="M10.9 16.7v-3.1h2.2v3.1" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    +'</svg>';
+  return L.divIcon({
+    html: svg, className:'', iconSize:[48,48], iconAnchor:[24,24], popupAnchor:[0,-20]
+  });
+}
+
+function coordText(lat, lon, dec){
+  dec = dec == null ? 6 : dec;
+  return validMapCoord(lat, lon) ? (Number(lat).toFixed(dec) + ', ' + Number(lon).toFixed(dec)) : 'N/A';
+}
+
+function sameCoord(aLat, aLon, bLat, bLon){
+  if(!validMapCoord(aLat, aLon) || !validMapCoord(bLat, bLon)) return false;
+  return Math.abs(Number(aLat) - Number(bLat)) < 0.000001 && Math.abs(Number(aLon) - Number(bLon)) < 0.000001;
+}
+
+function homeAuxLocations(e){
+  e = e || {};
+  var locs = [];
+  var hasHome = validMapCoord(e.home_lat, e.home_lon);
+  var hasAux = validMapCoord(e.aux_lat, e.aux_lon);
+  var auxDiff = hasAux && (!hasHome || !sameCoord(e.home_lat, e.home_lon, e.aux_lat, e.aux_lon));
+  if(hasHome){
+    locs.push({kind:'home', label:auxDiff ? 'Home' : 'Aux/Home', lat:e.home_lat, lon:e.home_lon});
+  }
+  if(auxDiff){
+    locs.push({kind:'aux', label:hasHome ? 'Aux' : 'Aux/Home', lat:e.aux_lat, lon:e.aux_lon});
+  }
+  return locs;
+}
+
+function operatorLocationEntries(e){
+  e = e || {};
+  var locs = [];
+  if(validMapCoord(e.pilot_lat, e.pilot_lon)){
+    locs.push({
+      kind:'remote',
+      label:'遥控站位置',
+      lat:e.pilot_lat,
+      lon:e.pilot_lon,
+      typeText:String(e.pilot_loc_type_text || e.pilot_loc_type || 'unknown'),
+      icon:'pilot'
+    });
+  }
+  homeAuxLocations(e).forEach(function(loc){
+    locs.push({
+      kind:loc.kind,
+      label:loc.label,
+      lat:loc.lat,
+      lon:loc.lon,
+      typeText:'Aux/Home',
+      icon:'home'
+    });
+  });
+  return locs;
+}
+
+function homeAuxCoordText(e){
+  var locs = homeAuxLocations(e);
+  if(!locs.length) return 'N/A';
+  return locs.map(function(loc){
+    return loc.label + ': ' + coordText(loc.lat, loc.lon, 6);
+  }).join(' / ');
+}
+
+function appendHomeAuxRows(rows, e){
+  var locs = homeAuxLocations(e);
+  if(!locs.length){
+    rows.push(['Aux/Home 纬度', fmt((e || {}).home_lat ?? (e || {}).aux_lat,6,'')]);
+    rows.push(['Aux/Home 经度', fmt((e || {}).home_lon ?? (e || {}).aux_lon,6,'')]);
+    return rows;
+  }
+  locs.forEach(function(loc){
+    rows.push([loc.label + ' 纬度', fmt(loc.lat,6,'')]);
+    rows.push([loc.label + ' 经度', fmt(loc.lon,6,'')]);
+  });
+  return rows;
+}
+
 function updateMap(drones){
   if(!map) return;
   applyBaseMarker(false);
@@ -4622,17 +4741,20 @@ function updateMap(drones){
     if(page === 'history' && !selectedSet[sn]) return false;
     return validMapCoord(e.lat, e.lon);
   });
-  var livePilot = (page === 'live' ? recentRows : rows).filter(function(e){
+  var liveOperatorLocations = [];
+  (page === 'live' ? recentRows : rows).forEach(function(e){
     var sn = String((e && e.sn) || '');
-    if(!sn) return false;
-    if(page === 'history' && !selectedSet[sn]) return false;
-    return validMapCoord(e.pilot_lat, e.pilot_lon);
+    if(!sn) return;
+    if(page === 'history' && !selectedSet[sn]) return;
+    operatorLocationEntries(e).forEach(function(loc){
+      liveOperatorLocations.push({sn:sn, row:e, loc:loc});
+    });
   });
   var mapHintTxt = '';
   if(page === 'live'){
-    mapHintTxt = '实时目标:' + recentRows.length + '  飞机:' + liveAir.length + '  飞手:' + livePilot.length + '  离线:2分钟';
+    mapHintTxt = '实时目标:' + recentRows.length + '  飞机:' + liveAir.length + '  飞手位置:' + liveOperatorLocations.length + '  离线:2分钟';
   }else{
-    mapHintTxt = '显示飞机:' + liveAir.length + '  已选:' + selected.length + '  轨迹:' + trackSn.length + '  飞手:' + livePilot.length;
+    mapHintTxt = '显示飞机:' + liveAir.length + '  已选:' + selected.length + '  轨迹:' + trackSn.length + '  飞手位置:' + liveOperatorLocations.length;
   }
   if(!autoState.allow){
     mapHintTxt += '  |  自动回中冷却 ' + Math.ceil(autoState.remain) + 's';
@@ -4712,26 +4834,30 @@ function updateMap(drones){
   });
 
   var activePilot = {};
-  livePilot.forEach(function(e){
-    var sn = String(e.sn || '');
+  liveOperatorLocations.forEach(function(item){
+    var e = item.row || {};
+    var loc = item.loc || {};
+    var sn = String(item.sn || e.sn || '');
     if(!sn) return;
-    activePilot[sn] = true;
+    var markerKey = sn + ':' + String(loc.kind || 'remote');
+    activePilot[markerKey] = true;
     var col = colorIdx[sn] || '#ffb84d';
-    var ptxt = String(e.pilot_loc_type_text || e.pilot_loc_type || 'unknown');
-    var pilotPos = safeMapLatLng(e.pilot_lat, e.pilot_lon);
+    var ptxt = String(loc.typeText || '-');
+    var pilotPos = safeMapLatLng(loc.lat, loc.lon);
     if(!pilotPos) return;
-    var popup = '<b>'+sn+'</b><br>飞手位置<br>'
-      +(validMapCoord(e.pilot_lat, e.pilot_lon)?Number(e.pilot_lat).toFixed(5):'-')+', '+(validMapCoord(e.pilot_lat, e.pilot_lon)?Number(e.pilot_lon).toFixed(5):'-')
+    var icon = (loc.icon === 'home') ? homeAuxIcon(col, e.lost) : pilotIcon(col, e.lost);
+    var popup = '<b>'+sn+'</b><br>'+esc(String(loc.label || '飞手位置'))+'<br>'
+      +(validMapCoord(loc.lat, loc.lon)?Number(loc.lat).toFixed(5):'-')+', '+(validMapCoord(loc.lat, loc.lon)?Number(loc.lon).toFixed(5):'-')
       +'<br>类型: '+esc(ptxt);
-    if(pilotMarkers[sn]){
-      pilotMarkers[sn].setLatLng(pilotPos)
-        .setIcon(pilotIcon(col, e.lost))
+    if(pilotMarkers[markerKey]){
+      pilotMarkers[markerKey].setLatLng(pilotPos)
+        .setIcon(icon)
         .setPopupContent(popup);
     }else{
-      pilotMarkers[sn] = L.marker(pilotPos, {icon: pilotIcon(col, e.lost)})
+      pilotMarkers[markerKey] = L.marker(pilotPos, {icon: icon})
         .addTo(map).bindPopup(popup);
       (function(snLocal){
-        pilotMarkers[snLocal].on('click', function(){
+        pilotMarkers[markerKey].on('click', function(){
           if(currentAppPage() === 'history') setHistorySnVisible(snLocal, true);
           else focusLiveAircraft(snLocal);
         });
@@ -5383,6 +5509,7 @@ _MAIN_PAGE_PATCH_JS = r"""
   var pageReady=false;
   var alarmRects=[];
   var alarmOverlayHideTimer=null;
+  var detailReparseModeCache={};
   var alarmLastSig='';
   function syncHomeViewport(){
     var vp = window.visualViewport;
@@ -5707,11 +5834,9 @@ _MAIN_PAGE_PATCH_JS = r"""
   }
   function detailReparseModeOptions(){
     return [
-      ['auto', '自动分配'],
-      ['dji_new', 'DJI 新固件/私有'],
-      ['dji_gb46750', 'GB46750'],
-      ['dji_enterprise', 'DJI F119/企业私有'],
-      ['odid_legacy', 'OpenDroneID/旧固件']
+      ['auto', 'Auto'],
+      ['gb46750_2025', 'GB46750-2025'],
+      ['dji_old_odid', 'DJI OLD ODID']
     ].map(function(item){
       return '<option value="'+escAttr(item[0])+'">'+esc(item[1])+'</option>';
     }).join('');
@@ -5726,8 +5851,147 @@ _MAIN_PAGE_PATCH_JS = r"""
       + '<div class="detail-reparse-status" data-sn="'+escAttr(sn)+'">自动批量重新解析仍会按默认分配覆盖这些结果。</div>'
       + '</div>';
   }
+  function detailReparseModeStorageKey(sn){
+    return 'rid_detail_reparse_mode:' + String(sn || '');
+  }
+  function detailReparseTargetSn(e){
+    e = e || {};
+    return String(e.sn || e.uas_id || e.mac || e.src_mac || '').trim();
+  }
+  function normalizeDetailReparseMode(mode){
+    mode = String(mode || 'auto').trim();
+    var aliases = {'dji_gb46750':'gb46750_2025','gb46750':'gb46750_2025','odid_legacy':'dji_old_odid','old':'dji_old_odid','legacy':'dji_old_odid'};
+    mode = aliases[mode] || mode;
+    var allowed = {'auto':1,'gb46750_2025':1,'dji_old_odid':1};
+    return allowed[mode] ? mode : 'auto';
+  }
+  function currentDetailReparseSelectMode(sn){
+    sn = String(sn || '');
+    var list = document.querySelectorAll ? document.querySelectorAll('.detail-reparse-mode') : [];
+    for(var i=0;i<list.length;i++){
+      var itemSn = String(list[i].getAttribute('data-sn') || '');
+      if(itemSn === sn) return normalizeDetailReparseMode(list[i].value);
+    }
+    return '';
+  }
+  function rememberVisibleDetailReparseMode(){
+    var list = document.querySelectorAll ? document.querySelectorAll('.detail-reparse-mode') : [];
+    for(var i=0;i<list.length;i++){
+      var sn = String(list[i].getAttribute('data-sn') || '');
+      if(sn) setDetailReparseModeForSn(sn, list[i].value);
+    }
+  }
+  function detailReparseSelectIsActive(){
+    var active = document.activeElement;
+    return !!(active && active.closest && active.closest('.detail-reparse-mode'));
+  }
+  function detailReparseModeForSn(sn){
+    sn = String(sn || '');
+    var current = currentDetailReparseSelectMode(sn);
+    if(current) return current;
+    if(Object.prototype.hasOwnProperty.call(detailReparseModeCache, sn)){
+      return normalizeDetailReparseMode(detailReparseModeCache[sn]);
+    }
+    try{ return normalizeDetailReparseMode(localStorage.getItem(detailReparseModeStorageKey(sn))); }
+    catch(_e){ return 'auto'; }
+  }
+  function setDetailReparseModeForSn(sn, mode){
+    sn = String(sn || '');
+    mode = normalizeDetailReparseMode(mode);
+    detailReparseModeCache[sn] = mode;
+    try{ localStorage.setItem(detailReparseModeStorageKey(sn), mode); }catch(_e){}
+    return mode;
+  }
+  detailReparseModeOptions = function(current){
+    current = normalizeDetailReparseMode(current);
+    return [
+      ['auto', 'Auto'],
+      ['gb46750_2025', 'GB46750-2025'],
+      ['dji_old_odid', 'DJI OLD ODID']
+    ].map(function(item){
+      var selected = item[0] === current ? ' selected' : '';
+      return '<option value="'+escAttr(item[0])+'"'+selected+'>'+esc(item[1])+'</option>';
+    }).join('');
+  };
+  detailReparseControls = function(e){
+    e = e || {};
+    var sn = detailReparseTargetSn(e);
+    var raws = Array.isArray(e.raw_packets) ? e.raw_packets : [];
+    var hint = raws.length ? '按选定方式重新解析该机历史包，并重建轨迹。' : '暂无原始包，无法重新解析。';
+    var disabled = sn ? '' : ' disabled';
+    return '<div class="detail-reparse-box" data-sn="'+escAttr(sn)+'">'
+      + '<span>以</span><select class="detail-reparse-mode" data-sn="'+escAttr(sn)+'">'+detailReparseModeOptions(detailReparseModeForSn(sn))+'</select><span>方式重新解析</span>'
+      + '<button class="btn-mini warn detail-reparse-btn" type="button" data-sn="'+escAttr(sn)+'"'+disabled+'>重试</button>'
+      + '<div class="detail-reparse-status" data-sn="'+escAttr(sn)+'">'+esc(hint)+'</div>'
+      + '</div>';
+  };
   function detailReparseApiUrl(){
     return String(window.LIGHT_RID_DETAIL_REPARSE_API || '/api/history/reparse');
+  }
+  function updateLocalRowAfterReparse(sn, item){
+    sn = String(sn || '');
+    if(!sn || !item) return;
+    latestDroneMap[sn] = item;
+    [latestDroneRows, latestMapRows].forEach(function(list){
+      if(!Array.isArray(list)) return;
+      for(var i=0;i<list.length;i++){
+        if(String((list[i] && list[i].sn) || '') === sn) list[i] = item;
+      }
+    });
+  }
+  async function refreshAircraftAfterReparse(oldSn, data){
+    oldSn = String(oldSn || '');
+    data = data || {};
+    var sn = String(data.sn_now || data.sn || oldSn || '');
+    if(!sn) return;
+    setDetailReparseModeForSn(sn, data.mode || detailReparseModeForSn(oldSn));
+    if(oldSn && oldSn !== sn){
+      setDetailReparseModeForSn(oldSn, detailReparseModeForSn(oldSn));
+      delete trackCache[oldSn];
+      delete trackFetchMeta[oldSn];
+      delete trackLineSig[oldSn];
+    }
+    delete trackFetchMeta[sn];
+    delete trackLineSig[sn];
+    if(Array.isArray(data.track)){
+      trackCache[sn] = data.track.slice();
+      trackFetchMeta[sn] = {
+        ts: Date.now(),
+        scope: 'history|' + TRACK_HISTORY_FETCH_LIMIT,
+        total: Number(data.track_count || data.track.length || 0),
+        shown: Number(data.track.length || 0)
+      };
+    }else{
+      delete trackCache[sn];
+    }
+    try{
+      var detail = await getJson('/api/v1/drones/' + encodeURIComponent(sn));
+      if(detail && detail.item){
+        updateLocalRowAfterReparse(sn, detail.item);
+        if(Array.isArray(detail.track)){
+          trackCache[sn] = detail.track.slice();
+          trackFetchMeta[sn] = {
+            ts: Date.now(),
+            scope: 'history|' + TRACK_HISTORY_FETCH_LIMIT,
+            total: Number(detail.track_count || detail.track.length || 0),
+            shown: Number(detail.track.length || 0)
+          };
+        }
+      }
+    }catch(_e){}
+    selectedSnSet[sn] = true;
+    delete historyHiddenSnSet[sn];
+    renderLiveCards(latestDroneRows);
+    renderMapMiniList(latestDroneRows);
+    refreshTrackMgrOptions(latestDroneRows);
+    if(currentAppPage() === 'history'){
+      if(replaySyncPaused) renderReplayFrame();
+      else updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    }else{
+      updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    }
+    var row = findDisplayRowBySn(latestDroneRows, sn) || latestDroneMap[sn] || null;
+    if(row) showDroneInfoCard(row);
   }
   async function retryDetailReparse(btn){
     if(!btn) return;
@@ -5736,15 +6000,20 @@ _MAIN_PAGE_PATCH_JS = r"""
     var root = btn.closest ? btn.closest('.detail-reparse-box') : null;
     var sel = root ? root.querySelector('.detail-reparse-mode') : null;
     var status = root ? root.querySelector('.detail-reparse-status') : null;
-    var mode = String((sel && sel.value) || 'auto');
+    var mode = setDetailReparseModeForSn(sn, (sel && sel.value) || 'auto');
     btn.disabled = true;
     if(status) status.textContent = '正在重新解析...';
     try{
       var data = await postJson(detailReparseApiUrl(), {sn:sn, mode:mode});
+      setDetailReparseModeForSn(sn, mode);
+      if(data && data.sn_now) setDetailReparseModeForSn(data.sn_now, mode);
       var msg = data.message || ('重新解析完成: ' + String(data.mode || mode));
       if(status) status.textContent = msg;
       showBanner(msg, 'ok', 2800, {persist:false});
-      try{ if(ws) ws.close(); }catch(_e){}
+      await refreshAircraftAfterReparse(sn, data);
+      if(!data.refresh){
+        try{ if(ws) ws.close(); }catch(_e){}
+      }
     }catch(e){
       var err = (e && e.message) ? e.message : String(e || 'failed');
       if(status) status.textContent = '重新解析失败: ' + err;
@@ -5817,7 +6086,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       await postJson('/api/settings/models/upsert', {sn:sn, prefix:prefix, model:model});
       patchLocalModel(sn, model);
       showBanner('识别库已添加：' + prefix + ' → ' + model, 'ok', 3200);
-      if(latestDroneMap && latestDroneMap[sn]) showInfoCard(buildInfoHtml(latestDroneMap[sn]), true);
+      if(latestDroneMap && latestDroneMap[sn]) showDroneInfoCard(latestDroneMap[sn]);
     }catch(e){
       showBanner('识别库添加失败：' + (e.message || e), 'warn', 4800);
     }
@@ -5867,8 +6136,32 @@ _MAIN_PAGE_PATCH_JS = r"""
       else if(issueBtn) openModelIssue(sn, prefix);
       else openModelPr(sn, prefix);
     });
+    function rememberReparseModeEvent(ev){
+      var sel = ev.target && ev.target.closest ? ev.target.closest('.detail-reparse-mode') : null;
+      if(!sel) return;
+      setDetailReparseModeForSn(sel.getAttribute('data-sn') || '', sel.value);
+    }
+    modal.addEventListener('change', rememberReparseModeEvent);
+    modal.addEventListener('input', rememberReparseModeEvent);
   }
   function patchInfoCard(){
+    if(typeof refreshActiveInfoCard === 'function' && !refreshActiveInfoCard.__reparseModePatched){
+      var oldRefreshActiveInfoCard = refreshActiveInfoCard;
+      refreshActiveInfoCard = function(rows){
+        if(detailReparseSelectIsActive()) return;
+        rememberVisibleDetailReparseMode();
+        return oldRefreshActiveInfoCard(rows);
+      };
+      refreshActiveInfoCard.__reparseModePatched = true;
+    }
+    if(typeof showDroneInfoCard === 'function' && !showDroneInfoCard.__reparseModePatched){
+      var oldShowDroneInfoCard = showDroneInfoCard;
+      showDroneInfoCard = function(e){
+        rememberVisibleDetailReparseMode();
+        return oldShowDroneInfoCard(e);
+      };
+      showDroneInfoCard.__reparseModePatched = true;
+    }
     buildInfoHtml = function(e){
       e = e || {};
       var base = [
@@ -5907,14 +6200,13 @@ _MAIN_PAGE_PATCH_JS = r"""
         ['方向', String(e.dir || '-')]
       ];
       var pilotPos = [
-        ['飞手纬度', fmt(e.pilot_lat,6,'')],
-        ['飞手经度', fmt(e.pilot_lon,6,'')],
-        ['Home/Aux 纬度', fmt(e.home_lat ?? e.aux_lat,6,'')],
-        ['Home/Aux 经度', fmt(e.home_lon ?? e.aux_lon,6,'')],
-        ['飞手高度', fmt(e.pilot_alt,1,'m')],
-        ['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]
+        ['遥控站纬度', fmt(e.pilot_lat,6,'')],
+        ['遥控站经度', fmt(e.pilot_lon,6,'')]
       ];
-      var actionSn = String(e.sn || '');
+      appendHomeAuxRows(pilotPos, e);
+      pilotPos.push(['飞手高度', fmt(e.pilot_alt,1,'m')]);
+      pilotPos.push(['飞手位置类型', String(e.pilot_loc_type_text || e.pilot_loc_type || '-')]);
+      var actionSn = detailReparseTargetSn(e);
       var html = '<div class="info-actions">'+
         '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(actionSn)+'">导出轨迹</button>'+
         '<button class="btn-mini warn delete-history-btn" type="button" data-sn="'+escAttr(actionSn)+'">删除历史</button>'+

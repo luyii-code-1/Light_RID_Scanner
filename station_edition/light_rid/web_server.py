@@ -6504,7 +6504,14 @@ def _build_html() -> str:
     html_src = _PAGE_HTML
     html_src = html_src.replace("__APP_VERSION_LABEL__", _app_version_label())
     html_src = _inject_html_once(html_src, "</style>", _MAIN_PAGE_PATCH_CSS + "\n")
-    html_src = _inject_html_once(html_src, "</body>", "<script>\n" + _MAIN_PAGE_PATCH_JS + "\n</script>\n")
+    html_src = _inject_html_once(
+        html_src,
+        "</body>",
+        "<script>\n"
+        + _MAIN_PAGE_PATCH_JS
+        + "\n</script>\n"
+        + '<script src="/assets/vue/rid-home.js"></script>\n',
+    )
     return html_src
 
 def _build_login_html(next_path: str = "/", status_message: str = "", status_error: bool = False) -> str:

@@ -268,6 +268,11 @@ body.theme-light .viewer-base-label{background:color-mix(in srgb,var(--blue) 7%,
     html_src = _inject_html_once(
         html_src,
         "</body>",
-        "<script>\n" + parts["_MAIN_PAGE_PATCH_JS"] + "\n" + _viewer_patch_js() + "\n</script>\n",
+        "<script>\n"
+        + parts["_MAIN_PAGE_PATCH_JS"]
+        + "\n"
+        + _viewer_patch_js()
+        + "\n</script>\n"
+        + '<script src="/assets/vue/rid-home.js"></script>\n',
     )
     return html_src

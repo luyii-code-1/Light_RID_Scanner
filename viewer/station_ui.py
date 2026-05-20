@@ -258,11 +258,11 @@ def build_station_viewer_page() -> str:
     html_src = html_src.replace("<title>Light RID Scanner</title>", "<title>Light RID Node Center</title>")
     html_src = html_src.replace("Light RID Scanner", "Light RID Node Center")
     viewer_css = """
-.viewer-base-label{margin:8px 0 6px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:color-mix(in srgb,var(--blue) 8%,var(--panel2));color:var(--txt);font:600 12px/1.35 var(--font-ui);white-space:normal;word-break:break-word}
+.viewer-base-label{margin:8px 0 6px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:color-mix(in srgb,var(--blue) 8%,var(--panel2));color:var(--txt);font:600 12px/1.35 var(--font-ui);white-space:normal;word-break:break-word}
 body.theme-light .viewer-base-label{background:color-mix(in srgb,var(--blue) 7%,var(--panel2))}
 .viewer-loading-state{color:var(--dim);font-weight:650}
 .banner-stack{top:74px;width:auto;max-width:calc(100vw - 28px);align-items:center}
-.banner{width:min(420px,calc(100vw - 32px));min-height:78px;border-radius:8px}
+.banner{width:min(420px,calc(100vw - 32px));min-height:78px;border-radius:var(--radius-lg)}
 """
     html_src = _inject_html_once(html_src, "</style>", parts["_MAIN_PAGE_PATCH_CSS"] + "\n" + viewer_css + "\n")
     html_src = _inject_html_once(

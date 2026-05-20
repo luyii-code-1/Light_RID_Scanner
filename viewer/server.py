@@ -240,9 +240,12 @@ def _build_eula_page(next_path: str = "/") -> str:
 <style>
 body{{margin:0;min-height:100dvh;background:#201f1e;color:#f3f2f1;font-family:"Segoe UI","Microsoft YaHei",sans-serif}}
 .wrap{{width:min(980px,calc(100vw - 28px));margin:0 auto;padding:22px 12px 30px}}
-.license{{border:1px solid #3b3a39;background:#2b2a29;border-radius:4px;padding:18px;max-height:min(68dvh,720px);overflow:auto;line-height:1.65}}
-button{{height:36px;border:1px solid #3b3a39;background:#252423;color:#f3f2f1;border-radius:4px;padding:0 12px;font-weight:650;cursor:pointer}}
-.warn{{color:#ffd8d8;border-color:#ff7b72}}.actions{{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}}.status{{color:#c8c6c4;margin-top:10px;white-space:pre-wrap}}
+.license{{border:1px solid #3b3a39;background:#2b2a29;border-radius:6px;padding:20px;max-height:min(68dvh,720px);overflow:auto;line-height:1.65}}
+button{{height:38px;border:1px solid #3b3a39;background:#252423;color:#f3f2f1;border-radius:6px;padding:0 18px;font-weight:650;cursor:pointer;transition:all .2s ease;display:inline-flex;align-items:center;gap:6px}}
+button:hover{{transform:translateY(-1px);box-shadow:0 4px 12px rgba(40,153,245,.12);border-color:#2899f5}}
+button:active{{transform:scale(.97)}}
+.warn{{color:#ff9b8e;border-color:#c23b2e}}.warn:hover{{background:#d83b01;color:#fff;border-color:#d83b01;box-shadow:0 4px 14px rgba(255,123,114,.16)}}
+.actions{{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}}.status{{color:#c8c6c4;margin-top:10px;white-space:pre-wrap}}
 </style></head><body><div class="wrap">
 <h1>Light RID Scanner 许可协议</h1>
 <article class="license">{_markdown_to_basic_html(text)}</article>

@@ -34,14 +34,48 @@ def station_page(title: str, body: str, script: str, extra_css: str = "") -> str
     shared_css = """
 .rid-loading-overlay{position:fixed;inset:0;z-index:2600;display:none;align-items:flex-start;justify-content:center;pointer-events:none;padding-top:74px;background:transparent}
 .rid-loading-overlay.show{display:flex}
-.rid-loading-box{width:min(420px,calc(100vw - 28px));min-height:78px;display:grid;grid-template-columns:28px minmax(0,1fr);gap:6px 12px;align-items:start;padding:12px 14px;border:1px solid color-mix(in srgb,var(--blue) 32%,var(--border));border-left:4px solid var(--blue);border-radius:8px;background:color-mix(in srgb,var(--card) 94%,transparent);box-shadow:0 12px 30px rgba(0,0,0,.24);backdrop-filter:blur(12px)}
+.rid-loading-box{width:min(420px,calc(100vw - 28px));min-height:78px;display:grid;grid-template-columns:28px minmax(0,1fr);gap:6px 12px;align-items:start;padding:14px 16px;border:1px solid color-mix(in srgb,var(--blue) 32%,var(--border));border-left:4px solid var(--blue);border-radius:10px;background:color-mix(in srgb,var(--card) 94%,transparent);box-shadow:0 12px 30px rgba(0,0,0,.24);backdrop-filter:blur(12px);animation:toastIn .3s ease-out}
 .rid-loading-spinner{grid-row:1/3;width:22px;height:22px;margin-top:2px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 18%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .82s linear infinite}
 .rid-loading-title{font:700 14px/1.2 var(--font-ui);color:var(--txt)}
 .rid-loading-copy{font:600 12px/1.45 var(--font-ui);color:var(--muted);text-align:left;max-width:44ch}
 @keyframes ridLoadingSpin{to{transform:rotate(360deg)}}
+@keyframes toastIn{0%{opacity:0;transform:translateX(40px)}100%{opacity:1;transform:translateX(0)}}
+.rid-toast-host{position:fixed;right:18px;bottom:84px;z-index:10000;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:min(360px,calc(100vw - 28px))}
+.rid-toast{display:grid;grid-template-columns:4px minmax(0,1fr);gap:10px;align-items:start;padding:12px 14px;border-radius:6px;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(14px);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.18);animation:toastIn .3s ease-out;pointer-events:auto;cursor:pointer}
+.rid-toast.out{animation:toastOut .26s ease-in forwards}
+.rid-toast-bar{width:4px;height:100%;min-height:24px;border-radius:999px;background:var(--blue)}
+.rid-toast.success .rid-toast-bar{background:var(--green)}
+.rid-toast.error .rid-toast-bar{background:var(--warn)}
+.rid-toast-msg{font:600 13px/1.4 var(--font-ui);color:var(--txt);white-space:pre-wrap;word-break:break-word}
+@keyframes toastOut{0%{opacity:1;transform:translateX(0)}100%{opacity:0;transform:translateX(40px)}}
 body.theme-light .rid-loading-box{background:rgba(255,255,255,.94);box-shadow:0 18px 48px rgba(0,0,0,.14)}
 """
     shared_script = """
+window._ridToasts=[];
+window.showToast=function(msg,kind,ms){
+  kind=String(kind||'info');ms=Number(ms)||2800;
+  var t={id:Date.now()+Math.random(),msg:String(msg||''),kind:kind};
+  window._ridToasts.push(t);
+  renderViewerToasts();
+  setTimeout(function(){dismissViewerToast(t.id);},ms);
+};
+function dismissViewerToast(id){
+  var el=document.getElementById('rid-toast-'+id);
+  if(el){el.classList.add('out');setTimeout(function(){if(el.parentNode)el.parentNode.removeChild(el);},280);}
+  window._ridToasts=window._ridToasts.filter(function(t){return t.id!==id;});
+}
+function renderViewerToasts(){
+  var host=document.getElementById('rid-toast-host');
+  if(!host){
+    host=document.createElement('div');host.id='rid-toast-host';host.className='rid-toast-host';
+    document.body.appendChild(host);
+  }
+  var html='';
+  window._ridToasts.forEach(function(t){
+    html+='<div class=\"rid-toast '+t.kind+'\" id=\"rid-toast-'+t.id+'\"><span class=\"rid-toast-bar\"></span><span class=\"rid-toast-msg\">'+String(t.msg).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</span></div>';
+  });
+  host.innerHTML=html;
+}
 var viewerPageLoadingStartedAt = 0;
 var viewerPageLoadingTimer = null;
 function viewerPageLoadingText(target, timeoutSec){

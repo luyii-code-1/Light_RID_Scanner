@@ -54,6 +54,22 @@ VIEWER_NODE_STATUS: dict[str, bool] = {}
 VIEWER_NOTIFY_LAST_TS: dict[str, float] = {}
 
 
+def _apply_system_timezone() -> None:
+    """Reload libc/Python localtime state from the system timezone files."""
+    tz_name = ""
+    try:
+        tz_name = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+    except OSError:
+        tz_name = ""
+    if tz_name:
+        os.environ["TZ"] = tz_name
+    if hasattr(time, "tzset"):
+        try:
+            time.tzset()
+        except Exception:
+            pass
+
+
 def _utc_text(ts: float | None = None) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts or time.time())))
 
@@ -785,6 +801,7 @@ def run(host: str, port: int, db_path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _apply_system_timezone()
     parser = argparse.ArgumentParser(description="Light RID node-center viewer")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)

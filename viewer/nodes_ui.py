@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+from viewer.paths import ASSETS_DIR
 from viewer.ui_common import station_page
+
+
+def _nodes_center_asset_url() -> str:
+    asset_url = "/assets/vue/nodes-center.js"
+    asset_path = ASSETS_DIR / "vue" / "nodes-center.js"
+    try:
+        st = asset_path.stat()
+        return f"{asset_url}?v={int(st.st_mtime)}-{int(st.st_size)}"
+    except OSError:
+        return asset_url
 
 
 def build_nodes_page() -> str:
     body = """
   <div class="settings-sticky-head">
-    <div class="topbar">
-      <div>
-        <div class="title">节点管理器</div>
-        <div class="sub">添加 Station 节点、查看基础信息和负载/扫描数据，并对多个节点执行远程维护。</div>
+    <div class="topbar node-topbar">
+      <div class="node-hero">
+        <div class="node-hero-icon">◎</div>
+        <div>
+          <div class="title">节点管理器</div>
+          <div class="sub">集中维护 Viewer 管理的 Station 节点，查看连通性、负载、扫描统计，并执行批量远程操作。</div>
+        </div>
       </div>
       <div class="actions">
         <button class="btn" id="btn-back" type="button">返回实时/历史</button>
@@ -24,15 +38,15 @@ def build_nodes_page() -> str:
   <div class="visual-grid node-manager-grid">
     <div class="stack">
       <div class="stack-label">节点维护</div>
-      <div class="card" id="node-editor">
+      <div class="card node-glass-card" id="node-editor">
         <div class="section-head">
           <div>
             <h2>添加 / 编辑节点</h2>
-            <div class="section-copy">Viewer 只保存节点 API 地址和 Token；实时、历史、轨迹、负载数据每次从子站 API 拉取。</div>
+            <div class="section-copy">Viewer 只保存节点 API 地址和 Token，实时、历史、轨迹和负载数据仍然直接从各子站接口获取。</div>
           </div>
-          <button class="btn" id="btn-clear-form" type="button">清空</button>
+          <button class="btn ghost" id="btn-clear-form" type="button">清空</button>
         </div>
-        <div class="grid" style="margin-top:14px">
+        <div class="grid node-form-grid">
           <input id="node-id" type="hidden">
           <div class="field"><label>名称</label><input id="node-name" type="text" placeholder="例如 东门基站"></div>
           <div class="field"><label>API 地址</label><input id="node-url" type="text" placeholder="http://192.168.1.10:4600"></div>
@@ -45,45 +59,45 @@ def build_nodes_page() -> str:
         </div>
         <div id="node-status" class="status">-</div>
       </div>
-      <div class="card">
+      <div class="card node-glass-card">
         <div class="section-head">
           <div>
             <h2>批量远程管理</h2>
-            <div class="section-copy">对勾选节点执行远程维护，包含重启、识别库更新和强制重新解析。</div>
+            <div class="section-copy">对勾选节点执行重启、机型库更新和强制重新解析。</div>
           </div>
         </div>
         <div class="row-actions" style="margin-top:14px">
           <button class="btn ghost" id="btn-select-all" type="button">全选</button>
-          <button class="btn ghost" id="btn-select-online" type="button">选择在线</button>
+          <button class="btn ghost" id="btn-select-online" type="button">仅在线</button>
           <button class="btn warn" id="btn-remote-restart" type="button">重启程序</button>
           <button class="btn" id="btn-remote-models" type="button">更新识别库</button>
-          <button class="btn" id="btn-remote-reparse" type="button">强制重新解析</button>
+          <button class="btn" id="btn-remote-reparse" type="button">强制重解析</button>
         </div>
         <div id="bulk-status" class="status">-</div>
       </div>
-      <div class="card">
+      <div class="card node-glass-card">
         <div class="list-head">
           <div>
             <h2>节点基本信息</h2>
-            <div class="section-copy">点击基本信息卡片在右侧查看完整信息；点击负载卡片显示详细负载曲线。</div>
+            <div class="section-copy">点击标题头排序，点击节点卡片在右侧查看完整详情。</div>
           </div>
         </div>
         <div id="node-basic-list" class="list-wrap"></div>
       </div>
-      <div class="card">
+      <div class="card node-glass-card">
         <div class="list-head">
           <div>
             <h2>节点负载</h2>
-            <div class="section-copy">显示当前健康状态和最近一次负载数据。</div>
+            <div class="section-copy">显示 CPU、内存、温度和最近负载快照，点击节点可读取 12 小时负载曲线。</div>
           </div>
         </div>
         <div id="node-load-list" class="list-wrap"></div>
       </div>
-      <div class="card">
+      <div class="card node-glass-card">
         <div class="list-head">
           <div>
             <h2>扫描数据</h2>
-            <div class="section-copy">每个节点共扫到 / 当前在线的飞机统计。</div>
+            <div class="section-copy">显示累计扫描数、当前在线数和最近刷新时间。</div>
           </div>
         </div>
         <div id="node-scan-list" class="list-wrap"></div>
@@ -91,11 +105,11 @@ def build_nodes_page() -> str:
     </div>
     <div class="stack">
       <div class="stack-label">详情</div>
-      <div class="card detail-card">
+      <div class="card detail-card node-glass-card">
         <div class="section-head">
           <div>
             <h2 id="detail-title">节点详情</h2>
-            <div class="section-copy" id="detail-copy">选择左侧卡片查看完整信息、负载图或远程登录入口。</div>
+            <div class="section-copy" id="detail-copy">从左侧选择节点查看完整信息、负载曲线和 SSO 登录入口。</div>
           </div>
         </div>
         <div class="row-actions" style="margin-top:14px">
@@ -112,33 +126,48 @@ def build_nodes_page() -> str:
   </div>
 """
     extra_css = """
-.node-manager-grid{grid-template-columns:minmax(460px,1.06fr) minmax(420px,.94fr)}
-.node-card{border:1px solid var(--border);border-radius:4px;background:var(--card2);padding:12px;display:grid;gap:9px;cursor:pointer}
-.node-card:hover{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 7%,var(--card2))}
-.node-card.active{border-color:var(--blue);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 22%,transparent)}
-.node-card-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:9px;align-items:center}
-.node-card-title{font:700 14px/1.2 var(--font-ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node-manager-grid{grid-template-columns:minmax(520px,1.08fr) minmax(420px,.92fr)}
+.node-topbar{padding:14px 18px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:22px;background:linear-gradient(180deg,color-mix(in srgb,var(--card) 94%,white),color-mix(in srgb,var(--card2) 92%,white));box-shadow:0 10px 28px rgba(15,23,42,.08)}
+.node-hero{display:flex;align-items:center;gap:14px}
+.node-hero-icon{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:color-mix(in srgb,var(--blue) 12%,var(--card2));color:var(--blue);font:700 18px/1 var(--font-ui);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 18%,transparent)}
+.node-glass-card{border-radius:22px;box-shadow:0 8px 24px rgba(15,23,42,.08);background:color-mix(in srgb,var(--card) 96%,white)}
+.node-form-grid{margin-top:14px}
+.list-wrap{display:grid;gap:10px}
+.node-list-stack{display:grid;gap:12px}
+.node-sort-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+.node-sort-btn{height:34px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:10px;background:color-mix(in srgb,var(--card2) 92%,white);color:var(--muted);font:600 12px/1 var(--font-ui);cursor:pointer;transition:background-color 160ms ease,border-color 160ms ease,box-shadow 160ms ease,transform 160ms ease}
+.node-sort-btn:hover{background:color-mix(in srgb,var(--blue) 7%,var(--card2));border-color:color-mix(in srgb,var(--blue) 20%,var(--border));transform:translateY(-1px)}
+.node-sort-btn.active{color:var(--txt);border-color:color-mix(in srgb,var(--blue) 26%,var(--border));background:color-mix(in srgb,var(--blue) 10%,var(--card2))}
+.node-sort-btn.sorted-asc::after,.node-sort-btn.sorted-desc::after{content:"";display:inline-block;width:8px;height:10px;margin-left:6px;vertical-align:-1px;background-repeat:no-repeat;background-position:center;background-size:8px 10px}
+.node-sort-btn.sorted-asc::after{background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="10" viewBox="0 0 8 10"><path d="M4 1 7 4H1L4 1Z" fill="%232563eb"/></svg>')}
+.node-sort-btn.sorted-desc::after{background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="10" viewBox="0 0 8 10"><path d="M4 9 1 6h6L4 9Z" fill="%232563eb"/></svg>')}
+.node-card-list{display:grid;gap:10px}
+.node-card{border:1px solid color-mix(in srgb,var(--border) 90%,transparent);border-radius:18px;background:color-mix(in srgb,var(--card2) 92%,white);padding:14px;display:grid;gap:10px;cursor:pointer;transition:background-color 160ms ease,border-color 160ms ease,box-shadow 160ms ease,transform 160ms ease}
+.node-card:hover{border-color:color-mix(in srgb,var(--blue) 22%,var(--border));background:color-mix(in srgb,var(--blue) 6%,var(--card2));transform:translateY(-1px);box-shadow:0 10px 26px rgba(15,23,42,.08)}
+.node-card.active{border-color:color-mix(in srgb,var(--blue) 34%,var(--border));background:color-mix(in srgb,var(--blue) 8%,var(--card2));box-shadow:inset 3px 0 0 var(--blue),0 10px 26px rgba(37,99,235,.10)}
+.node-card-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center}
+.node-card-title{font:700 14px/1.25 var(--font-ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .node-card-meta{font:600 12px/1.45 var(--font-ui);color:var(--muted);word-break:break-word}
-.node-pill{font:700 11px/1 var(--font-ui);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--muted);white-space:nowrap}
-.node-pill.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,var(--border))}
-.node-pill.err{color:#ff9b9b;border-color:color-mix(in srgb,#ff9b9b 45%,var(--border))}
+.node-pill{font:700 11px/1 var(--font-ui);border:1px solid color-mix(in srgb,var(--border) 88%,transparent);border-radius:9px;padding:5px 7px;color:var(--muted);white-space:nowrap;background:color-mix(in srgb,var(--card) 90%,white)}
+.node-pill.ok{color:#0f8a49;border-color:rgba(22,163,74,.22);background:rgba(220,252,231,.9)}
+.node-pill.err{color:#c2410c;border-color:rgba(245,158,11,.26);background:rgba(255,247,237,.94)}
 .node-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-.node-metric{border:1px solid var(--border);border-radius:4px;background:var(--card);padding:8px;min-width:0}
+.node-metric{border:1px solid color-mix(in srgb,var(--border) 86%,transparent);border-radius:14px;background:color-mix(in srgb,var(--surface-tonal, #eaf2ff) 34%,white);padding:9px 10px;min-width:0}
 .node-metric .k{font-size:11px;color:var(--muted)}
 .node-metric .v{font:700 15px/1.2 var(--font-ui);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .detail-card{position:sticky;top:12px}
 .detail-body{margin-top:14px;display:grid;gap:8px}
-.detail-row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;border-bottom:1px solid var(--border);padding:8px 0}
+.detail-row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;border-bottom:1px solid color-mix(in srgb,var(--border) 84%,transparent);padding:8px 0}
 .detail-row .k{color:var(--muted);font-size:12px}
 .detail-row .v{word-break:break-word;font:600 13px/1.45 var(--font-ui)}
-.node-load-chart{display:none;width:100%;height:360px;margin-top:14px;border:1px solid var(--border);border-radius:4px;background:var(--card2)}
+.node-load-chart{display:none;width:100%;height:360px;margin-top:14px;border:1px solid color-mix(in srgb,var(--border) 84%,transparent);border-radius:18px;background:color-mix(in srgb,var(--card2) 96%,white)}
 .node-load-chart.show{display:block}
 @media (max-width:1200px){.node-manager-grid{grid-template-columns:1fr}.detail-card{position:relative;top:auto}}
+@media (max-width:760px){.node-sort-row{grid-template-columns:repeat(2,minmax(0,1fr))}.node-metrics{grid-template-columns:1fr}.node-topbar{padding:12px 14px}}
 """
     script = r"""
 function qs(id){ return document.getElementById(id); }
 function qsa(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel) || []); }
-function enc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function pageHeaders(extra){ var h={'X-LightRID-Page':'1'}; if(extra) Object.assign(h, extra); return h; }
 function loadTheme(){
   try{ var s = localStorage.getItem('rid_ui_theme'); if(s === 'dark' || s === 'light') return s; }catch(_e){}
@@ -161,14 +190,12 @@ async function api(path, opts){
 }
 async function post(path, body){ return api(path, {method:'POST', headers:pageHeaders({'Content-Type':'application/json'}), body:JSON.stringify(body || {})}); }
 function setStatus(id, text, err){ var el=qs(id); if(el){ el.textContent=text||'-'; el.classList.toggle('err', !!err); } }
-function fmtPct(v){ var n=Number(v); return isFinite(n) ? n.toFixed(1)+'%' : '—'; }
-function fmtTemp(v){ var n=Number(v); return isFinite(n) ? n.toFixed(1)+'°C' : '—'; }
 function fmtMs(v){ var n=Number(v); return isFinite(n) ? Math.round(n)+'ms' : '—'; }
 function fmtTime(ts){ var n=Number(ts); if(!isFinite(n) || n <= 0) return '—'; try{return new Date(n*1000).toLocaleString();}catch(_e){return String(ts);} }
 var state = {nodes:[], records:[], selectedId:null, selectedSsoUrl:'', checkedIds:{}};
 function nodeById(id){ return state.nodes.find(function(n){ return Number(n.id) === Number(id); }) || null; }
 function recordById(id){ return state.records.find(function(n){ return Number(n.id) === Number(id); }) || null; }
-function selectedIds(){ return qsa('.node-select:checked').map(function(x){ return Number(x.value || 0); }).filter(Boolean); }
+function selectedIds(){ return Object.keys(state.checkedIds || {}).filter(function(key){ return !!state.checkedIds[key]; }).map(function(key){ return Number(key); }).filter(Boolean); }
 function ssoCacheKey(node){
   node = node || {};
   return 'rid_viewer_node_sso_' + String(node.id || '') + '_' + String(node.base_url || '').replace(/[^A-Za-z0-9]+/g, '_');
@@ -194,69 +221,27 @@ function writeCachedSso(node, payload){
     localStorage.setItem(ssoCacheKey(node), JSON.stringify({url:url, expires_at:Number(payload.expires_at || 0), saved_at:Date.now()/1000}));
   }catch(_e){}
 }
-function cardShell(n, kind, inner){
-  var ok = !!n.ok;
-  return '<div class="node-card '+(Number(state.selectedId)===Number(n.id)?'active':'')+'" data-id="'+enc(n.id)+'" data-kind="'+enc(kind)+'">'
-    + '<div class="node-card-head"><input class="node-select" type="checkbox" value="'+enc(n.id)+'" '+(state.checkedIds[Number(n.id)]?'checked ':'')+(ok?'data-online="1"':'')+'>'
-    + '<div class="node-card-title">'+enc(n.name || n.base_url || ('节点 '+n.id))+'</div>'
-    + '<span class="node-pill '+(ok?'ok':'err')+'">'+(ok?'在线':'离线')+'</span></div>' + inner + '</div>';
-}
-function metricBox(k, v){ return '<div class="node-metric"><div class="k">'+enc(k)+'</div><div class="v">'+enc(v)+'</div></div>'; }
-function renderLists(){
-  var basic = qs('node-basic-list'), load = qs('node-load-list'), scan = qs('node-scan-list');
-  if(!state.nodes.length){
-    var empty = '<div class="empty-state">尚未添加节点。</div>';
-    basic.innerHTML = empty; load.innerHTML = empty; scan.innerHTML = empty; return;
-  }
-  basic.innerHTML = state.nodes.map(function(n){
-    var station = n.station || {}, service = n.service || {};
-    return cardShell(n, 'basic',
-      '<div class="node-card-meta">'+enc(n.base_url || '-')+'</div>'
-      + '<div class="node-metrics">'
-      + metricBox('延迟', fmtMs(n.latency_ms))
-      + metricBox('基站', station.name || n.name || '—')
-      + metricBox('采集', service.sniff_state || (n.enabled ? '—' : 'disabled'))
-      + '</div>'
-      + (n.error ? '<div class="node-card-meta">'+enc(String(n.error).slice(0,180))+'</div>' : '')
-    );
-  }).join('');
-  load.innerHTML = state.nodes.map(function(n){
-    var svc = n.service || {}, host = n.host || {};
-    return cardShell(n, 'load',
-      '<div class="node-metrics">'
-      + metricBox('CPU', fmtPct(host.cpu_percent || svc.cpu_percent))
-      + metricBox('内存', fmtPct(host.mem_percent || svc.mem_percent))
-      + metricBox('温度', fmtTemp(host.temperature_c || svc.temperature_c))
-      + '</div>'
-      + '<div class="node-card-meta">负载 '+enc(host.load1 == null ? '—' : host.load1)+' / '+enc(host.load5 == null ? '—' : host.load5)+' / '+enc(host.load15 == null ? '—' : host.load15)+'</div>'
-    );
-  }).join('');
-  scan.innerHTML = state.nodes.map(function(n){
-    return cardShell(n, 'scan',
-      '<div class="node-metrics">'
-      + metricBox('共扫到', String(n.count || 0))
-      + metricBox('当前在线', String(n.online_count || 0))
-      + metricBox('状态码', n.status_code == null ? '—' : String(n.status_code))
-      + '</div>'
-      + '<div class="node-card-meta">更新时间 '+enc(fmtTime(n.fetched_at))+'</div>'
-    );
-  }).join('');
-  updateSelectionButtons();
-}
 function detailRows(rows){
-  return rows.map(function(r){ return '<div class="detail-row"><div class="k">'+enc(r[0])+'</div><div class="v">'+enc(r[1])+'</div></div>'; }).join('');
+  return rows.map(function(r){ return '<div class="detail-row"><div class="k">'+String(r[0] || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div><div class="v">'+String(r[1] || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div></div>'; }).join('');
+}
+function renderLists(){
+  if(window.__RID_NODE_CENTER_BRIDGE__ && typeof window.__RID_NODE_CENTER_BRIDGE__.update === 'function'){
+    window.__RID_NODE_CENTER_BRIDGE__.update({nodes:state.nodes, selectedId:state.selectedId, checkedIds:state.checkedIds});
+  }
+  updateSelectionButtons();
 }
 function showBasic(id){
   var n = nodeById(id) || {};
   var station = n.station || {}, svc = n.service || {}, rec = recordById(id) || {};
-  state.selectedId = Number(id); state.selectedSsoUrl = readCachedSso(n);
+  state.selectedId = Number(id);
+  state.selectedSsoUrl = readCachedSso(n);
   qs('detail-title').textContent = n.name || '节点详情';
   qs('detail-copy').textContent = '完整基础信息';
   qs('load-chart').classList.remove('show');
   qs('detail-body').innerHTML = detailRows([
     ['名称', n.name || '—'], ['API 地址', n.base_url || '—'], ['启用', n.enabled ? '是' : '否'], ['在线', n.ok ? '是' : '否'],
     ['状态码', n.status_code == null ? '—' : n.status_code], ['延迟', fmtMs(n.latency_ms)], ['错误', n.error || '—'],
-    ['基站名称', station.name || '—'], ['基站纬度', station.lat == null ? '—' : station.lat], ['基站经度', station.lon == null ? '—' : station.lon],
+    ['站点名称', station.name || '—'], ['站点纬度', station.lat == null ? '—' : station.lat], ['站点经度', station.lon == null ? '—' : station.lon],
     ['采集状态', svc.sniff_state || '—'], ['采集消息', svc.sniff_msg || '—'], ['采集网卡', svc.sniff_iface || '—'],
     ['Token', rec.token_configured ? '已配置' : '未配置'], ['创建时间', fmtTime(rec.created_at)], ['更新时间', fmtTime(rec.updated_at)]
   ]);
@@ -265,18 +250,19 @@ function showBasic(id){
 }
 async function showLoad(id){
   var n = nodeById(id) || {};
-  state.selectedId = Number(id); state.selectedSsoUrl = readCachedSso(n);
+  state.selectedId = Number(id);
+  state.selectedSsoUrl = readCachedSso(n);
   qs('detail-title').textContent = (n.name || '节点') + ' 负载';
-  qs('detail-copy').textContent = '最近负载曲线';
+  qs('detail-copy').textContent = '最近 12 小时负载曲线';
   qs('detail-body').innerHTML = detailRows([['API 地址', n.base_url || '—'], ['当前状态', n.ok ? '在线' : '离线'], ['扫描数据', String(n.online_count || 0) + '/' + String(n.count || 0)]]);
-  setStatus('detail-status', '正在读取负载...', false);
+  setStatus('detail-status', '正在读取负载数据...', false);
   renderLists();
   try{
     const d = await withViewerPageLoading((n.name || '节点') + ' 负载数据', '正在读取数据', function(){
       return api('/api/nodes/metrics?node_id=' + encodeURIComponent(id) + '&window=12h');
     });
     drawChart(Array.isArray(d.items) ? d.items : []);
-    setStatus('detail-status', d.items && d.items.length ? ('样本 ' + d.items.length) : (d.error || '没有可用负载样本；请确认子站已启用节点负载记录。'), !(d.items && d.items.length));
+    setStatus('detail-status', d.items && d.items.length ? ('样本 ' + d.items.length) : (d.error || '没有可用负载样本，请确认子站已启用节点负载记录。'), !(d.items && d.items.length));
   }catch(e){
     drawChart([]);
     setStatus('detail-status', '负载读取失败: ' + (e.message || e), true);
@@ -284,12 +270,13 @@ async function showLoad(id){
 }
 function showScan(id){
   var n = nodeById(id) || {};
-  state.selectedId = Number(id); state.selectedSsoUrl = readCachedSso(n);
+  state.selectedId = Number(id);
+  state.selectedSsoUrl = readCachedSso(n);
   qs('detail-title').textContent = (n.name || '节点') + ' 扫描数据';
   qs('detail-copy').textContent = '当前聚合统计';
   qs('load-chart').classList.remove('show');
   qs('detail-body').innerHTML = detailRows([
-    ['共扫到', n.count || 0], ['当前在线', n.online_count || 0], ['最后刷新', fmtTime(n.fetched_at)],
+    ['累计扫描', n.count || 0], ['当前在线', n.online_count || 0], ['最后刷新', fmtTime(n.fetched_at)],
     ['采集状态', (n.service || {}).sniff_state || '—'], ['采集消息', (n.service || {}).sniff_msg || n.error || '—']
   ]);
   setStatus('detail-status', '-', false);
@@ -301,30 +288,29 @@ function drawChart(items){
   var w = Math.max(320, Math.floor(rect.width || canvas.clientWidth || 640)), h = 360;
   canvas.width = Math.floor(w*dpr); canvas.height = Math.floor(h*dpr); canvas.style.height = h+'px';
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
-  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--card2') || '#252423'; ctx.fillRect(0,0,w,h);
-  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border') || '#3b3a39'; ctx.strokeRect(0.5,0.5,w-1,h-1);
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--card2') || '#f4f8ff'; ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border') || '#dbe6f4'; ctx.strokeRect(0.5,0.5,w-1,h-1);
   var rows = (items || []).filter(function(x){ return x && Number(x.ts || 0) > 0; });
-  if(!rows.length){ ctx.fillStyle='#c8c6c4'; ctx.fillText('没有负载样本', 18, 30); return; }
+  if(!rows.length){ ctx.fillStyle='#64748b'; ctx.font='600 13px Inter'; ctx.fillText('没有负载样本', 18, 30); return; }
   rows.sort(function(a,b){ return Number(a.ts||0)-Number(b.ts||0); });
   var minTs = Number(rows[0].ts), maxTs = Number(rows[rows.length-1].ts); if(maxTs <= minTs) maxTs = minTs + 1;
-  var defs = [['cpu','#2899f5','CPU'],['mem','#92c353','内存'],['load','#c19c00','负载'],['temp','#f7630c','温度']];
+  var defs = [['cpu','#2563eb','CPU'],['mem','#16a34a','内存'],['load','#f59e0b','负载'],['temp','#f97316','温度']];
   var pad = {l:42,r:16,t:20,b:28}, plotW = w-pad.l-pad.r, plotH = h-pad.t-pad.b;
-  ctx.strokeStyle = 'rgba(200,198,196,.22)'; ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(100,116,139,.18)'; ctx.lineWidth = 1;
   for(var gy=0; gy<=4; gy++){ var y=pad.t+(plotH*gy/4); ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(w-pad.r,y); ctx.stroke(); }
-  defs.forEach(function(def){
+  defs.forEach(function(def, idx){
     var key=def[0], color=def[1], label=def[2], has=false;
     ctx.beginPath();
     rows.forEach(function(r){
       var v = Number(r[key]);
       if(!isFinite(v)) return;
-      if(key === 'temp') v = Math.max(0, Math.min(100, v));
-      else v = Math.max(0, Math.min(100, v));
+      v = Math.max(0, Math.min(100, v));
       var x = pad.l + ((Number(r.ts)-minTs)/(maxTs-minTs))*plotW;
       var y = pad.t + (1 - v/100)*plotH;
       if(!has){ ctx.moveTo(x,y); has=true; } else ctx.lineTo(x,y);
     });
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = color; ctx.fillText(label, pad.l + defs.indexOf(def)*68, 14);
+    ctx.fillStyle = color; ctx.font='700 12px Inter'; ctx.fillText(label, pad.l + idx*68, 14);
   });
 }
 async function loadAll(){
@@ -381,7 +367,7 @@ async function createSso(){
   var cached = readCachedSso(node);
   if(cached){
     state.selectedSsoUrl = cached;
-    qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl], ['节点', node.name || state.selectedId], ['说明', '已使用浏览器缓存；需要更换时可先删除浏览器本地缓存或等待过期。']]);
+    qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl], ['节点', node.name || state.selectedId], ['说明', '已使用浏览器缓存；需要更换时请清理本地缓存或等待过期。']]);
     qs('btn-open-sso').disabled = false;
     setStatus('detail-status', '已使用浏览器缓存的 SSO URL。', false);
     return;
@@ -413,15 +399,12 @@ function updateSelectionButtons(){
   qs('btn-delete-selected').disabled = !has;
   qs('btn-open-sso').disabled = !state.selectedSsoUrl;
 }
-document.addEventListener('click', function(ev){
-  var cb = ev.target.closest('.node-select');
-  if(cb){ state.checkedIds[Number(cb.value || 0)] = !!cb.checked; ev.stopPropagation(); return; }
-  var card = ev.target.closest('.node-card');
-  if(card){
-    var id = Number(card.getAttribute('data-id') || 0), kind = card.getAttribute('data-kind') || 'basic';
-    if(kind === 'load') showLoad(id); else if(kind === 'scan') showScan(id); else showBasic(id);
-  }
-});
+window.__RID_NODE_CENTER_ACTIONS__ = {
+  showBasic: showBasic,
+  showLoad: showLoad,
+  showScan: showScan,
+  onChecked: function(id, checked){ state.checkedIds[Number(id || 0)] = !!checked; }
+};
 qs('btn-back').onclick = function(){ location.href='/'; };
 qs('btn-settings').onclick = function(){ location.href='/settings'; };
 qs('btn-theme').onclick = function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); };
@@ -433,12 +416,19 @@ qs('btn-edit-selected').onclick = editSelected;
 qs('btn-delete-selected').onclick = function(){ deleteSelected().catch(function(e){ setStatus('detail-status', e.message || e, true); }); };
 qs('btn-sso-selected').onclick = function(){ createSso().catch(function(e){ setStatus('detail-status', e.message || e, true); }); };
 qs('btn-open-sso').onclick = function(){ if(state.selectedSsoUrl) window.open(state.selectedSsoUrl, '_blank', 'noopener'); };
-qs('btn-select-all').onclick = function(){ qsa('.node-select').forEach(function(x){ x.checked = true; state.checkedIds[Number(x.value || 0)] = true; }); };
-qs('btn-select-online').onclick = function(){ qsa('.node-select').forEach(function(x){ var on=x.getAttribute('data-online') === '1'; x.checked = on; state.checkedIds[Number(x.value || 0)] = on; }); };
+qs('btn-select-all').onclick = function(){ (state.nodes || []).forEach(function(n){ state.checkedIds[Number(n.id || 0)] = true; }); renderLists(); };
+qs('btn-select-online').onclick = function(){ (state.nodes || []).forEach(function(n){ state.checkedIds[Number(n.id || 0)] = !!n.ok; }); renderLists(); };
 qs('btn-remote-restart').onclick = function(){ remoteOp('restart').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-remote-models').onclick = function(){ remoteOp('update_models').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-remote-reparse').onclick = function(){ remoteOp('force_reparse').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 applyTheme(loadTheme());
+if(window.__RID_NODE_CENTER_BRIDGE__ && typeof window.__RID_NODE_CENTER_BRIDGE__.mount === 'function'){ window.__RID_NODE_CENTER_BRIDGE__.mount(); }
 withViewerPageLoading('Viewer 节点列表', '正在读取数据', loadAll).catch(function(e){ setStatus('bulk-status', e.message || e, true); });
 """
-    return station_page("节点管理器", body, script, extra_css=extra_css)
+    return station_page(
+        "节点管理器",
+        body,
+        script,
+        extra_css=extra_css,
+        extra_scripts=(_nodes_center_asset_url(),),
+    )

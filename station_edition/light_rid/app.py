@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 from .runtime import RuntimeContext, create_runtime_context, load_namespace
+
+
+def _apply_system_timezone() -> None:
+    """Reload libc/Python localtime state from the system timezone files."""
+    tz_name = ""
+    try:
+        tz_name = open("/etc/timezone", "r", encoding="utf-8").read().strip()
+    except OSError:
+        tz_name = ""
+    if tz_name:
+        os.environ["TZ"] = tz_name
+    if hasattr(time, "tzset"):
+        try:
+            time.tzset()
+        except Exception:
+            pass
 
 
 def _packager_import_anchor() -> None:
@@ -54,5 +73,6 @@ def _packager_import_anchor() -> None:
 
 def main(ctx: RuntimeContext | None = None) -> None:
     """Load the assembled scanner namespace and run its main function."""
+    _apply_system_timezone()
     runtime_ctx = ctx or create_runtime_context()
     load_namespace(runtime_ctx)["main"]()

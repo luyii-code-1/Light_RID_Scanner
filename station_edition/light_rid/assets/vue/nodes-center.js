@@ -46,11 +46,11 @@
   var isBuiltInDirective = /* @__PURE__ */ makeMap(
     "bind,cloak,else-if,else,for,html,if,model,on,once,pre,show,slot,text,memo"
   );
-  var cacheStringFunction = (fn2) => {
+  var cacheStringFunction = (fn) => {
     const cache = /* @__PURE__ */ Object.create(null);
     return ((str) => {
       const hit = cache[str];
-      return hit || (cache[str] = fn2(str));
+      return hit || (cache[str] = fn(str));
     });
   };
   var camelizeRE = /-\w/g;
@@ -269,12 +269,12 @@
         }
       }
     }
-    run(fn2) {
+    run(fn) {
       if (this._active) {
         const currentEffectScope = activeEffectScope;
         try {
           activeEffectScope = this;
-          return fn2();
+          return fn();
         } finally {
           activeEffectScope = currentEffectScope;
         }
@@ -345,8 +345,8 @@
   var activeSub;
   var pausedQueueEffects = /* @__PURE__ */ new WeakSet();
   var ReactiveEffect = class {
-    constructor(fn2) {
-      this.fn = fn2;
+    constructor(fn) {
+      this.fn = fn;
       this.deps = void 0;
       this.depsTail = void 0;
       this.flags = 1 | 4;
@@ -884,48 +884,48 @@
         return value;
       });
     },
-    every(fn2, thisArg) {
-      return apply(this, "every", fn2, thisArg, void 0, arguments);
+    every(fn, thisArg) {
+      return apply(this, "every", fn, thisArg, void 0, arguments);
     },
-    filter(fn2, thisArg) {
+    filter(fn, thisArg) {
       return apply(
         this,
         "filter",
-        fn2,
+        fn,
         thisArg,
         (v) => v.map((item) => toWrapped(this, item)),
         arguments
       );
     },
-    find(fn2, thisArg) {
+    find(fn, thisArg) {
       return apply(
         this,
         "find",
-        fn2,
+        fn,
         thisArg,
         (item) => toWrapped(this, item),
         arguments
       );
     },
-    findIndex(fn2, thisArg) {
-      return apply(this, "findIndex", fn2, thisArg, void 0, arguments);
+    findIndex(fn, thisArg) {
+      return apply(this, "findIndex", fn, thisArg, void 0, arguments);
     },
-    findLast(fn2, thisArg) {
+    findLast(fn, thisArg) {
       return apply(
         this,
         "findLast",
-        fn2,
+        fn,
         thisArg,
         (item) => toWrapped(this, item),
         arguments
       );
     },
-    findLastIndex(fn2, thisArg) {
-      return apply(this, "findLastIndex", fn2, thisArg, void 0, arguments);
+    findLastIndex(fn, thisArg) {
+      return apply(this, "findLastIndex", fn, thisArg, void 0, arguments);
     },
     // flat, flatMap could benefit from ARRAY_ITERATE but are not straight-forward to implement
-    forEach(fn2, thisArg) {
-      return apply(this, "forEach", fn2, thisArg, void 0, arguments);
+    forEach(fn, thisArg) {
+      return apply(this, "forEach", fn, thisArg, void 0, arguments);
     },
     includes(...args) {
       return searchProxy(this, "includes", args);
@@ -940,8 +940,8 @@
     lastIndexOf(...args) {
       return searchProxy(this, "lastIndexOf", args);
     },
-    map(fn2, thisArg) {
-      return apply(this, "map", fn2, thisArg, void 0, arguments);
+    map(fn, thisArg) {
+      return apply(this, "map", fn, thisArg, void 0, arguments);
     },
     pop() {
       return noTracking(this, "pop");
@@ -949,18 +949,18 @@
     push(...args) {
       return noTracking(this, "push", args);
     },
-    reduce(fn2, ...args) {
-      return reduce(this, "reduce", fn2, args);
+    reduce(fn, ...args) {
+      return reduce(this, "reduce", fn, args);
     },
-    reduceRight(fn2, ...args) {
-      return reduce(this, "reduceRight", fn2, args);
+    reduceRight(fn, ...args) {
+      return reduce(this, "reduceRight", fn, args);
     },
     shift() {
       return noTracking(this, "shift");
     },
     // slice could use ARRAY_ITERATE but also seems to beg for range tracking
-    some(fn2, thisArg) {
-      return apply(this, "some", fn2, thisArg, void 0, arguments);
+    some(fn, thisArg) {
+      return apply(this, "some", fn, thisArg, void 0, arguments);
     },
     splice(...args) {
       return noTracking(this, "splice", args);
@@ -997,7 +997,7 @@
     return iter;
   }
   var arrayProto = Array.prototype;
-  function apply(self2, method, fn2, thisArg, wrappedRetFn, args) {
+  function apply(self2, method, fn, thisArg, wrappedRetFn, args) {
     const arr = shallowReadArray(self2);
     const needsWrap = arr !== self2 && !/* @__PURE__ */ isShallow(self2);
     const methodFn = arr[method];
@@ -1005,25 +1005,25 @@
       const result2 = methodFn.apply(self2, args);
       return needsWrap ? toReactive(result2) : result2;
     }
-    let wrappedFn = fn2;
+    let wrappedFn = fn;
     if (arr !== self2) {
       if (needsWrap) {
         wrappedFn = function(item, index) {
-          return fn2.call(this, toWrapped(self2, item), index, self2);
+          return fn.call(this, toWrapped(self2, item), index, self2);
         };
-      } else if (fn2.length > 2) {
+      } else if (fn.length > 2) {
         wrappedFn = function(item, index) {
-          return fn2.call(this, item, index, self2);
+          return fn.call(this, item, index, self2);
         };
       }
     }
     const result = methodFn.call(arr, wrappedFn, thisArg);
     return needsWrap && wrappedRetFn ? wrappedRetFn(result) : result;
   }
-  function reduce(self2, method, fn2, args) {
+  function reduce(self2, method, fn, args) {
     const arr = shallowReadArray(self2);
     const needsWrap = arr !== self2 && !/* @__PURE__ */ isShallow(self2);
-    let wrappedFn = fn2;
+    let wrappedFn = fn;
     let wrapInitialAccumulator = false;
     if (arr !== self2) {
       if (needsWrap) {
@@ -1033,11 +1033,11 @@
             wrapInitialAccumulator = false;
             acc = toWrapped(self2, acc);
           }
-          return fn2.call(this, acc, toWrapped(self2, item), index, self2);
+          return fn.call(this, acc, toWrapped(self2, item), index, self2);
         };
-      } else if (fn2.length > 3) {
+      } else if (fn.length > 3) {
         wrappedFn = function(acc, item, index) {
-          return fn2.call(this, acc, item, index, self2);
+          return fn.call(this, acc, item, index, self2);
         };
       }
     }
@@ -1096,9 +1096,9 @@
       }
       const targetIsArray = isArray(target);
       if (!isReadonly2) {
-        let fn2;
-        if (targetIsArray && (fn2 = arrayInstrumentations[key])) {
-          return fn2;
+        let fn;
+        if (targetIsArray && (fn = arrayInstrumentations[key])) {
+          return fn;
         }
         if (key === "hasOwnProperty") {
           return hasOwnProperty2;
@@ -1595,8 +1595,8 @@
     return /* @__PURE__ */ isReactive(objectWithRefs) ? objectWithRefs : new Proxy(objectWithRefs, shallowUnwrapHandlers);
   }
   var ComputedRefImpl = class {
-    constructor(fn2, setter, isSSR) {
-      this.fn = fn2;
+    constructor(fn, setter, isSSR) {
+      this.fn = fn;
       this.setter = setter;
       this._value = void 0;
       this.dep = new Dep(this);
@@ -1805,16 +1805,16 @@
     [15]: "component update",
     [16]: "app unmount cleanup function"
   };
-  function callWithErrorHandling(fn2, instance, type, args) {
+  function callWithErrorHandling(fn, instance, type, args) {
     try {
-      return args ? fn2(...args) : fn2();
+      return args ? fn(...args) : fn();
     } catch (err) {
       handleError(err, instance, type);
     }
   }
-  function callWithAsyncErrorHandling(fn2, instance, type, args) {
-    if (isFunction(fn2)) {
-      const res = callWithErrorHandling(fn2, instance, type, args);
+  function callWithAsyncErrorHandling(fn, instance, type, args) {
+    if (isFunction(fn)) {
+      const res = callWithErrorHandling(fn, instance, type, args);
       if (res && isPromise(res)) {
         res.catch((err) => {
           handleError(err, instance, type);
@@ -1822,15 +1822,15 @@
       }
       return res;
     }
-    if (isArray(fn2)) {
+    if (isArray(fn)) {
       const values = [];
-      for (let i = 0; i < fn2.length; i++) {
-        values.push(callWithAsyncErrorHandling(fn2[i], instance, type, args));
+      for (let i = 0; i < fn.length; i++) {
+        values.push(callWithAsyncErrorHandling(fn[i], instance, type, args));
       }
       return values;
     } else if (true) {
       warn$1(
-        `Invalid value type passed to callWithAsyncErrorHandling(): ${typeof fn2}`
+        `Invalid value type passed to callWithAsyncErrorHandling(): ${typeof fn}`
       );
     }
   }
@@ -1894,9 +1894,9 @@
   var resolvedPromise = /* @__PURE__ */ Promise.resolve();
   var currentFlushPromise = null;
   var RECURSION_LIMIT = 100;
-  function nextTick(fn2) {
+  function nextTick(fn) {
     const p2 = currentFlushPromise || resolvedPromise;
-    return fn2 ? p2.then(this ? fn2.bind(this) : fn2) : p2;
+    return fn ? p2.then(this ? fn.bind(this) : fn) : p2;
   }
   function findInsertionIndex(id) {
     let start = flushIndex + 1;
@@ -2041,10 +2041,10 @@
       }
     }
   }
-  function checkRecursiveUpdates(seen, fn2) {
-    const count = seen.get(fn2) || 0;
+  function checkRecursiveUpdates(seen, fn) {
+    const count = seen.get(fn) || 0;
     if (count > RECURSION_LIMIT) {
-      const instance = fn2.i;
+      const instance = fn.i;
       const componentName = instance && getComponentName(instance.type);
       handleError(
         `Maximum recursive updates exceeded${componentName ? ` in component <${componentName}>` : ``}. This means you have a reactive effect that is mutating its own dependencies and thus recursively triggering itself. Possible sources include component template, render function, updated hook or watcher source function.`,
@@ -2053,7 +2053,7 @@
       );
       return true;
     }
-    seen.set(fn2, count + 1);
+    seen.set(fn, count + 1);
     return false;
   }
   var isHmrUpdating = false;
@@ -2175,10 +2175,10 @@
       }
     }
   }
-  function tryWrap(fn2) {
+  function tryWrap(fn) {
     return (id, arg) => {
       try {
-        return fn2(id, arg);
+        return fn(id, arg);
       } catch (e) {
         console.error(e);
         console.warn(
@@ -2300,10 +2300,10 @@
     currentScopeId = instance && instance.type.__scopeId || null;
     return prev;
   }
-  function withCtx(fn2, ctx = currentRenderingInstance, isNonScopedSlot) {
-    if (!ctx) return fn2;
-    if (fn2._n) {
-      return fn2;
+  function withCtx(fn, ctx = currentRenderingInstance, isNonScopedSlot) {
+    if (!ctx) return fn;
+    if (fn._n) {
+      return fn;
     }
     const renderFnWithContext = (...args) => {
       if (renderFnWithContext._d) {
@@ -2312,7 +2312,7 @@
       const prevInstance = setCurrentRenderingInstance(ctx);
       let res;
       try {
-        res = fn2(...args);
+        res = fn(...args);
       } finally {
         setCurrentRenderingInstance(prevInstance);
         if (renderFnWithContext._d) {
@@ -2595,7 +2595,7 @@
     })
   );
   var isReservedPrefix = (key) => key === "_" || key === "$";
-  var hasSetupBinding = (state, key) => state !== EMPTY_OBJ && !state.__isScriptSetup && hasOwn(state, key);
+  var hasSetupBinding = (state2, key) => state2 !== EMPTY_OBJ && !state2.__isScriptSetup && hasOwn(state2, key);
   var PublicInstanceProxyHandlers = {
     get({ _: instance }, key) {
       if (key === "__v_skip") {
@@ -2978,11 +2978,11 @@ If you want to remount the same app, move your app creation logic into a factory
           context.provides[key] = value;
           return app;
         },
-        runWithContext(fn2) {
+        runWithContext(fn) {
           const lastApp = currentApp;
           currentApp = app;
           try {
-            return fn2();
+            return fn();
           } finally {
             currentApp = lastApp;
           }
@@ -5575,15 +5575,15 @@ For more details, see https://link.vuejs.org/feature-flags.`
     return null;
   }
   var isSuspense = (type) => type.__isSuspense;
-  function queueEffectWithSuspense(fn2, suspense) {
+  function queueEffectWithSuspense(fn, suspense) {
     if (suspense && suspense.pendingBranch) {
-      if (isArray(fn2)) {
-        suspense.effects.push(...fn2);
+      if (isArray(fn)) {
+        suspense.effects.push(...fn);
       } else {
-        suspense.effects.push(fn2);
+        suspense.effects.push(fn);
       }
     } else {
-      queuePostFlushCb(fn2);
+      queuePostFlushCb(fn);
     }
   }
   var Fragment = /* @__PURE__ */ Symbol.for("v-fgt");
@@ -6924,7 +6924,7 @@ Expected function or array of functions, received type ${typeof value}.`
         e._stopped = true;
       };
       return value.map(
-        (fn2) => (e2) => !e2._stopped && fn2 && fn2(e2)
+        (fn) => (e2) => !e2._stopped && fn && fn(e2)
       );
     } else {
       return value;
@@ -7112,667 +7112,323 @@ Expected function or array of functions, received type ${typeof value}.`
     initDev();
   }
 
-  // frontend/src/rid-home.js
-  var appState = reactive({
-    mounted: false,
-    page: "live",
-    loading: false,
-    tableRows: [],
-    liveRows: []
+  // frontend/src/nodes-center.js
+  var state = reactive({
+    nodes: [],
+    selectedId: null,
+    checkedIds: {},
+    sections: {
+      basic: { field: "name", dir: "asc" },
+      load: { field: "cpu", dir: "desc" },
+      scan: { field: "online_count", dir: "desc" }
+    }
   });
-  var tableColumns = [
-    { key: "index", label: "#", className: "sortable", sortable: true },
-    { key: "sn", label: "SN", className: "sortable", sortable: true },
-    { key: "model", label: "机型", className: "sortable", sortable: true },
-    { key: "rssi", label: "信号", className: "sortable", sortable: true },
-    { key: "pkts", label: "包", className: "sortable", sortable: true },
-    { key: "dir", label: "方向", className: "sortable", sortable: true },
-    { key: "age", label: "数据更新", className: "sortable", sortable: true },
-    { key: "last_seen", label: "末次发现", className: "sortable", sortable: true },
-    { key: "uas_id", label: "UAS ID", className: "sortable", sortable: true }
-  ];
-  function fn(name, fallback) {
-    const value = window[name];
-    return typeof value === "function" ? value : fallback;
-  }
-  function qs(id) {
-    return document.getElementById(id);
-  }
-  function normalizeRows(rows) {
-    return Array.isArray(rows) ? rows.map((row) => row || {}) : [];
-  }
-  function currentPage() {
-    return String(fn("currentAppPage", () => "live")() || "live");
-  }
-  function asText(value, fallback = "") {
+  var storagePrefix = "rid_node_center_sort_";
+  function safeText(value, fallback = "—") {
     if (value == null || value === "") {
       return fallback;
     }
     return String(value);
   }
-  function dataAttr(value) {
-    return String(value || "");
+  function numValue(value, fallback = Number.NEGATIVE_INFINITY) {
+    const out = Number(value);
+    return Number.isFinite(out) ? out : fallback;
   }
-  function fmtFallback(value, digits, unit) {
-    if (value == null || Number.isNaN(Number(value))) {
-      return "N/A";
+  function fmtPct(value) {
+    const out = Number(value);
+    return Number.isFinite(out) ? `${out.toFixed(1)}%` : "—";
+  }
+  function fmtTemp(value) {
+    const out = Number(value);
+    return Number.isFinite(out) ? `${out.toFixed(1)}°C` : "—";
+  }
+  function fmtMs(value) {
+    const out = Number(value);
+    return Number.isFinite(out) ? `${Math.round(out)}ms` : "—";
+  }
+  function fmtTime(value) {
+    const out = Number(value);
+    if (!Number.isFinite(out) || out <= 0) {
+      return "—";
     }
-    return `${Number(value).toFixed(digits)}${unit}`;
-  }
-  function stopEvent(event) {
-    if (!event) {
-      return;
-    }
-    if (typeof event.preventDefault === "function") {
-      event.preventDefault();
-    }
-    if (typeof event.stopPropagation === "function") {
-      event.stopPropagation();
-    }
-  }
-  function updateSummary(rows) {
-    const list = normalizeRows(rows);
-    const live = list.filter((row) => row && !row.lost).length;
-    const totalEl = qs("n-total");
-    const liveEl = qs("n-live");
-    const lostEl = qs("n-lost");
-    if (totalEl) totalEl.textContent = String(list.length);
-    if (liveEl) liveEl.textContent = String(live);
-    if (lostEl) lostEl.textContent = String(list.length - live);
-  }
-  function updateLatestDroneMap(rows) {
-    const next = {};
-    normalizeRows(rows).forEach((row) => {
-      const sn = String(row && row.sn || "");
-      if (sn) {
-        next[sn] = row;
-      }
-    });
-    window.latestDroneMap = next;
-  }
-  function updateLiveCount(rows) {
-    const countEl = qs("live-card-count");
-    if (countEl) {
-      const liveRecentRows = fn("liveRecentRows", (items) => normalizeRows(items));
-      countEl.textContent = String(normalizeRows(liveRecentRows(rows)).length);
+    try {
+      return new Date(out * 1e3).toLocaleString();
+    } catch (_error) {
+      return String(value);
     }
   }
-  function updateTableRows(rows) {
-    const normalized = normalizeRows(rows);
-    appState.page = currentPage();
-    appState.tableRows = normalized;
-    updateSummary(normalized);
-    updateLatestDroneMap(normalized);
+  function sectionColumns(kind) {
+    if (kind === "load") {
+      return [
+        { key: "name", label: "节点" },
+        { key: "ok", label: "状态" },
+        { key: "cpu", label: "CPU" },
+        { key: "mem", label: "内存" },
+        { key: "temp", label: "温度" },
+        { key: "load1", label: "负载" }
+      ];
+    }
+    if (kind === "scan") {
+      return [
+        { key: "name", label: "节点" },
+        { key: "ok", label: "状态" },
+        { key: "count", label: "累计" },
+        { key: "online_count", label: "在线" },
+        { key: "status_code", label: "状态码" },
+        { key: "fetched_at", label: "刷新时间" }
+      ];
+    }
+    return [
+      { key: "name", label: "节点" },
+      { key: "ok", label: "状态" },
+      { key: "latency_ms", label: "延迟" },
+      { key: "station", label: "站点" },
+      { key: "sniff_state", label: "采集" },
+      { key: "base_url", label: "地址" }
+    ];
   }
-  function updateLiveRows(rows) {
-    const normalized = normalizeRows(rows);
-    appState.liveRows = normalized;
-    updateLiveCount(normalized);
+  function compareBy(kind, field, left, right) {
+    if (field === "name") {
+      return safeText(left.name || left.base_url, "").localeCompare(safeText(right.name || right.base_url, ""));
+    }
+    if (field === "base_url") {
+      return safeText(left.base_url, "").localeCompare(safeText(right.base_url, ""));
+    }
+    if (field === "ok") {
+      return numValue(left.ok ? 1 : 0, 0) - numValue(right.ok ? 1 : 0, 0);
+    }
+    if (kind === "basic" && field === "station") {
+      return safeText((left.station || {}).name, "").localeCompare(safeText((right.station || {}).name, ""));
+    }
+    if (kind === "basic" && field === "sniff_state") {
+      return safeText((left.service || {}).sniff_state, "").localeCompare(safeText((right.service || {}).sniff_state, ""));
+    }
+    if (kind === "load" && field === "cpu") {
+      return numValue((left.host || {}).cpu_percent ?? (left.service || {}).cpu_percent) - numValue((right.host || {}).cpu_percent ?? (right.service || {}).cpu_percent);
+    }
+    if (kind === "load" && field === "mem") {
+      return numValue((left.host || {}).mem_percent ?? (left.service || {}).mem_percent) - numValue((right.host || {}).mem_percent ?? (right.service || {}).mem_percent);
+    }
+    if (kind === "load" && field === "temp") {
+      return numValue((left.host || {}).temperature_c ?? (left.service || {}).temperature_c) - numValue((right.host || {}).temperature_c ?? (right.service || {}).temperature_c);
+    }
+    if (kind === "load" && field === "load1") {
+      return numValue((left.host || {}).load1) - numValue((right.host || {}).load1);
+    }
+    return numValue(left[field]) - numValue(right[field]);
   }
-  function afterTableRender(rows) {
-    const list = normalizeRows(rows);
-    nextTick(() => {
-      fn("syncTableSelectionUi", () => {
-      })();
-      fn("refreshTrackMgrOptions", () => {
-      })(list);
-      fn("refreshActiveInfoCard", () => {
-      })(list);
-      fn("applyTableSortUi", () => {
-      })();
-    });
-    fn("renderMapMiniList", () => {
-    })(list);
+  function readStoredSort(kind) {
+    try {
+      const raw = localStorage.getItem(storagePrefix + kind);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || !parsed.field) return null;
+      return { field: String(parsed.field), dir: parsed.dir === "asc" ? "asc" : "desc" };
+    } catch (_error) {
+      return null;
+    }
   }
-  function tableCell(sn, field, text, extraClass, cellClass, cellStyle) {
-    return h(
-      "td",
-      {
-        class: cellClass(sn, field, extraClass),
-        style: cellStyle(sn, field),
-        "data-hl-sn": sn,
-        "data-hl-field": field
-      },
-      text
-    );
+  function writeStoredSort(kind) {
+    try {
+      localStorage.setItem(storagePrefix + kind, JSON.stringify(state.sections[kind]));
+    } catch (_error) {
+    }
   }
-  var TableRoot = {
-    setup() {
-      const rows = computed2(() => {
-        const sortRows = fn("sortedDroneRows", (items) => normalizeRows(items));
-        return normalizeRows(sortRows(appState.tableRows));
-      });
-      const page = computed2(() => appState.page);
-      const fmt = fn("fmt", fmtFallback);
-      const fmtAge = fn("fmtAge", (age) => age == null ? "N/A" : String(age));
-      const uasIdText = fn("uasIdText", (row) => String(row && row.uas_id || "N/A"));
-      const scanTypeText = fn("scanTypeText", () => "N/A");
-      const snSourceText = fn("snSourceText", () => "N/A");
-      const firmwareTypeText = fn("firmwareTypeText", () => "N/A");
-      const firmwareTypeKey = fn("firmwareTypeKey", () => "unknown");
-      const trackColorForSn = fn("trackColorForSn", () => "#2563eb");
-      const isSnSelected = fn("isSnSelected", () => false);
-      const isHistoryTrackVisible = fn("isHistoryTrackVisible", () => false);
-      const fieldCellAttrs = fn("fieldCellAttrs", () => "");
-      const highlightAlpha = fn("highlightAlpha", () => 0);
-      const getTableSortState = fn("getTableSortState", () => ({ field: "", dir: "asc" }));
-      const setTableSort = fn("setTableSort", () => {
-      });
-      const setAllVisibleSelected = fn("setAllVisibleSelected", () => {
-      });
-      const setHistorySnVisible = fn("setHistorySnVisible", () => {
-      });
-      const setSnSelected = fn("setSnSelected", () => {
-      });
-      const focusHistoryAircraft = fn("focusHistoryAircraft", () => {
-      });
-      const showDroneInfoCard = fn("showDroneInfoCard", () => {
-      });
-      const hideInfoCard = fn("hideInfoCard", () => {
-      });
-      const copySn = fn("copySn", () => {
-      });
-      let rowClickTimer = null;
-      function selected(row) {
-        const sn = String(row && row.sn || "");
-        return page.value === "history" ? !!isHistoryTrackVisible(sn) : !!isSnSelected(sn);
-      }
-      function rowClasses(row) {
-        const sn = String(row && row.sn || "");
-        return {
-          "data-row": true,
-          mac: sn.startsWith("MAC:"),
-          live: !row.lost && !sn.startsWith("MAC:"),
-          lost: !!row.lost,
-          selected: selected(row),
-          "alarm-zone": !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn])
-        };
-      }
-      function snBadges(row) {
-        const out = [
-          { text: snSourceText(row), className: "sn-badge" },
-          { text: scanTypeText(row), className: "sn-badge" },
-          {
-            text: firmwareTypeText(row),
-            className: `sn-badge firmware-${firmwareTypeKey(row)}`
-          }
-        ];
-        const sn = String(row && row.sn || "");
-        if (window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn]) {
-          out.push({ text: "报警", className: "sn-badge alarm" });
-        }
-        return out.filter((item) => item.text && item.text !== "N/A");
-      }
-      function cellClass(sn, field, extraClass = "") {
-        const classes = String(extraClass || "").split(/\s+/).filter(Boolean);
-        const attrText = String(fieldCellAttrs(sn, field, extraClass) || "");
-        if (/\bhl\b/.test(attrText)) {
-          classes.push("hl");
-        }
-        return classes.join(" ");
-      }
-      function cellStyle(sn, field) {
-        const alpha = Number(highlightAlpha(sn, field) || 0);
-        return alpha > 0 ? { "--hl-alpha": String(Math.max(0, Math.min(1, alpha))) } : void 0;
-      }
-      function trackChipStyle(sn, isSelected) {
-        return {
-          "--track-color": String(trackColorForSn(sn) || "#2563eb"),
-          display: isSelected ? "" : "none"
-        };
-      }
-      function sortClass(field) {
-        const state = getTableSortState() || {};
-        if (String(state.field || "") !== String(field || "")) {
-          return "sortable";
-        }
-        return `sortable sorted-${state.dir === "desc" ? "desc" : "asc"}`;
-      }
-      function allSelected() {
-        if (!rows.value.length) {
-          return false;
-        }
-        return rows.value.every((row) => selected(row));
-      }
-      function someSelected() {
-        return rows.value.some((row) => selected(row));
-      }
-      function toggleAll(event) {
-        setAllVisibleSelected(!!(event && event.target && event.target.checked));
-      }
-      function toggleRow(row, checked) {
-        const sn = String(row && row.sn || "");
-        if (!sn) {
-          return;
-        }
-        if (page.value === "history") {
-          setHistorySnVisible(sn, !!checked);
-        } else {
-          setSnSelected(sn, !!checked);
-        }
-      }
-      function onRowClick(row) {
-        const sn = String(row && row.sn || "");
-        if (!sn) {
-          return;
-        }
-        if (rowClickTimer) {
-          clearTimeout(rowClickTimer);
-          rowClickTimer = null;
-        }
-        rowClickTimer = setTimeout(() => {
-          rowClickTimer = null;
-          if (page.value === "history") {
-            focusHistoryAircraft(sn);
-            return;
-          }
-          const item = (window.latestDroneMap || {})[sn];
-          if (item) {
-            showDroneInfoCard(item);
-          }
-        }, 220);
-      }
-      function onRowDblClick(row, event) {
-        stopEvent(event);
-        const sn = String(row && row.sn || "");
-        if (!sn) {
-          return;
-        }
-        if (rowClickTimer) {
-          clearTimeout(rowClickTimer);
-          rowClickTimer = null;
-        }
-        setSnSelected(sn, true);
-        hideInfoCard();
-      }
-      function onCopyClick(sn, event) {
-        stopEvent(event);
-        copySn(sn);
-      }
-      function onHeaderClick(field, event) {
-        stopEvent(event);
-        setTableSort(field);
-      }
-      return {
-        rows,
-        fmt,
-        fmtAge,
-        uasIdText,
-        selected,
-        rowClasses,
-        snBadges,
-        cellClass,
-        cellStyle,
-        trackChipStyle,
-        sortClass,
-        allSelected,
-        someSelected,
-        toggleAll,
-        toggleRow,
-        onRowClick,
-        onRowDblClick,
-        onCopyClick,
-        onHeaderClick
-      };
+  function action(name, ...args) {
+    const host = window.__RID_NODE_CENTER_ACTIONS__ || {};
+    const fn = host[name];
+    if (typeof fn === "function") {
+      return fn(...args);
+    }
+    return void 0;
+  }
+  var NodeSection = {
+    props: {
+      kind: { type: String, required: true }
     },
-    render() {
-      return h("table", { id: "dtable" }, [
-        h(
-          "thead",
-          h("tr", [
-            h("th", [
-              h("div", { class: "sel-wrap" }, [
-                h("input", {
-                  id: "sel-all",
-                  class: "sel-sn",
-                  type: "checkbox",
-                  title: "全选",
-                  checked: this.allSelected(),
-                  indeterminate: !this.allSelected() && this.someSelected(),
-                  onChange: this.toggleAll
-                })
-              ])
-            ]),
-            ...tableColumns.map(
-              (column) => h(
-                "th",
-                {
-                  key: column.key,
-                  class: this.sortClass(column.key),
-                  "data-sort": column.key,
-                  onClick: (event) => this.onHeaderClick(column.key, event)
-                },
-                column.label
-              )
-            )
-          ])
-        ),
-        h(
-          "tbody",
-          { id: "tbody" },
-          this.rows.length ? this.rows.map((row, idx) => {
-            const sn = dataAttr(row && row.sn);
-            const isSelected = this.selected(row);
-            return h(
-              "tr",
-              {
-                key: sn || `row-${idx}`,
-                class: this.rowClasses(row),
-                "data-sn": sn,
-                onClick: () => this.onRowClick(row),
-                onDblclick: (event) => this.onRowDblClick(row, event)
-              },
-              [
-                h("td", [
-                  h("div", { class: "sel-wrap track-sel-wrap" }, [
-                    h("input", {
-                      class: "sel-sn",
-                      type: "checkbox",
-                      "data-sn": sn,
-                      checked: isSelected,
-                      onClick: stopEvent,
-                      onChange: (event) => this.toggleRow(row, event.target.checked)
-                    }),
-                    h("span", {
-                      class: "track-color-chip",
-                      style: this.trackChipStyle(sn, isSelected),
-                      title: "轨迹颜色"
-                    })
-                  ])
-                ]),
-                h("td", { class: "idx-cell" }, String(idx + 1)),
-                h("td", [
-                  h("div", { class: "sn-cell" }, [
-                    ...this.snBadges(row).map(
-                      (badge) => h(
-                        "span",
-                        {
-                          key: `${badge.className}:${badge.text}`,
-                          class: badge.className
-                        },
-                        badge.text
-                      )
-                    ),
-                    h("span", { class: "mono" }, sn),
-                    h(
-                      "button",
-                      {
-                        class: "icon-btn copy-sn",
-                        type: "button",
-                        "data-sn": sn,
-                        title: "复制 SN",
-                        onClick: (event) => this.onCopyClick(sn, event)
-                      },
-                      "⧉"
-                    )
-                  ])
-                ]),
-                tableCell(sn, "model", asText(row && row.model, "N/A"), "", this.cellClass, this.cellStyle),
-                tableCell(sn, "rssi", this.fmt(row && row.rssi, 0, "dBm"), "", this.cellClass, this.cellStyle),
-                tableCell(
-                  sn,
-                  "pkts",
-                  row && row.pkts == null ? "0" : String(row.pkts),
-                  "mono",
-                  this.cellClass,
-                  this.cellStyle
-                ),
-                tableCell(sn, "dir", asText(row && row.dir, "-"), "", this.cellClass, this.cellStyle),
-                tableCell(
-                  sn,
-                  "age_text",
-                  asText(row && row.age_text, this.fmtAge(row && row.age)),
-                  "mono",
-                  this.cellClass,
-                  this.cellStyle
-                ),
-                tableCell(
-                  sn,
-                  "last_seen",
-                  asText(row && row.last_seen, "-"),
-                  "mono",
-                  this.cellClass,
-                  this.cellStyle
-                ),
-                tableCell(sn, "uas_id", this.uasIdText(row), "mono", this.cellClass, this.cellStyle)
-              ]
-            );
-          }) : [h("tr", { key: "empty" }, [h("td", { colspan: "10", class: "empty" }, "暂无数据")])]
-        )
-      ]);
-    }
-  };
-  var LiveCardsRoot = {
-    setup() {
-      const sourceRows = computed2(() => appState.liveRows);
-      const liveRecentRows = fn("liveRecentRows", (rows2) => normalizeRows(rows2));
-      const coordText = fn("coordText", (lat, lon) => lat == null || lon == null ? "N/A" : `${lat}, ${lon}`);
-      const homeAuxCoordText = fn("homeAuxCoordText", () => "N/A");
-      const firmwareTypeText = fn("firmwareTypeText", () => "N/A");
-      const uasIdText = fn("uasIdText", (row) => String(row && row.uas_id || "N/A"));
-      const isSnSelected = fn("isSnSelected", () => false);
-      const fmt = fn("fmt", fmtFallback);
-      const fmtAge = fn("fmtAge", (age) => age == null ? "N/A" : String(age));
+    setup(props) {
       const rows = computed2(() => {
-        const list = normalizeRows(liveRecentRows(sourceRows.value));
-        return list.sort((left, right) => {
-          const leftLost = !!(left && left.lost);
-          const rightLost = !!(right && right.lost);
-          if (leftLost !== rightLost) {
-            return leftLost ? 1 : -1;
+        const sortState = state.sections[props.kind];
+        const list = Array.isArray(state.nodes) ? state.nodes.slice() : [];
+        list.sort((left, right) => {
+          const cmp = compareBy(props.kind, sortState.field, left, right);
+          if (cmp === 0) {
+            return safeText(left.name || left.base_url, "").localeCompare(safeText(right.name || right.base_url, ""));
           }
-          const leftRssi = left && left.rssi != null ? Number(left.rssi) : -9999;
-          const rightRssi = right && right.rssi != null ? Number(right.rssi) : -9999;
-          return rightRssi - leftRssi;
+          return sortState.dir === "asc" ? cmp : -cmp;
         });
+        return list;
       });
-      function rowClasses(row) {
-        const sn = String(row && row.sn || "");
-        return {
-          "live-card": true,
-          selected: !!isSnSelected(sn),
-          lost: !!row.lost,
-          "alarm-zone": !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn])
-        };
+      function sortClass(field) {
+        const sortState = state.sections[props.kind];
+        if (sortState.field !== field) {
+          return "node-sort-btn";
+        }
+        return `node-sort-btn active ${sortState.dir === "asc" ? "sorted-asc" : "sorted-desc"}`;
       }
-      function hasAlarm(row) {
-        const sn = String(row && row.sn || "");
-        return !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn]);
+      function setSort(field) {
+        const sortState = state.sections[props.kind];
+        if (sortState.field === field) {
+          sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
+        } else {
+          sortState.field = field;
+          sortState.dir = field === "name" ? "asc" : "desc";
+        }
+        writeStoredSort(props.kind);
       }
-      function stateClass(row) {
-        return row && row.lost ? "lost" : "live";
+      function toggleChecked(node, checked) {
+        state.checkedIds[Number(node.id || 0)] = !!checked;
+        action("onChecked", Number(node.id || 0), !!checked);
       }
-      function stateText(row) {
-        return row && row.lost ? "2分钟内离线" : "在线";
-      }
-      function onCopyClick(sn, event) {
-        stopEvent(event);
-        fn("copySn", () => {
-        })(sn);
+      function openDetail(node) {
+        const name = props.kind === "load" ? "showLoad" : props.kind === "scan" ? "showScan" : "showBasic";
+        action(name, Number(node.id || 0));
       }
       return {
         rows,
-        rowClasses,
-        hasAlarm,
-        stateClass,
-        stateText,
-        coordText,
-        homeAuxCoordText,
-        firmwareTypeText,
-        uasIdText,
-        fmt,
-        fmtAge,
-        isSnSelected,
-        onCopyClick
+        sortClass,
+        setSort,
+        toggleChecked,
+        openDetail,
+        columns: computed2(() => sectionColumns(props.kind))
       };
     },
     render() {
       if (!this.rows.length) {
-        return h("div", { class: "ap-empty" }, "暂无实时目标");
+        return h("div", { class: "empty-state" }, "尚未添加节点。");
       }
-      return h(
-        Fragment,
-        this.rows.map((row, idx) => {
-          const sn = dataAttr(row && row.sn);
-          const title = asText(row && row.model, "N/A");
-          const latlon = row && row.lat != null && row.lon != null ? `${this.fmt(row.lat, 6, "")}, ${this.fmt(row.lon, 6, "")}` : "N/A";
-          const rssiText = row && row.rssi == null ? "N/A" : `${String(row && row.rssi)}dBm`;
-          const updateText = asText(row && row.age_text, this.fmtAge(row && row.age));
-          const footText = asText(row && (row.last_pkt_time || row.capture_time), "-");
-          return h(
-            "article",
-            {
-              key: sn || `card-${idx}`,
-              class: this.rowClasses(row),
-              "data-sn": sn
-            },
-            [
-              h("div", { class: "live-card-top" }, [
-                h("div", { class: "live-card-title", title }, title),
-                h("div", { class: "live-card-actions" }, [
-                  h("label", { class: "live-card-pick" }, [
-                    h("input", {
-                      class: "sel-sn",
-                      type: "checkbox",
-                      "data-sn": sn,
-                      checked: this.isSnSelected(sn)
-                    }),
-                    h("span", "选中")
-                  ]),
-                  ...this.hasAlarm(row) ? [h("span", { class: "live-card-state alarm" }, "区域报警")] : [],
-                  h("span", { class: "live-card-state firmware" }, this.firmwareTypeText(row)),
-                  h("span", { class: ["live-card-state", this.stateClass(row)] }, this.stateText(row))
-                ])
-              ]),
-              h("div", { class: "live-card-snrow" }, [
-                h("span", { class: "label" }, "SN"),
-                h("span", { class: "live-card-sntext", title: asText(row && row.sn, "") }, asText(row && row.sn, "-")),
-                h(
-                  "button",
-                  {
-                    class: "icon-btn copy-sn",
-                    type: "button",
-                    "data-sn": sn,
-                    title: "复制 SN",
-                    onClick: (event) => this.onCopyClick(sn, event)
-                  },
-                  "⧉"
-                )
-              ]),
-              h("div", { class: "live-card-snrow live-card-uasrow" }, [
-                h("span", { class: "label" }, "UAS ID"),
-                h("span", { class: "live-card-sntext", title: this.uasIdText(row) }, this.uasIdText(row)),
-                h("span")
-              ]),
-              ...row && row.discovered_base_text ? [
+      return h("div", { class: "node-list-stack" }, [
+        h(
+          "div",
+          { class: "node-sort-row" },
+          this.columns.map(
+            (column) => h(
+              "button",
+              {
+                key: column.key,
+                type: "button",
+                class: this.sortClass(column.key),
+                onClick: () => this.setSort(column.key)
+              },
+              column.label
+            )
+          )
+        ),
+        h(
+          "div",
+          { class: "node-card-list" },
+          this.rows.map((node) => {
+            const station = node.station || {};
+            const service = node.service || {};
+            const host = node.host || {};
+            const nodeId = Number(node.id || 0);
+            const active = Number(state.selectedId || 0) === nodeId;
+            const checked = !!state.checkedIds[nodeId];
+            const statusText = node.ok ? "在线" : "离线";
+            const statusClass = node.ok ? "ok" : "err";
+            let metrics = [];
+            let meta = safeText(node.base_url, "—");
+            if (this.kind === "load") {
+              metrics = [
+                { k: "CPU", v: fmtPct(host.cpu_percent ?? service.cpu_percent) },
+                { k: "内存", v: fmtPct(host.mem_percent ?? service.mem_percent) },
+                { k: "温度", v: fmtTemp(host.temperature_c ?? service.temperature_c) }
+              ];
+              meta = `负载 ${safeText(host.load1, "—")} / ${safeText(host.load5, "—")} / ${safeText(host.load15, "—")}`;
+            } else if (this.kind === "scan") {
+              metrics = [
+                { k: "累计", v: safeText(node.count, "0") },
+                { k: "在线", v: safeText(node.online_count, "0") },
+                { k: "状态码", v: safeText(node.status_code, "—") }
+              ];
+              meta = `刷新时间 ${fmtTime(node.fetched_at)}`;
+            } else {
+              metrics = [
+                { k: "延迟", v: fmtMs(node.latency_ms) },
+                { k: "站点", v: safeText(station.name || node.name, "—") },
+                { k: "采集", v: safeText(service.sniff_state || (node.enabled ? "—" : "disabled"), "—") }
+              ];
+              if (node.error) {
+                meta = String(node.error).slice(0, 180);
+              }
+            }
+            return h(
+              "article",
+              {
+                key: `${this.kind}:${nodeId}`,
+                class: ["node-card", active ? "active" : "", node.ok ? "" : "offline"],
+                onClick: () => this.openDetail(node)
+              },
+              [
+                h("div", { class: "node-card-head" }, [
+                  h("input", {
+                    class: "node-select",
+                    type: "checkbox",
+                    checked,
+                    "data-online": node.ok ? "1" : "0",
+                    onClick: (event) => event.stopPropagation(),
+                    onChange: (event) => this.toggleChecked(node, event.target.checked)
+                  }),
+                  h("div", { class: "node-card-title", title: safeText(node.name || node.base_url, "节点") }, safeText(node.name || node.base_url, "节点")),
+                  h("span", { class: ["node-pill", statusClass] }, statusText)
+                ]),
+                h("div", { class: "node-card-meta mono" }, safeText(node.base_url, "—")),
                 h(
                   "div",
-                  {
-                    class: "viewer-base-label",
-                    title: String(row.discovered_base_text)
-                  },
-                  String(row.discovered_base_text)
-                )
-              ] : [],
-              h("div", { class: "live-card-grid" }, [
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "经纬度"), h("div", { class: "v" }, latlon)]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "高度"), h("div", { class: "v" }, this.fmt(row && row.alt, 1, "m"))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "速度"), h("div", { class: "v" }, this.fmt(row && row.spd, 2, "m/s"))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "航向"), h("div", { class: "v" }, asText(row && row.dir, "-"))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "遥控站位置"), h("div", { class: "v" }, this.coordText(row && row.pilot_lat, row && row.pilot_lon, 6))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "Aux/Home"), h("div", { class: "v" }, this.homeAuxCoordText(row))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "信号 / 更新"), h("div", { class: "v" }, `${rssiText} / ${updateText}`)])
-              ]),
-              h("div", { class: "live-card-foot" }, [
-                h("span", `最后数据包 ${footText}`),
-                h("span", `#${idx + 1}`)
-              ])
-            ]
-          );
-        })
-      );
+                  { class: "node-metrics" },
+                  metrics.map(
+                    (metric) => h("div", { key: metric.k, class: "node-metric" }, [
+                      h("div", { class: "k" }, metric.k),
+                      h("div", { class: "v" }, metric.v)
+                    ])
+                  )
+                ),
+                h("div", { class: "node-card-meta" }, meta)
+              ]
+            );
+          })
+        )
+      ]);
     }
   };
-  var legacyFns = {
-    onData: typeof window.onData === "function" ? window.onData : null,
-    renderDroneTable: typeof window.renderDroneTable === "function" ? window.renderDroneTable : null,
-    renderLiveCards: typeof window.renderLiveCards === "function" ? window.renderLiveCards : null
-  };
-  function mountTableApp() {
-    const wrap = document.querySelector(".tbl-wrap");
-    if (!wrap) {
-      return false;
-    }
-    let root = document.getElementById("rid-vue-table-root");
-    if (!root) {
-      wrap.innerHTML = '<div id="rid-vue-table-root"></div>';
-      root = document.getElementById("rid-vue-table-root");
-    }
-    if (!root || root.getAttribute("data-vue-mounted") === "1") {
-      return !!root;
-    }
-    createApp(TableRoot).mount(root);
-    root.setAttribute("data-vue-mounted", "1");
-    return true;
-  }
-  function mountLiveCardsApp() {
-    const liveCards = qs("live-card-list");
-    if (!liveCards || liveCards.getAttribute("data-vue-mounted") === "1") {
-      return !!liveCards;
-    }
-    createApp(LiveCardsRoot).mount(liveCards);
-    liveCards.setAttribute("data-vue-mounted", "1");
-    return true;
-  }
-  function mountApps() {
-    if (appState.mounted) {
-      return true;
-    }
-    const mountedTable = mountTableApp();
-    const mountedCards = mountLiveCardsApp();
-    if (!mountedTable && !mountedCards) {
-      return false;
-    }
-    appState.mounted = true;
-    document.body.setAttribute("data-rid-vue-home", "1");
-    return true;
-  }
-  function renderDroneTableBridge(rows) {
-    if (!mountApps()) {
-      if (legacyFns.renderDroneTable) {
-        return legacyFns.renderDroneTable(rows);
-      }
+  function mountSection(id, kind) {
+    const target = document.getElementById(id);
+    if (!target || target.getAttribute("data-vue-mounted") === "1") {
       return;
     }
-    updateTableRows(rows);
-    updateLiveRows(rows);
-    afterTableRender(rows);
-  }
-  function renderLiveCardsBridge(rows) {
-    if (!mountApps()) {
-      if (legacyFns.renderLiveCards) {
-        legacyFns.renderLiveCards(rows);
+    createApp({
+      render() {
+        return h(NodeSection, { kind });
       }
-      return;
-    }
-    updateLiveRows(rows);
+    }).mount(target);
+    target.setAttribute("data-vue-mounted", "1");
+  }
+  function mountAll() {
+    mountSection("node-basic-list", "basic");
+    mountSection("node-load-list", "load");
+    mountSection("node-scan-list", "scan");
   }
   function installBridge() {
-    if (window.__RID_HOME_VUE_BRIDGE__) {
+    if (window.__RID_NODE_CENTER_BRIDGE__) {
       return;
     }
-    if (legacyFns.onData) {
-      window.onData = function onDataBridge(payload) {
-        appState.loading = !!(payload && payload.meta && payload.meta.viewer_loading);
-        return legacyFns.onData(payload);
-      };
-    }
-    window.renderDroneTable = renderDroneTableBridge;
-    window.renderLiveCards = renderLiveCardsBridge;
-    window.__RID_HOME_VUE_BRIDGE__ = {
-      updateTableRows,
-      updateLiveRows,
-      mountApps
+    ["basic", "load", "scan"].forEach((kind) => {
+      const stored = readStoredSort(kind);
+      if (stored) {
+        state.sections[kind] = stored;
+      }
+    });
+    window.__RID_NODE_CENTER_BRIDGE__ = {
+      mount() {
+        mountAll();
+      },
+      update(payload) {
+        mountAll();
+        const next = payload || {};
+        state.nodes = Array.isArray(next.nodes) ? next.nodes.slice() : [];
+        state.selectedId = next.selectedId == null ? null : Number(next.selectedId);
+        state.checkedIds = { ...next.checkedIds || {} };
+      }
     };
   }
   installBridge();

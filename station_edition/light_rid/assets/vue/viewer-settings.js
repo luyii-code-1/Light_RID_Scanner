@@ -46,11 +46,11 @@
   var isBuiltInDirective = /* @__PURE__ */ makeMap(
     "bind,cloak,else-if,else,for,html,if,model,on,once,pre,show,slot,text,memo"
   );
-  var cacheStringFunction = (fn2) => {
+  var cacheStringFunction = (fn) => {
     const cache = /* @__PURE__ */ Object.create(null);
     return ((str) => {
       const hit = cache[str];
-      return hit || (cache[str] = fn2(str));
+      return hit || (cache[str] = fn(str));
     });
   };
   var camelizeRE = /-\w/g;
@@ -269,12 +269,12 @@
         }
       }
     }
-    run(fn2) {
+    run(fn) {
       if (this._active) {
         const currentEffectScope = activeEffectScope;
         try {
           activeEffectScope = this;
-          return fn2();
+          return fn();
         } finally {
           activeEffectScope = currentEffectScope;
         }
@@ -345,8 +345,8 @@
   var activeSub;
   var pausedQueueEffects = /* @__PURE__ */ new WeakSet();
   var ReactiveEffect = class {
-    constructor(fn2) {
-      this.fn = fn2;
+    constructor(fn) {
+      this.fn = fn;
       this.deps = void 0;
       this.depsTail = void 0;
       this.flags = 1 | 4;
@@ -884,48 +884,48 @@
         return value;
       });
     },
-    every(fn2, thisArg) {
-      return apply(this, "every", fn2, thisArg, void 0, arguments);
+    every(fn, thisArg) {
+      return apply(this, "every", fn, thisArg, void 0, arguments);
     },
-    filter(fn2, thisArg) {
+    filter(fn, thisArg) {
       return apply(
         this,
         "filter",
-        fn2,
+        fn,
         thisArg,
         (v) => v.map((item) => toWrapped(this, item)),
         arguments
       );
     },
-    find(fn2, thisArg) {
+    find(fn, thisArg) {
       return apply(
         this,
         "find",
-        fn2,
+        fn,
         thisArg,
         (item) => toWrapped(this, item),
         arguments
       );
     },
-    findIndex(fn2, thisArg) {
-      return apply(this, "findIndex", fn2, thisArg, void 0, arguments);
+    findIndex(fn, thisArg) {
+      return apply(this, "findIndex", fn, thisArg, void 0, arguments);
     },
-    findLast(fn2, thisArg) {
+    findLast(fn, thisArg) {
       return apply(
         this,
         "findLast",
-        fn2,
+        fn,
         thisArg,
         (item) => toWrapped(this, item),
         arguments
       );
     },
-    findLastIndex(fn2, thisArg) {
-      return apply(this, "findLastIndex", fn2, thisArg, void 0, arguments);
+    findLastIndex(fn, thisArg) {
+      return apply(this, "findLastIndex", fn, thisArg, void 0, arguments);
     },
     // flat, flatMap could benefit from ARRAY_ITERATE but are not straight-forward to implement
-    forEach(fn2, thisArg) {
-      return apply(this, "forEach", fn2, thisArg, void 0, arguments);
+    forEach(fn, thisArg) {
+      return apply(this, "forEach", fn, thisArg, void 0, arguments);
     },
     includes(...args) {
       return searchProxy(this, "includes", args);
@@ -940,8 +940,8 @@
     lastIndexOf(...args) {
       return searchProxy(this, "lastIndexOf", args);
     },
-    map(fn2, thisArg) {
-      return apply(this, "map", fn2, thisArg, void 0, arguments);
+    map(fn, thisArg) {
+      return apply(this, "map", fn, thisArg, void 0, arguments);
     },
     pop() {
       return noTracking(this, "pop");
@@ -949,18 +949,18 @@
     push(...args) {
       return noTracking(this, "push", args);
     },
-    reduce(fn2, ...args) {
-      return reduce(this, "reduce", fn2, args);
+    reduce(fn, ...args) {
+      return reduce(this, "reduce", fn, args);
     },
-    reduceRight(fn2, ...args) {
-      return reduce(this, "reduceRight", fn2, args);
+    reduceRight(fn, ...args) {
+      return reduce(this, "reduceRight", fn, args);
     },
     shift() {
       return noTracking(this, "shift");
     },
     // slice could use ARRAY_ITERATE but also seems to beg for range tracking
-    some(fn2, thisArg) {
-      return apply(this, "some", fn2, thisArg, void 0, arguments);
+    some(fn, thisArg) {
+      return apply(this, "some", fn, thisArg, void 0, arguments);
     },
     splice(...args) {
       return noTracking(this, "splice", args);
@@ -997,7 +997,7 @@
     return iter;
   }
   var arrayProto = Array.prototype;
-  function apply(self2, method, fn2, thisArg, wrappedRetFn, args) {
+  function apply(self2, method, fn, thisArg, wrappedRetFn, args) {
     const arr = shallowReadArray(self2);
     const needsWrap = arr !== self2 && !/* @__PURE__ */ isShallow(self2);
     const methodFn = arr[method];
@@ -1005,25 +1005,25 @@
       const result2 = methodFn.apply(self2, args);
       return needsWrap ? toReactive(result2) : result2;
     }
-    let wrappedFn = fn2;
+    let wrappedFn = fn;
     if (arr !== self2) {
       if (needsWrap) {
         wrappedFn = function(item, index) {
-          return fn2.call(this, toWrapped(self2, item), index, self2);
+          return fn.call(this, toWrapped(self2, item), index, self2);
         };
-      } else if (fn2.length > 2) {
+      } else if (fn.length > 2) {
         wrappedFn = function(item, index) {
-          return fn2.call(this, item, index, self2);
+          return fn.call(this, item, index, self2);
         };
       }
     }
     const result = methodFn.call(arr, wrappedFn, thisArg);
     return needsWrap && wrappedRetFn ? wrappedRetFn(result) : result;
   }
-  function reduce(self2, method, fn2, args) {
+  function reduce(self2, method, fn, args) {
     const arr = shallowReadArray(self2);
     const needsWrap = arr !== self2 && !/* @__PURE__ */ isShallow(self2);
-    let wrappedFn = fn2;
+    let wrappedFn = fn;
     let wrapInitialAccumulator = false;
     if (arr !== self2) {
       if (needsWrap) {
@@ -1033,11 +1033,11 @@
             wrapInitialAccumulator = false;
             acc = toWrapped(self2, acc);
           }
-          return fn2.call(this, acc, toWrapped(self2, item), index, self2);
+          return fn.call(this, acc, toWrapped(self2, item), index, self2);
         };
-      } else if (fn2.length > 3) {
+      } else if (fn.length > 3) {
         wrappedFn = function(acc, item, index) {
-          return fn2.call(this, acc, item, index, self2);
+          return fn.call(this, acc, item, index, self2);
         };
       }
     }
@@ -1096,9 +1096,9 @@
       }
       const targetIsArray = isArray(target);
       if (!isReadonly2) {
-        let fn2;
-        if (targetIsArray && (fn2 = arrayInstrumentations[key])) {
-          return fn2;
+        let fn;
+        if (targetIsArray && (fn = arrayInstrumentations[key])) {
+          return fn;
         }
         if (key === "hasOwnProperty") {
           return hasOwnProperty2;
@@ -1595,8 +1595,8 @@
     return /* @__PURE__ */ isReactive(objectWithRefs) ? objectWithRefs : new Proxy(objectWithRefs, shallowUnwrapHandlers);
   }
   var ComputedRefImpl = class {
-    constructor(fn2, setter, isSSR) {
-      this.fn = fn2;
+    constructor(fn, setter, isSSR) {
+      this.fn = fn;
       this.setter = setter;
       this._value = void 0;
       this.dep = new Dep(this);
@@ -1805,16 +1805,16 @@
     [15]: "component update",
     [16]: "app unmount cleanup function"
   };
-  function callWithErrorHandling(fn2, instance, type, args) {
+  function callWithErrorHandling(fn, instance, type, args) {
     try {
-      return args ? fn2(...args) : fn2();
+      return args ? fn(...args) : fn();
     } catch (err) {
       handleError(err, instance, type);
     }
   }
-  function callWithAsyncErrorHandling(fn2, instance, type, args) {
-    if (isFunction(fn2)) {
-      const res = callWithErrorHandling(fn2, instance, type, args);
+  function callWithAsyncErrorHandling(fn, instance, type, args) {
+    if (isFunction(fn)) {
+      const res = callWithErrorHandling(fn, instance, type, args);
       if (res && isPromise(res)) {
         res.catch((err) => {
           handleError(err, instance, type);
@@ -1822,15 +1822,15 @@
       }
       return res;
     }
-    if (isArray(fn2)) {
+    if (isArray(fn)) {
       const values = [];
-      for (let i = 0; i < fn2.length; i++) {
-        values.push(callWithAsyncErrorHandling(fn2[i], instance, type, args));
+      for (let i = 0; i < fn.length; i++) {
+        values.push(callWithAsyncErrorHandling(fn[i], instance, type, args));
       }
       return values;
     } else if (true) {
       warn$1(
-        `Invalid value type passed to callWithAsyncErrorHandling(): ${typeof fn2}`
+        `Invalid value type passed to callWithAsyncErrorHandling(): ${typeof fn}`
       );
     }
   }
@@ -1894,9 +1894,9 @@
   var resolvedPromise = /* @__PURE__ */ Promise.resolve();
   var currentFlushPromise = null;
   var RECURSION_LIMIT = 100;
-  function nextTick(fn2) {
+  function nextTick(fn) {
     const p2 = currentFlushPromise || resolvedPromise;
-    return fn2 ? p2.then(this ? fn2.bind(this) : fn2) : p2;
+    return fn ? p2.then(this ? fn.bind(this) : fn) : p2;
   }
   function findInsertionIndex(id) {
     let start = flushIndex + 1;
@@ -2041,10 +2041,10 @@
       }
     }
   }
-  function checkRecursiveUpdates(seen, fn2) {
-    const count = seen.get(fn2) || 0;
+  function checkRecursiveUpdates(seen, fn) {
+    const count = seen.get(fn) || 0;
     if (count > RECURSION_LIMIT) {
-      const instance = fn2.i;
+      const instance = fn.i;
       const componentName = instance && getComponentName(instance.type);
       handleError(
         `Maximum recursive updates exceeded${componentName ? ` in component <${componentName}>` : ``}. This means you have a reactive effect that is mutating its own dependencies and thus recursively triggering itself. Possible sources include component template, render function, updated hook or watcher source function.`,
@@ -2053,7 +2053,7 @@
       );
       return true;
     }
-    seen.set(fn2, count + 1);
+    seen.set(fn, count + 1);
     return false;
   }
   var isHmrUpdating = false;
@@ -2175,10 +2175,10 @@
       }
     }
   }
-  function tryWrap(fn2) {
+  function tryWrap(fn) {
     return (id, arg) => {
       try {
-        return fn2(id, arg);
+        return fn(id, arg);
       } catch (e) {
         console.error(e);
         console.warn(
@@ -2300,10 +2300,10 @@
     currentScopeId = instance && instance.type.__scopeId || null;
     return prev;
   }
-  function withCtx(fn2, ctx = currentRenderingInstance, isNonScopedSlot) {
-    if (!ctx) return fn2;
-    if (fn2._n) {
-      return fn2;
+  function withCtx(fn, ctx = currentRenderingInstance, isNonScopedSlot) {
+    if (!ctx) return fn;
+    if (fn._n) {
+      return fn;
     }
     const renderFnWithContext = (...args) => {
       if (renderFnWithContext._d) {
@@ -2312,7 +2312,7 @@
       const prevInstance = setCurrentRenderingInstance(ctx);
       let res;
       try {
-        res = fn2(...args);
+        res = fn(...args);
       } finally {
         setCurrentRenderingInstance(prevInstance);
         if (renderFnWithContext._d) {
@@ -2595,7 +2595,7 @@
     })
   );
   var isReservedPrefix = (key) => key === "_" || key === "$";
-  var hasSetupBinding = (state, key) => state !== EMPTY_OBJ && !state.__isScriptSetup && hasOwn(state, key);
+  var hasSetupBinding = (state2, key) => state2 !== EMPTY_OBJ && !state2.__isScriptSetup && hasOwn(state2, key);
   var PublicInstanceProxyHandlers = {
     get({ _: instance }, key) {
       if (key === "__v_skip") {
@@ -2978,11 +2978,11 @@ If you want to remount the same app, move your app creation logic into a factory
           context.provides[key] = value;
           return app;
         },
-        runWithContext(fn2) {
+        runWithContext(fn) {
           const lastApp = currentApp;
           currentApp = app;
           try {
-            return fn2();
+            return fn();
           } finally {
             currentApp = lastApp;
           }
@@ -3211,14 +3211,14 @@ If you want to remount the same app, move your app creation logic into a factory
       handleError(err, instance, 1);
       result = createVNode(Comment);
     }
-    let root = result;
+    let root2 = result;
     let setRoot = void 0;
     if (result.patchFlag > 0 && result.patchFlag & 2048) {
-      [root, setRoot] = getChildRoot(result);
+      [root2, setRoot] = getChildRoot(result);
     }
     if (fallthroughAttrs && inheritAttrs !== false) {
       const keys = Object.keys(fallthroughAttrs);
-      const { shapeFlag } = root;
+      const { shapeFlag } = root2;
       if (keys.length) {
         if (shapeFlag & (1 | 6)) {
           if (propsOptions && keys.some(isModelListener)) {
@@ -3227,8 +3227,8 @@ If you want to remount the same app, move your app creation logic into a factory
               propsOptions
             );
           }
-          root = cloneVNode(root, fallthroughAttrs, false, true);
-        } else if (!accessedAttrs && root.type !== Comment) {
+          root2 = cloneVNode(root2, fallthroughAttrs, false, true);
+        } else if (!accessedAttrs && root2.type !== Comment) {
           const allAttrs = Object.keys(attrs);
           const eventAttrs = [];
           const extraAttrs = [];
@@ -3256,26 +3256,26 @@ If you want to remount the same app, move your app creation logic into a factory
       }
     }
     if (vnode.dirs) {
-      if (!isElementRoot(root)) {
+      if (!isElementRoot(root2)) {
         warn$1(
           `Runtime directive used on component with non-element root node. The directives will not function as intended.`
         );
       }
-      root = cloneVNode(root, null, false, true);
-      root.dirs = root.dirs ? root.dirs.concat(vnode.dirs) : vnode.dirs;
+      root2 = cloneVNode(root2, null, false, true);
+      root2.dirs = root2.dirs ? root2.dirs.concat(vnode.dirs) : vnode.dirs;
     }
     if (vnode.transition) {
-      if (!isElementRoot(root)) {
+      if (!isElementRoot(root2)) {
         warn$1(
           `Component inside <Transition> renders non-element root node that cannot be animated.`
         );
       }
-      setTransitionHooks(root, vnode.transition);
+      setTransitionHooks(root2, vnode.transition);
     }
     if (setRoot) {
-      setRoot(root);
+      setRoot(root2);
     } else {
-      result = root;
+      result = root2;
     }
     setCurrentRenderingInstance(prev);
     return result;
@@ -3415,12 +3415,12 @@ If you want to remount the same app, move your app creation logic into a factory
   }
   function updateHOCHostEl({ vnode, parent, suspense }, el) {
     while (parent) {
-      const root = parent.subTree;
-      if (root.suspense && root.suspense.activeBranch === vnode) {
-        root.suspense.vnode.el = root.el = el;
-        vnode = root;
+      const root2 = parent.subTree;
+      if (root2.suspense && root2.suspense.activeBranch === vnode) {
+        root2.suspense.vnode.el = root2.el = el;
+        vnode = root2;
       }
-      if (root === vnode) {
+      if (root2 === vnode) {
         (vnode = parent.vnode).el = el;
         parent = parent.parent;
       } else {
@@ -4689,7 +4689,7 @@ For more details, see https://link.vuejs.org/feature-flags.`
         if (!instance.isMounted) {
           let vnodeHook;
           const { el, props } = initialVNode;
-          const { bm, m, parent, root, type } = instance;
+          const { bm, m, parent, root: root2, type } = instance;
           const isAsyncWrapperVNode = isAsyncWrapper(initialVNode);
           toggleRecurse(instance, false);
           if (bm) {
@@ -4732,8 +4732,8 @@ For more details, see https://link.vuejs.org/feature-flags.`
               hydrateSubTree();
             }
           } else {
-            if (root.ce && root.ce._hasShadowRoot()) {
-              root.ce._injectChildStyle(
+            if (root2.ce && root2.ce._hasShadowRoot()) {
+              root2.ce._injectChildStyle(
                 type,
                 instance.parent ? instance.parent.type : void 0
               );
@@ -5575,15 +5575,15 @@ For more details, see https://link.vuejs.org/feature-flags.`
     return null;
   }
   var isSuspense = (type) => type.__isSuspense;
-  function queueEffectWithSuspense(fn2, suspense) {
+  function queueEffectWithSuspense(fn, suspense) {
     if (suspense && suspense.pendingBranch) {
-      if (isArray(fn2)) {
-        suspense.effects.push(...fn2);
+      if (isArray(fn)) {
+        suspense.effects.push(...fn);
       } else {
-        suspense.effects.push(fn2);
+        suspense.effects.push(fn);
       }
     } else {
-      queuePostFlushCb(fn2);
+      queuePostFlushCb(fn);
     }
   }
   var Fragment = /* @__PURE__ */ Symbol.for("v-fgt");
@@ -6924,7 +6924,7 @@ Expected function or array of functions, received type ${typeof value}.`
         e._stopped = true;
       };
       return value.map(
-        (fn2) => (e2) => !e2._stopped && fn2 && fn2(e2)
+        (fn) => (e2) => !e2._stopped && fn && fn(e2)
       );
     } else {
       return value;
@@ -7112,668 +7112,616 @@ Expected function or array of functions, received type ${typeof value}.`
     initDev();
   }
 
-  // frontend/src/rid-home.js
-  var appState = reactive({
-    mounted: false,
-    page: "live",
-    loading: false,
-    tableRows: [],
-    liveRows: []
+  // frontend/src/viewer-settings.js
+  function apiHeaders(extra) {
+    const base = { "X-LightRID-Page": "1" };
+    return Object.assign(base, extra || {});
+  }
+  async function getJson(path) {
+    const response = await fetch(path, { cache: "no-store", headers: apiHeaders() });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      location.href = "/";
+      throw new Error("login required");
+    }
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    return data;
+  }
+  async function postJson(path, body) {
+    const response = await fetch(path, {
+      method: "POST",
+      cache: "no-store",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body || {})
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      location.href = "/";
+      throw new Error("login required");
+    }
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    return data;
+  }
+  function withLoading(target, title, fn) {
+    if (typeof window.withViewerPageLoading === "function") {
+      return window.withViewerPageLoading(target, title, fn);
+    }
+    return fn();
+  }
+  function deepClone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+  function sameJson(left, right) {
+    try {
+      return JSON.stringify(left) === JSON.stringify(right);
+    } catch (_error) {
+      return false;
+    }
+  }
+  function numText(value, fallback = "") {
+    return value == null || value === "" ? fallback : String(value);
+  }
+  function fmtPct(value) {
+    const out = Number(value);
+    return Number.isFinite(out) ? `${out.toFixed(1)}%` : "—";
+  }
+  function fmtSec(value) {
+    const out = Number(value);
+    if (!Number.isFinite(out) || out < 0) {
+      return "—";
+    }
+    if (out < 90) {
+      return `${Math.round(out)} 秒`;
+    }
+    if (out < 86400) {
+      return `${Math.floor(out / 3600)} 小时 ${Math.floor(out % 3600 / 60)} 分钟`;
+    }
+    return `${Math.floor(out / 86400)} 天 ${Math.floor(out % 86400 / 3600)} 小时`;
+  }
+  function themeFromStorage() {
+    try {
+      const stored = localStorage.getItem("rid_ui_theme");
+      if (stored === "dark" || stored === "light") {
+        return stored;
+      }
+    } catch (_error) {
+    }
+    try {
+      if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) {
+        return "light";
+      }
+    } catch (_error) {
+    }
+    return "dark";
+  }
+  function applyTheme(theme) {
+    const light = theme === "light";
+    document.body.classList.toggle("theme-light", light);
+    document.body.classList.toggle("theme-dark", !light);
+    try {
+      localStorage.setItem("rid_ui_theme", light ? "light" : "dark");
+    } catch (_error) {
+    }
+  }
+  var defaultDraft = {
+    auth: {
+      enabled: false,
+      username: "admin",
+      password: "",
+      sso_enabled: false,
+      sso_check: "",
+      password_configured: false,
+      sso_configured: false
+    },
+    map: {
+      base_name: "Node Center",
+      base_lat: "",
+      base_lon: "",
+      base_zoom: 5,
+      map_auto_center_idle_sec: 20,
+      heading_ref_deg: 0
+    },
+    aggregate: {
+      cache_ttl_hours: 24
+    },
+    notify: {
+      enabled: false,
+      node_status_enabled: true,
+      wecom_key: "",
+      wecom_configured: false
+    },
+    host: {},
+    eula: {}
+  };
+  var state = reactive({
+    theme: themeFromStorage(),
+    draft: deepClone(defaultDraft),
+    initial: deepClone(defaultDraft),
+    aggregateMeta: null,
+    statuses: {
+      settings: "-",
+      notify: "-",
+      eula: "-",
+      aggregate: "-"
+    }
   });
-  var tableColumns = [
-    { key: "index", label: "#", className: "sortable", sortable: true },
-    { key: "sn", label: "SN", className: "sortable", sortable: true },
-    { key: "model", label: "机型", className: "sortable", sortable: true },
-    { key: "rssi", label: "信号", className: "sortable", sortable: true },
-    { key: "pkts", label: "包", className: "sortable", sortable: true },
-    { key: "dir", label: "方向", className: "sortable", sortable: true },
-    { key: "age", label: "数据更新", className: "sortable", sortable: true },
-    { key: "last_seen", label: "末次发现", className: "sortable", sortable: true },
-    { key: "uas_id", label: "UAS ID", className: "sortable", sortable: true }
-  ];
-  function fn(name, fallback) {
-    const value = window[name];
-    return typeof value === "function" ? value : fallback;
+  function buildPayload(options = {}) {
+    const checkboxOnly = !!options.checkboxOnly;
+    const initial = state.initial || defaultDraft;
+    return {
+      auth: {
+        enabled: !!state.draft.auth.enabled,
+        username: checkboxOnly ? initial.auth.username : state.draft.auth.username,
+        password: checkboxOnly ? "" : state.draft.auth.password,
+        sso_enabled: !!state.draft.auth.sso_enabled,
+        sso_check: checkboxOnly ? "" : state.draft.auth.sso_check
+      },
+      map: {
+        base_name: checkboxOnly ? initial.map.base_name : state.draft.map.base_name,
+        base_lat: checkboxOnly ? initial.map.base_lat : state.draft.map.base_lat,
+        base_lon: checkboxOnly ? initial.map.base_lon : state.draft.map.base_lon,
+        base_zoom: checkboxOnly ? initial.map.base_zoom : state.draft.map.base_zoom,
+        map_auto_center_idle_sec: checkboxOnly ? initial.map.map_auto_center_idle_sec : state.draft.map.map_auto_center_idle_sec,
+        heading_ref_deg: checkboxOnly ? initial.map.heading_ref_deg : state.draft.map.heading_ref_deg
+      },
+      aggregate: {
+        cache_ttl_hours: checkboxOnly ? initial.aggregate.cache_ttl_hours : state.draft.aggregate.cache_ttl_hours
+      },
+      notify: {
+        enabled: !!state.draft.notify.enabled,
+        node_status_enabled: !!state.draft.notify.node_status_enabled,
+        wecom_key: checkboxOnly ? "" : state.draft.notify.wecom_key
+      }
+    };
   }
-  function qs(id) {
-    return document.getElementById(id);
-  }
-  function normalizeRows(rows) {
-    return Array.isArray(rows) ? rows.map((row) => row || {}) : [];
-  }
-  function currentPage() {
-    return String(fn("currentAppPage", () => "live")() || "live");
-  }
-  function asText(value, fallback = "") {
-    if (value == null || value === "") {
-      return fallback;
+  function applySettingsData(data, options = {}) {
+    const auth = data.auth || {};
+    const map2 = data.map || {};
+    const aggregate = data.aggregate || {};
+    const notify = data.notify || {};
+    state.draft.auth.enabled = !!auth.enabled;
+    state.draft.auth.username = auth.username || "admin";
+    state.draft.auth.password = "";
+    state.draft.auth.sso_enabled = !!auth.sso_enabled;
+    state.draft.auth.sso_check = "";
+    state.draft.auth.password_configured = !!auth.password_configured;
+    state.draft.auth.sso_configured = !!auth.sso_configured;
+    state.draft.map.base_name = map2.base_name || "Node Center";
+    state.draft.map.base_lat = numText(map2.base_lat);
+    state.draft.map.base_lon = numText(map2.base_lon);
+    state.draft.map.base_zoom = numText(map2.base_zoom || 5, "5");
+    state.draft.map.map_auto_center_idle_sec = numText(map2.map_auto_center_idle_sec || 20, "20");
+    state.draft.map.heading_ref_deg = numText(map2.heading_ref_deg || 0, "0");
+    state.draft.aggregate.cache_ttl_hours = numText(aggregate.cache_ttl_hours || 24, "24");
+    state.draft.notify.enabled = !!notify.enabled;
+    state.draft.notify.node_status_enabled = notify.node_status_enabled !== false;
+    state.draft.notify.wecom_key = "";
+    state.draft.notify.wecom_configured = !!notify.wecom_configured;
+    state.draft.host = data.host || {};
+    state.draft.eula = data.eula || {};
+    if (data.aggregate) {
+      state.aggregateMeta = data.aggregate;
     }
-    return String(value);
-  }
-  function dataAttr(value) {
-    return String(value || "");
-  }
-  function fmtFallback(value, digits, unit) {
-    if (value == null || Number.isNaN(Number(value))) {
-      return "N/A";
+    if (!options.checkboxOnly) {
+      state.initial = deepClone({
+        auth: {
+          enabled: state.draft.auth.enabled,
+          username: state.draft.auth.username,
+          password: "",
+          sso_enabled: state.draft.auth.sso_enabled,
+          sso_check: "",
+          password_configured: state.draft.auth.password_configured,
+          sso_configured: state.draft.auth.sso_configured
+        },
+        map: {
+          base_name: state.draft.map.base_name,
+          base_lat: state.draft.map.base_lat,
+          base_lon: state.draft.map.base_lon,
+          base_zoom: state.draft.map.base_zoom,
+          map_auto_center_idle_sec: state.draft.map.map_auto_center_idle_sec,
+          heading_ref_deg: state.draft.map.heading_ref_deg
+        },
+        aggregate: {
+          cache_ttl_hours: state.draft.aggregate.cache_ttl_hours
+        },
+        notify: {
+          enabled: state.draft.notify.enabled,
+          node_status_enabled: state.draft.notify.node_status_enabled,
+          wecom_key: "",
+          wecom_configured: state.draft.notify.wecom_configured
+        },
+        host: state.draft.host,
+        eula: state.draft.eula
+      });
     }
-    return `${Number(value).toFixed(digits)}${unit}`;
+    state.statuses.notify = `企业微信 ${state.draft.notify.wecom_configured ? "已配置" : "未配置"}`;
+    state.statuses.eula = `${state.draft.eula.accepted ? "当前已同意许可协议。" : "当前未同意许可协议。"}
+状态文件 ${String(state.draft.eula.set_path || "viewer/cfg.db")}`;
+    state.statuses.settings = `密码 ${state.draft.auth.password_configured ? "已配置" : "未配置"} · SSO ${state.draft.auth.sso_configured ? "已配置" : "未配置"}`;
   }
-  function stopEvent(event) {
-    if (!event) {
+  async function loadSettings() {
+    const data = await getJson("/api/settings");
+    applySettingsData(data);
+  }
+  async function saveSettings(options = {}) {
+    const data = await postJson("/api/settings/save", buildPayload(options));
+    applySettingsData(data, options);
+    state.statuses.settings = `${options.checkboxOnly ? "勾选项已保存。" : "已保存。"}密码 ${data.auth.password_configured ? "已配置" : "未配置"} · SSO ${data.auth.sso_configured ? "已配置" : "未配置"}`;
+  }
+  async function loadAggregate(force) {
+    state.statuses.aggregate = force ? "正在重新聚合..." : "正在读取缓存...";
+    const data = force ? await postJson("/api/history/aggregate", { force: true }) : await getJson("/api/history/aggregate");
+    state.aggregateMeta = data;
+    state.statuses.aggregate = aggregateMetaText.value;
+  }
+  async function clearAggregate() {
+    const data = await postJson("/api/history/aggregate/clear", {});
+    state.statuses.aggregate = `已清空缓存 ${String(data.cleared || 0)}`;
+  }
+  async function testNotify() {
+    state.statuses.notify = "正在发送测试通知...";
+    const data = await postJson("/api/settings/notify/test", {});
+    state.statuses.notify = data.message || "测试通知已发送。";
+  }
+  async function revokeEula() {
+    if (!confirm("撤回许可协议同意状态？")) {
       return;
     }
-    if (typeof event.preventDefault === "function") {
-      event.preventDefault();
-    }
-    if (typeof event.stopPropagation === "function") {
-      event.stopPropagation();
+    const data = await postJson("/api/eula/revoke", {});
+    state.draft.eula = data || {};
+    state.statuses.eula = `${state.draft.eula.accepted ? "当前已同意许可协议。" : "当前未同意许可协议。"}
+状态文件 ${String(state.draft.eula.set_path || "viewer/cfg.db")}`;
+    setTimeout(() => {
+      location.href = "/eula?next=/settings";
+    }, 500);
+  }
+  async function logout() {
+    try {
+      await postJson("/api/logout", {});
+    } finally {
+      location.href = "/";
     }
   }
-  function updateSummary(rows) {
-    const list = normalizeRows(rows);
-    const live = list.filter((row) => row && !row.lost).length;
-    const totalEl = qs("n-total");
-    const liveEl = qs("n-live");
-    const lostEl = qs("n-lost");
-    if (totalEl) totalEl.textContent = String(list.length);
-    if (liveEl) liveEl.textContent = String(live);
-    if (lostEl) lostEl.textContent = String(list.length - live);
-  }
-  function updateLatestDroneMap(rows) {
-    const next = {};
-    normalizeRows(rows).forEach((row) => {
-      const sn = String(row && row.sn || "");
-      if (sn) {
-        next[sn] = row;
+  var aggregateMetaText = computed2(() => {
+    const data = state.aggregateMeta || {};
+    let text = `缓存: ${data.cached ? "命中" : "已更新"} | 飞机 ${String(data.count || 0)} | 原始版本 ${String(data.raw_count || 0)} | 聚合 ${String(data.aggregate_count || 0)} | TTL ${String(data.cache_ttl_hours || state.draft.aggregate.cache_ttl_hours || 24)}小时`;
+    if (data.generated_at) {
+      try {
+        text += ` | 生成 ${new Date(Number(data.generated_at) * 1e3).toLocaleString()}`;
+      } catch (_error) {
       }
-    });
-    window.latestDroneMap = next;
-  }
-  function updateLiveCount(rows) {
-    const countEl = qs("live-card-count");
-    if (countEl) {
-      const liveRecentRows = fn("liveRecentRows", (items) => normalizeRows(items));
-      countEl.textContent = String(normalizeRows(liveRecentRows(rows)).length);
     }
-  }
-  function updateTableRows(rows) {
-    const normalized = normalizeRows(rows);
-    appState.page = currentPage();
-    appState.tableRows = normalized;
-    updateSummary(normalized);
-    updateLatestDroneMap(normalized);
-  }
-  function updateLiveRows(rows) {
-    const normalized = normalizeRows(rows);
-    appState.liveRows = normalized;
-    updateLiveCount(normalized);
-  }
-  function afterTableRender(rows) {
-    const list = normalizeRows(rows);
-    nextTick(() => {
-      fn("syncTableSelectionUi", () => {
-      })();
-      fn("refreshTrackMgrOptions", () => {
-      })(list);
-      fn("refreshActiveInfoCard", () => {
-      })(list);
-      fn("applyTableSortUi", () => {
-      })();
-    });
-    fn("renderMapMiniList", () => {
-    })(list);
-  }
-  function tableCell(sn, field, text, extraClass, cellClass, cellStyle) {
-    return h(
-      "td",
-      {
-        class: cellClass(sn, field, extraClass),
-        style: cellStyle(sn, field),
-        "data-hl-sn": sn,
-        "data-hl-field": field
+    return text;
+  });
+  var dirty = computed2(
+    () => !sameJson(state.initial, {
+      auth: {
+        enabled: state.draft.auth.enabled,
+        username: state.draft.auth.username,
+        password: "",
+        sso_enabled: state.draft.auth.sso_enabled,
+        sso_check: "",
+        password_configured: state.draft.auth.password_configured,
+        sso_configured: state.draft.auth.sso_configured
       },
-      text
-    );
+      map: {
+        base_name: state.draft.map.base_name,
+        base_lat: state.draft.map.base_lat,
+        base_lon: state.draft.map.base_lon,
+        base_zoom: state.draft.map.base_zoom,
+        map_auto_center_idle_sec: state.draft.map.map_auto_center_idle_sec,
+        heading_ref_deg: state.draft.map.heading_ref_deg
+      },
+      aggregate: {
+        cache_ttl_hours: state.draft.aggregate.cache_ttl_hours
+      },
+      notify: {
+        enabled: state.draft.notify.enabled,
+        node_status_enabled: state.draft.notify.node_status_enabled,
+        wecom_key: "",
+        wecom_configured: state.draft.notify.wecom_configured
+      },
+      host: state.draft.host,
+      eula: state.draft.eula
+    })
+  );
+  function statCard(name, value, extra) {
+    return h("div", { class: "stat-card" }, [
+      h("div", { class: "stat-name" }, name),
+      h("div", { class: "stat-value" }, value),
+      extra ? h("div", { class: "stat-extra" }, extra) : null
+    ]);
   }
-  var TableRoot = {
+  function textField(label, value, onInput, attrs = {}) {
+    return h("div", { class: `field${attrs.full ? " full" : ""}` }, [
+      h("label", label),
+      h("input", {
+        type: attrs.type || "text",
+        placeholder: attrs.placeholder || "",
+        min: attrs.min,
+        max: attrs.max,
+        step: attrs.step,
+        value,
+        onInput: (event) => onInput(event.target.value)
+      })
+    ]);
+  }
+  function checkboxField(id, label, checked, onChange) {
+    return h("label", { key: id }, [
+      h("input", {
+        type: "checkbox",
+        checked,
+        onChange: async (event) => {
+          onChange(event.target.checked);
+          try {
+            await withLoading("Viewer 设置", "正在保存勾选项", () => saveSettings({ checkboxOnly: true }));
+          } catch (error) {
+            state.statuses.settings = error.message || String(error);
+          }
+        }
+      }),
+      ` ${label}`
+    ]);
+  }
+  var App = {
     setup() {
-      const rows = computed2(() => {
-        const sortRows = fn("sortedDroneRows", (items) => normalizeRows(items));
-        return normalizeRows(sortRows(appState.tableRows));
-      });
-      const page = computed2(() => appState.page);
-      const fmt = fn("fmt", fmtFallback);
-      const fmtAge = fn("fmtAge", (age) => age == null ? "N/A" : String(age));
-      const uasIdText = fn("uasIdText", (row) => String(row && row.uas_id || "N/A"));
-      const scanTypeText = fn("scanTypeText", () => "N/A");
-      const snSourceText = fn("snSourceText", () => "N/A");
-      const firmwareTypeText = fn("firmwareTypeText", () => "N/A");
-      const firmwareTypeKey = fn("firmwareTypeKey", () => "unknown");
-      const trackColorForSn = fn("trackColorForSn", () => "#2563eb");
-      const isSnSelected = fn("isSnSelected", () => false);
-      const isHistoryTrackVisible = fn("isHistoryTrackVisible", () => false);
-      const fieldCellAttrs = fn("fieldCellAttrs", () => "");
-      const highlightAlpha = fn("highlightAlpha", () => 0);
-      const getTableSortState = fn("getTableSortState", () => ({ field: "", dir: "asc" }));
-      const setTableSort = fn("setTableSort", () => {
-      });
-      const setAllVisibleSelected = fn("setAllVisibleSelected", () => {
-      });
-      const setHistorySnVisible = fn("setHistorySnVisible", () => {
-      });
-      const setSnSelected = fn("setSnSelected", () => {
-      });
-      const focusHistoryAircraft = fn("focusHistoryAircraft", () => {
-      });
-      const showDroneInfoCard = fn("showDroneInfoCard", () => {
-      });
-      const hideInfoCard = fn("hideInfoCard", () => {
-      });
-      const copySn = fn("copySn", () => {
-      });
-      let rowClickTimer = null;
-      function selected(row) {
-        const sn = String(row && row.sn || "");
-        return page.value === "history" ? !!isHistoryTrackVisible(sn) : !!isSnSelected(sn);
-      }
-      function rowClasses(row) {
-        const sn = String(row && row.sn || "");
-        return {
-          "data-row": true,
-          mac: sn.startsWith("MAC:"),
-          live: !row.lost && !sn.startsWith("MAC:"),
-          lost: !!row.lost,
-          selected: selected(row),
-          "alarm-zone": !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn])
-        };
-      }
-      function snBadges(row) {
-        const out = [
-          { text: snSourceText(row), className: "sn-badge" },
-          { text: scanTypeText(row), className: "sn-badge" },
-          {
-            text: firmwareTypeText(row),
-            className: `sn-badge firmware-${firmwareTypeKey(row)}`
-          }
-        ];
-        const sn = String(row && row.sn || "");
-        if (window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn]) {
-          out.push({ text: "报警", className: "sn-badge alarm" });
+      function jumpTo(id) {
+        const target = document.getElementById(id);
+        if (target && target.scrollIntoView) {
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
         }
-        return out.filter((item) => item.text && item.text !== "N/A");
       }
-      function cellClass(sn, field, extraClass = "") {
-        const classes = String(extraClass || "").split(/\s+/).filter(Boolean);
-        const attrText = String(fieldCellAttrs(sn, field, extraClass) || "");
-        if (/\bhl\b/.test(attrText)) {
-          classes.push("hl");
-        }
-        return classes.join(" ");
-      }
-      function cellStyle(sn, field) {
-        const alpha = Number(highlightAlpha(sn, field) || 0);
-        return alpha > 0 ? { "--hl-alpha": String(Math.max(0, Math.min(1, alpha))) } : void 0;
-      }
-      function trackChipStyle(sn, isSelected) {
-        return {
-          "--track-color": String(trackColorForSn(sn) || "#2563eb"),
-          display: isSelected ? "" : "none"
-        };
-      }
-      function sortClass(field) {
-        const state = getTableSortState() || {};
-        if (String(state.field || "") !== String(field || "")) {
-          return "sortable";
-        }
-        return `sortable sorted-${state.dir === "desc" ? "desc" : "asc"}`;
-      }
-      function allSelected() {
-        if (!rows.value.length) {
-          return false;
-        }
-        return rows.value.every((row) => selected(row));
-      }
-      function someSelected() {
-        return rows.value.some((row) => selected(row));
-      }
-      function toggleAll(event) {
-        setAllVisibleSelected(!!(event && event.target && event.target.checked));
-      }
-      function toggleRow(row, checked) {
-        const sn = String(row && row.sn || "");
-        if (!sn) {
+      async function browserLocation() {
+        if (!navigator.geolocation) {
+          state.statuses.settings = "浏览器不支持定位。";
           return;
         }
-        if (page.value === "history") {
-          setHistorySnVisible(sn, !!checked);
-        } else {
-          setSnSelected(sn, !!checked);
-        }
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            state.draft.map.base_lat = String(position.coords.latitude || "");
+            state.draft.map.base_lon = String(position.coords.longitude || "");
+            state.statuses.settings = "已读取浏览器位置，保存后生效。";
+          },
+          (error) => {
+            state.statuses.settings = `定位失败: ${error && error.message ? error.message : error}`;
+          },
+          { enableHighAccuracy: true, timeout: 12e3, maximumAge: 0 }
+        );
       }
-      function onRowClick(row) {
-        const sn = String(row && row.sn || "");
-        if (!sn) {
-          return;
-        }
-        if (rowClickTimer) {
-          clearTimeout(rowClickTimer);
-          rowClickTimer = null;
-        }
-        rowClickTimer = setTimeout(() => {
-          rowClickTimer = null;
-          if (page.value === "history") {
-            focusHistoryAircraft(sn);
-            return;
-          }
-          const item = (window.latestDroneMap || {})[sn];
-          if (item) {
-            showDroneInfoCard(item);
-          }
-        }, 220);
+      function clearBaseLocation() {
+        state.draft.map.base_lat = "";
+        state.draft.map.base_lon = "";
       }
-      function onRowDblClick(row, event) {
-        stopEvent(event);
-        const sn = String(row && row.sn || "");
-        if (!sn) {
-          return;
-        }
-        if (rowClickTimer) {
-          clearTimeout(rowClickTimer);
-          rowClickTimer = null;
-        }
-        setSnSelected(sn, true);
-        hideInfoCard();
-      }
-      function onCopyClick(sn, event) {
-        stopEvent(event);
-        copySn(sn);
-      }
-      function onHeaderClick(field, event) {
-        stopEvent(event);
-        setTableSort(field);
+      function toggleTheme() {
+        state.theme = state.theme === "light" ? "dark" : "light";
+        applyTheme(state.theme);
       }
       return {
-        rows,
-        fmt,
-        fmtAge,
-        uasIdText,
-        selected,
-        rowClasses,
-        snBadges,
-        cellClass,
-        cellStyle,
-        trackChipStyle,
-        sortClass,
-        allSelected,
-        someSelected,
-        toggleAll,
-        toggleRow,
-        onRowClick,
-        onRowDblClick,
-        onCopyClick,
-        onHeaderClick
+        state,
+        dirty,
+        aggregateMetaText,
+        jumpTo,
+        browserLocation,
+        clearBaseLocation,
+        toggleTheme,
+        saveSettings,
+        loadSettings,
+        loadAggregate,
+        clearAggregate,
+        testNotify,
+        revokeEula,
+        logout
       };
     },
     render() {
-      return h("table", { id: "dtable" }, [
-        h(
-          "thead",
-          h("tr", [
-            h("th", [
-              h("div", { class: "sel-wrap" }, [
-                h("input", {
-                  id: "sel-all",
-                  class: "sel-sn",
-                  type: "checkbox",
-                  title: "全选",
-                  checked: this.allSelected(),
-                  indeterminate: !this.allSelected() && this.someSelected(),
-                  onChange: this.toggleAll
-                })
+      const host = this.state.draft.host || {};
+      const eula = this.state.draft.eula || {};
+      return h("div", { class: "viewer-settings-root" }, [
+        h("div", { class: "settings-sticky-head" }, [
+          h("div", { class: "topbar" }, [
+            h("div", [
+              h("div", { class: "title" }, "Viewer 设置"),
+              h("div", { class: "sub" }, "保留 Station 设置页的桌面布局，但由 Vue 接管状态、表单和异步动作。")
+            ]),
+            h("div", { class: "actions" }, [
+              h("button", { class: "btn", type: "button", onClick: () => location.href = "/" }, "返回实时/历史"),
+              h("button", { class: "btn", type: "button", onClick: () => location.href = "/nodes" }, "节点管理"),
+              h("button", { class: "btn ghost", type: "button", onClick: this.logout }, "退出"),
+              h("button", { class: "btn", type: "button", onClick: this.toggleTheme }, this.state.theme === "light" ? "深色" : "浅色"),
+              h(
+                "button",
+                {
+                  class: "btn",
+                  type: "button",
+                  onClick: async () => {
+                    try {
+                      await withLoading("Viewer 设置", "正在读取数据", () => this.loadSettings());
+                    } catch (error) {
+                      this.state.statuses.settings = error.message || String(error);
+                    }
+                  }
+                },
+                "刷新"
+              )
+            ])
+          ]),
+          h("div", { class: "draft-bar" }, [
+            h("div", { class: "draft-copy" }, [
+              h("div", { class: "draft-title" }, this.dirty ? "有未保存修改" : "当前没有未保存修改"),
+              h("div", { class: "draft-meta" }, this.dirty ? "复选框会立即保存，文本和数值输入需要点击保存。" : "地图、登录和通知设置会写入 viewer/cfg.db。")
+            ]),
+            h("div", { class: "draft-actions" }, [
+              h(
+                "button",
+                {
+                  class: "btn warn",
+                  type: "button",
+                  onClick: async () => {
+                    try {
+                      await withLoading("Viewer 设置", "正在保存设置", () => this.saveSettings());
+                    } catch (error) {
+                      this.state.statuses.settings = error.message || String(error);
+                    }
+                  }
+                },
+                "保存设置"
+              )
+            ])
+          ]),
+          h("div", { class: "settings-jump", "aria-label": "设置分组导航" }, [
+            ["settings-status", "状态"],
+            ["settings-map", "地图"],
+            ["settings-aggregate", "聚合"],
+            ["settings-access", "访问"],
+            ["settings-notify", "通知"],
+            ["settings-eula", "许可"]
+          ].map(
+            ([id, label]) => h(
+              "button",
+              {
+                key: id,
+                class: "btn ghost",
+                type: "button",
+                onClick: () => this.jumpTo(id)
+              },
+              label
+            )
+          ))
+        ]),
+        h("div", { class: "panel active", "data-tab": "visual" }, [
+          h("div", { class: "visual-grid" }, [
+            h("div", { class: "stack" }, [
+              h("div", { class: "stack-label" }, "Viewer 主机"),
+              h("div", { class: "card", id: "settings-status" }, [
+                h("div", { class: "section-head" }, [
+                  h("div", [h("h2", "主机状态"), h("div", { class: "section-copy" }, "查看 Viewer 进程、配置库和聚合节点状态。")]),
+                  h(
+                    "button",
+                    {
+                      class: "btn ghost",
+                      type: "button",
+                      onClick: async () => {
+                        try {
+                          await withLoading("Viewer 主机状态", "正在读取数据", () => this.loadSettings());
+                        } catch (error) {
+                          this.state.statuses.settings = error.message || String(error);
+                        }
+                      }
+                    },
+                    "刷新状态"
+                  )
+                ]),
+                h("div", { class: "stats-grid", style: "margin-top:14px" }, [
+                  statCard("主机", host.hostname || "—", host.platform || ""),
+                  statCard("CPU", fmtPct(host.cpu_percent), `核心 ${String(host.cpu_count || "—")}`),
+                  statCard(
+                    "内存",
+                    fmtPct(host.mem_percent),
+                    host.mem_used_mb && host.mem_total_mb ? `${host.mem_used_mb} / ${host.mem_total_mb} MB` : ""
+                  ),
+                  statCard("运行时间", fmtSec(host.uptime_sec), `Viewer ${String(window.LIGHT_RID_VIEWER_VERSION || "")}`),
+                  statCard("节点", `${String(host.online_node_count || 0)}/${String(host.node_count || 0)}`, "在线 / 已添加"),
+                  statCard("飞机", `${String(host.online_drone_count || 0)}/${String(host.drone_count || 0)}`, "当前在线 / 聚合总数")
+                ]),
+                h("div", { class: "micro" }, `配置库 ${String(host.db_path || "-")} | 监听: ${String(host.listen || "-")}`)
+              ]),
+              h("div", { class: "card", id: "settings-map" }, [
+                h("div", { class: "section-head" }, [h("div", [h("h2", "地图默认位置"), h("div", { class: "section-copy" }, "没有任何可显示飞机时，实时和历史地图使用这里的默认中心和缩放。")])]),
+                h("div", { class: "grid", style: "margin-top:14px" }, [
+                  textField("显示名称", this.state.draft.map.base_name, (value) => this.state.draft.map.base_name = value),
+                  textField("默认缩放", this.state.draft.map.base_zoom, (value) => this.state.draft.map.base_zoom = value, { type: "number", min: 3, max: 30 }),
+                  textField("默认纬度", this.state.draft.map.base_lat, (value) => this.state.draft.map.base_lat = value, { type: "number", step: "0.000001" }),
+                  textField("默认经度", this.state.draft.map.base_lon, (value) => this.state.draft.map.base_lon = value, { type: "number", step: "0.000001" }),
+                  textField("自动回中冷却(s)", this.state.draft.map.map_auto_center_idle_sec, (value) => this.state.draft.map.map_auto_center_idle_sec = value, { type: "number", min: 5, max: 600 }),
+                  textField("参考航向(°)", this.state.draft.map.heading_ref_deg, (value) => this.state.draft.map.heading_ref_deg = value, { type: "number", step: "0.1" }),
+                  h("div", { class: "field full" }, [
+                    h("label", "定位"),
+                    h("div", { class: "row-actions" }, [
+                      h("button", { class: "btn", type: "button", onClick: this.browserLocation }, "读取浏览器位置"),
+                      h("button", { class: "btn ghost", type: "button", onClick: this.clearBaseLocation }, "清空默认坐标")
+                    ]),
+                    h("div", { class: "micro" }, "浏览器定位能力由当前访问协议和浏览器权限决定。")
+                  ])
+                ])
+              ]),
+              h("div", { class: "card", id: "settings-aggregate" }, [
+                h("div", { class: "section-head" }, [h("div", [h("h2", "历史聚合"), h("div", { class: "section-copy" }, "按 SN 合并所有基站历史与轨迹，并缓存到 viewer/cfg.db。")])]),
+                h("div", { class: "grid", style: "margin-top:14px" }, [
+                  textField("聚合缓存有效期(小时)", this.state.draft.aggregate.cache_ttl_hours, (value) => this.state.draft.aggregate.cache_ttl_hours = value, { type: "number", min: 1, max: 168 }),
+                  h("div", { class: "field full" }, [
+                    h("label", "手动维护"),
+                    h("div", { class: "row-actions" }, [
+                      h("button", { class: "btn", type: "button", onClick: async () => withLoading("历史聚合数据", "正在读取数据", () => this.loadAggregate(true)) }, "手动聚合"),
+                      h("button", { class: "btn ghost", type: "button", onClick: async () => withLoading("历史聚合缓存", "正在读取数据", () => this.loadAggregate(false)) }, "手动刷新"),
+                      h("button", { class: "btn warn", type: "button", onClick: async () => withLoading("历史聚合缓存", "正在清空缓存", this.clearAggregate) }, "清空缓存")
+                    ]),
+                    h("div", { class: "micro" }, this.aggregateMetaText)
+                  ])
+                ])
               ])
             ]),
-            ...tableColumns.map(
-              (column) => h(
-                "th",
-                {
-                  key: column.key,
-                  class: this.sortClass(column.key),
-                  "data-sort": column.key,
-                  onClick: (event) => this.onHeaderClick(column.key, event)
-                },
-                column.label
-              )
-            )
+            h("div", { class: "stack" }, [
+              h("div", { class: "stack-label" }, "访问与许可"),
+              h("div", { class: "card access-group", id: "settings-access" }, [
+                h("div", { class: "section-head" }, [h("div", [h("h2", "访问控制"), h("div", { class: "section-copy" }, "Viewer 只保留账号密码登录和 SSO check 登录。")])]),
+                h("div", { class: "access-subgrid", style: "margin-top:14px" }, [
+                  h("div", { class: "access-subcard full" }, [
+                    h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "网页登录"), h("div", { class: "access-subcopy" }, "控制设置页、节点管理页和聚合页的网页登录会话。")])]),
+                    h("div", { class: "grid" }, [
+                      textField("网页登录账号", this.state.draft.auth.username, (value) => this.state.draft.auth.username = value),
+                      textField("网页登录密码", this.state.draft.auth.password, (value) => this.state.draft.auth.password = value, { type: "password", placeholder: "留空即不修改" })
+                    ]),
+                    h("div", { class: "checks" }, [checkboxField("auth-enabled", "启用网页登录鉴权", this.state.draft.auth.enabled, (checked) => this.state.draft.auth.enabled = checked)])
+                  ]),
+                  h("div", { class: "access-subcard full" }, [
+                    h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "SSO check 登录"), h("div", { class: "access-subcopy" }, "Viewer 本机登录入口使用 /?check=...。")])]),
+                    h("div", { class: "grid" }, [
+                      textField("SSO check 密钥", this.state.draft.auth.sso_check, (value) => this.state.draft.auth.sso_check = value, { type: "password", placeholder: "留空即不修改，至少 12 位", full: true })
+                    ]),
+                    h("div", { class: "checks" }, [checkboxField("sso-enabled", "启用 SSO check 登录", this.state.draft.auth.sso_enabled, (checked) => this.state.draft.auth.sso_enabled = checked)]),
+                    h("div", { class: "micro" }, "至少保留一种可用登录方式，避免锁定自己。")
+                  ])
+                ]),
+                h("div", { class: `status${this.state.statuses.settings ? "" : ""}` }, this.state.statuses.settings)
+              ]),
+              h("div", { class: "card access-group", id: "settings-notify" }, [
+                h("div", { class: "section-head" }, [h("div", [h("h2", "企业微信通知"), h("div", { class: "section-copy" }, "Viewer 可在子站在线/离线变化时发送企业微信机器人通知。")])]),
+                h("div", { class: "grid", style: "margin-top:14px" }, [
+                  textField("企业微信机器人 Key 或完整 Webhook URL", this.state.draft.notify.wecom_key, (value) => this.state.draft.notify.wecom_key = value, { type: "password", placeholder: "留空即不修改", full: true })
+                ]),
+                h("div", { class: "checks" }, [
+                  checkboxField("notify-enabled", "启用企业微信通知", this.state.draft.notify.enabled, (checked) => this.state.draft.notify.enabled = checked),
+                  checkboxField("notify-node-status", "子站在线/离线变化通知", this.state.draft.notify.node_status_enabled, (checked) => this.state.draft.notify.node_status_enabled = checked)
+                ]),
+                h("div", { class: "row-actions", style: "margin-top:14px" }, [
+                  h("button", { class: "btn ghost", type: "button", onClick: async () => withLoading("企业微信通知", "正在发送测试通知", this.testNotify) }, "测试通知")
+                ]),
+                h("div", { class: "status" }, this.state.statuses.notify)
+              ]),
+              h("div", { class: "card", id: "settings-eula" }, [
+                h("div", { class: "section-head" }, [h("div", [h("h2", "许可协议"), h("div", { class: "section-copy" }, "查看或撤回 Viewer 的 EULA 确认。")])]),
+                h("div", { class: "row-actions", style: "margin-top:14px" }, [
+                  h("button", { class: "btn", type: "button", onClick: () => location.href = "/eula?next=/settings" }, "查看 EULA"),
+                  h("button", { class: "btn warn", type: "button", disabled: !eula.accepted, onClick: async () => withLoading("许可协议", "正在撤回许可状态", this.revokeEula) }, "撤回同意")
+                ]),
+                h("div", { class: "status" }, this.state.statuses.eula)
+              ])
+            ])
           ])
-        ),
-        h(
-          "tbody",
-          { id: "tbody" },
-          this.rows.length ? this.rows.map((row, idx) => {
-            const sn = dataAttr(row && row.sn);
-            const isSelected = this.selected(row);
-            return h(
-              "tr",
-              {
-                key: sn || `row-${idx}`,
-                class: this.rowClasses(row),
-                "data-sn": sn,
-                onClick: () => this.onRowClick(row),
-                onDblclick: (event) => this.onRowDblClick(row, event)
-              },
-              [
-                h("td", [
-                  h("div", { class: "sel-wrap track-sel-wrap" }, [
-                    h("input", {
-                      class: "sel-sn",
-                      type: "checkbox",
-                      "data-sn": sn,
-                      checked: isSelected,
-                      onClick: stopEvent,
-                      onChange: (event) => this.toggleRow(row, event.target.checked)
-                    }),
-                    h("span", {
-                      class: "track-color-chip",
-                      style: this.trackChipStyle(sn, isSelected),
-                      title: "轨迹颜色"
-                    })
-                  ])
-                ]),
-                h("td", { class: "idx-cell" }, String(idx + 1)),
-                h("td", [
-                  h("div", { class: "sn-cell" }, [
-                    ...this.snBadges(row).map(
-                      (badge) => h(
-                        "span",
-                        {
-                          key: `${badge.className}:${badge.text}`,
-                          class: badge.className
-                        },
-                        badge.text
-                      )
-                    ),
-                    h("span", { class: "mono" }, sn),
-                    h(
-                      "button",
-                      {
-                        class: "icon-btn copy-sn",
-                        type: "button",
-                        "data-sn": sn,
-                        title: "复制 SN",
-                        onClick: (event) => this.onCopyClick(sn, event)
-                      },
-                      "⧉"
-                    )
-                  ])
-                ]),
-                tableCell(sn, "model", asText(row && row.model, "N/A"), "", this.cellClass, this.cellStyle),
-                tableCell(sn, "rssi", this.fmt(row && row.rssi, 0, "dBm"), "", this.cellClass, this.cellStyle),
-                tableCell(
-                  sn,
-                  "pkts",
-                  row && row.pkts == null ? "0" : String(row.pkts),
-                  "mono",
-                  this.cellClass,
-                  this.cellStyle
-                ),
-                tableCell(sn, "dir", asText(row && row.dir, "-"), "", this.cellClass, this.cellStyle),
-                tableCell(
-                  sn,
-                  "age_text",
-                  asText(row && row.age_text, this.fmtAge(row && row.age)),
-                  "mono",
-                  this.cellClass,
-                  this.cellStyle
-                ),
-                tableCell(
-                  sn,
-                  "last_seen",
-                  asText(row && row.last_seen, "-"),
-                  "mono",
-                  this.cellClass,
-                  this.cellStyle
-                ),
-                tableCell(sn, "uas_id", this.uasIdText(row), "mono", this.cellClass, this.cellStyle)
-              ]
-            );
-          }) : [h("tr", { key: "empty" }, [h("td", { colspan: "10", class: "empty" }, "暂无数据")])]
-        )
+        ])
       ]);
     }
   };
-  var LiveCardsRoot = {
-    setup() {
-      const sourceRows = computed2(() => appState.liveRows);
-      const liveRecentRows = fn("liveRecentRows", (rows2) => normalizeRows(rows2));
-      const coordText = fn("coordText", (lat, lon) => lat == null || lon == null ? "N/A" : `${lat}, ${lon}`);
-      const homeAuxCoordText = fn("homeAuxCoordText", () => "N/A");
-      const firmwareTypeText = fn("firmwareTypeText", () => "N/A");
-      const uasIdText = fn("uasIdText", (row) => String(row && row.uas_id || "N/A"));
-      const isSnSelected = fn("isSnSelected", () => false);
-      const fmt = fn("fmt", fmtFallback);
-      const fmtAge = fn("fmtAge", (age) => age == null ? "N/A" : String(age));
-      const rows = computed2(() => {
-        const list = normalizeRows(liveRecentRows(sourceRows.value));
-        return list.sort((left, right) => {
-          const leftLost = !!(left && left.lost);
-          const rightLost = !!(right && right.lost);
-          if (leftLost !== rightLost) {
-            return leftLost ? 1 : -1;
-          }
-          const leftRssi = left && left.rssi != null ? Number(left.rssi) : -9999;
-          const rightRssi = right && right.rssi != null ? Number(right.rssi) : -9999;
-          return rightRssi - leftRssi;
-        });
-      });
-      function rowClasses(row) {
-        const sn = String(row && row.sn || "");
-        return {
-          "live-card": true,
-          selected: !!isSnSelected(sn),
-          lost: !!row.lost,
-          "alarm-zone": !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn])
-        };
-      }
-      function hasAlarm(row) {
-        const sn = String(row && row.sn || "");
-        return !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn]);
-      }
-      function stateClass(row) {
-        return row && row.lost ? "lost" : "live";
-      }
-      function stateText(row) {
-        return row && row.lost ? "2分钟内离线" : "在线";
-      }
-      function onCopyClick(sn, event) {
-        stopEvent(event);
-        fn("copySn", () => {
-        })(sn);
-      }
-      return {
-        rows,
-        rowClasses,
-        hasAlarm,
-        stateClass,
-        stateText,
-        coordText,
-        homeAuxCoordText,
-        firmwareTypeText,
-        uasIdText,
-        fmt,
-        fmtAge,
-        isSnSelected,
-        onCopyClick
-      };
-    },
-    render() {
-      if (!this.rows.length) {
-        return h("div", { class: "ap-empty" }, "暂无实时目标");
-      }
-      return h(
-        Fragment,
-        this.rows.map((row, idx) => {
-          const sn = dataAttr(row && row.sn);
-          const title = asText(row && row.model, "N/A");
-          const latlon = row && row.lat != null && row.lon != null ? `${this.fmt(row.lat, 6, "")}, ${this.fmt(row.lon, 6, "")}` : "N/A";
-          const rssiText = row && row.rssi == null ? "N/A" : `${String(row && row.rssi)}dBm`;
-          const updateText = asText(row && row.age_text, this.fmtAge(row && row.age));
-          const footText = asText(row && (row.last_pkt_time || row.capture_time), "-");
-          return h(
-            "article",
-            {
-              key: sn || `card-${idx}`,
-              class: this.rowClasses(row),
-              "data-sn": sn
-            },
-            [
-              h("div", { class: "live-card-top" }, [
-                h("div", { class: "live-card-title", title }, title),
-                h("div", { class: "live-card-actions" }, [
-                  h("label", { class: "live-card-pick" }, [
-                    h("input", {
-                      class: "sel-sn",
-                      type: "checkbox",
-                      "data-sn": sn,
-                      checked: this.isSnSelected(sn)
-                    }),
-                    h("span", "选中")
-                  ]),
-                  ...this.hasAlarm(row) ? [h("span", { class: "live-card-state alarm" }, "区域报警")] : [],
-                  h("span", { class: "live-card-state firmware" }, this.firmwareTypeText(row)),
-                  h("span", { class: ["live-card-state", this.stateClass(row)] }, this.stateText(row))
-                ])
-              ]),
-              h("div", { class: "live-card-snrow" }, [
-                h("span", { class: "label" }, "SN"),
-                h("span", { class: "live-card-sntext", title: asText(row && row.sn, "") }, asText(row && row.sn, "-")),
-                h(
-                  "button",
-                  {
-                    class: "icon-btn copy-sn",
-                    type: "button",
-                    "data-sn": sn,
-                    title: "复制 SN",
-                    onClick: (event) => this.onCopyClick(sn, event)
-                  },
-                  "⧉"
-                )
-              ]),
-              h("div", { class: "live-card-snrow live-card-uasrow" }, [
-                h("span", { class: "label" }, "UAS ID"),
-                h("span", { class: "live-card-sntext", title: this.uasIdText(row) }, this.uasIdText(row)),
-                h("span")
-              ]),
-              ...row && row.discovered_base_text ? [
-                h(
-                  "div",
-                  {
-                    class: "viewer-base-label",
-                    title: String(row.discovered_base_text)
-                  },
-                  String(row.discovered_base_text)
-                )
-              ] : [],
-              h("div", { class: "live-card-grid" }, [
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "经纬度"), h("div", { class: "v" }, latlon)]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "高度"), h("div", { class: "v" }, this.fmt(row && row.alt, 1, "m"))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "速度"), h("div", { class: "v" }, this.fmt(row && row.spd, 2, "m/s"))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "航向"), h("div", { class: "v" }, asText(row && row.dir, "-"))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "遥控站位置"), h("div", { class: "v" }, this.coordText(row && row.pilot_lat, row && row.pilot_lon, 6))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "Aux/Home"), h("div", { class: "v" }, this.homeAuxCoordText(row))]),
-                h("div", { class: "live-card-item" }, [h("div", { class: "k" }, "信号 / 更新"), h("div", { class: "v" }, `${rssiText} / ${updateText}`)])
-              ]),
-              h("div", { class: "live-card-foot" }, [
-                h("span", `最后数据包 ${footText}`),
-                h("span", `#${idx + 1}`)
-              ])
-            ]
-          );
-        })
-      );
-    }
-  };
-  var legacyFns = {
-    onData: typeof window.onData === "function" ? window.onData : null,
-    renderDroneTable: typeof window.renderDroneTable === "function" ? window.renderDroneTable : null,
-    renderLiveCards: typeof window.renderLiveCards === "function" ? window.renderLiveCards : null
-  };
-  function mountTableApp() {
-    const wrap = document.querySelector(".tbl-wrap");
-    if (!wrap) {
-      return false;
-    }
-    let root = document.getElementById("rid-vue-table-root");
-    if (!root) {
-      wrap.innerHTML = '<div id="rid-vue-table-root"></div>';
-      root = document.getElementById("rid-vue-table-root");
-    }
-    if (!root || root.getAttribute("data-vue-mounted") === "1") {
-      return !!root;
-    }
-    createApp(TableRoot).mount(root);
-    root.setAttribute("data-vue-mounted", "1");
-    return true;
+  applyTheme(state.theme);
+  var root = document.getElementById("viewer-settings-root");
+  if (root) {
+    createApp(App).mount(root);
+    withLoading("Viewer 设置", "正在读取数据", loadSettings).catch((error) => {
+      state.statuses.settings = error.message || String(error);
+    });
   }
-  function mountLiveCardsApp() {
-    const liveCards = qs("live-card-list");
-    if (!liveCards || liveCards.getAttribute("data-vue-mounted") === "1") {
-      return !!liveCards;
-    }
-    createApp(LiveCardsRoot).mount(liveCards);
-    liveCards.setAttribute("data-vue-mounted", "1");
-    return true;
-  }
-  function mountApps() {
-    if (appState.mounted) {
-      return true;
-    }
-    const mountedTable = mountTableApp();
-    const mountedCards = mountLiveCardsApp();
-    if (!mountedTable && !mountedCards) {
-      return false;
-    }
-    appState.mounted = true;
-    document.body.setAttribute("data-rid-vue-home", "1");
-    return true;
-  }
-  function renderDroneTableBridge(rows) {
-    if (!mountApps()) {
-      if (legacyFns.renderDroneTable) {
-        return legacyFns.renderDroneTable(rows);
-      }
-      return;
-    }
-    updateTableRows(rows);
-    updateLiveRows(rows);
-    afterTableRender(rows);
-  }
-  function renderLiveCardsBridge(rows) {
-    if (!mountApps()) {
-      if (legacyFns.renderLiveCards) {
-        legacyFns.renderLiveCards(rows);
-      }
-      return;
-    }
-    updateLiveRows(rows);
-  }
-  function installBridge() {
-    if (window.__RID_HOME_VUE_BRIDGE__) {
-      return;
-    }
-    if (legacyFns.onData) {
-      window.onData = function onDataBridge(payload) {
-        appState.loading = !!(payload && payload.meta && payload.meta.viewer_loading);
-        return legacyFns.onData(payload);
-      };
-    }
-    window.renderDroneTable = renderDroneTableBridge;
-    window.renderLiveCards = renderLiveCardsBridge;
-    window.__RID_HOME_VUE_BRIDGE__ = {
-      updateTableRows,
-      updateLiveRows,
-      mountApps
-    };
-  }
-  installBridge();
 })();

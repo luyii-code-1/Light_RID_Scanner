@@ -1,0 +1,828 @@
+<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>设置 - Light RID Scanner</title>
+<style>
+*{box-sizing:border-box}
+:root{
+  --font-ui:"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei UI","Segoe UI Variable Text","Segoe UI",sans-serif;
+  --font-mono:"SFMono-Regular","Cascadia Mono","Consolas",monospace;
+  --bg:#f5f9ff;--bg2:#e5eefb;--card:rgba(255,255,255,.82);--card2:rgba(246,250,255,.92);--border:rgba(137,164,206,.28);--txt:#16324f;
+  --muted:#8094ad;--blue:#1677ff;--green:#1f9d68;--warn:#d95050;--glow:rgba(22,119,255,.14);--soft:rgba(255,255,255,.64);--app-vh:100dvh;
+  --radius:10px;--radius-lg:16px;--shadow-sm:0 2px 10px rgba(44,90,148,.06);--shadow:0 10px 28px rgba(44,90,148,.08);--shadow-lg:0 18px 40px rgba(44,90,148,.10);--transition:0.28s cubic-bezier(.22,1,.36,1)
+}
+body.theme-light{
+  --bg:#f5f9ff;--bg2:#e5eefb;--card:rgba(255,255,255,.84);--card2:rgba(246,250,255,.94);--border:rgba(137,164,206,.28);--txt:#16324f;
+  --muted:#8094ad;--blue:#1677ff;--green:#1f9d68;--warn:#d95050;--glow:rgba(22,119,255,.14);--soft:rgba(255,255,255,.64)
+}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
+body{min-height:var(--app-vh);background:
+  radial-gradient(circle at top left, rgba(255,255,255,.94), rgba(255,255,255,0) 28%),
+  radial-gradient(circle at top right, rgba(95,172,255,.14), rgba(95,172,255,0) 24%),
+  linear-gradient(180deg,var(--bg),var(--bg2) 30%,var(--bg))}
+.wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
+.settings-sticky-head{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,color-mix(in srgb,var(--bg) 96%,white),color-mix(in srgb,var(--bg) 86%,transparent));padding-top:clamp(8px,1.2vw,14px);padding-bottom:4px;backdrop-filter:blur(10px)}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+.title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
+.sub{color:var(--muted);margin-top:5px;max-width:780px;line-height:1.45}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+.btn[disabled]{opacity:.5;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+.btn{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);color:var(--txt);padding:10px 15px;border-radius:12px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;transition:all var(--transition);box-shadow:var(--shadow-sm);display:inline-flex;align-items:center;gap:6px;user-select:none;backdrop-filter:blur(8px)}
+.btn:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 8%, var(--card2));box-shadow:0 6px 16px var(--glow)}
+.btn:active{transform:scale(.97)}
+.btn.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:var(--warn)}
+.btn.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn);box-shadow:0 4px 14px rgba(255,123,114,.16)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted);box-shadow:none}
+.btn.ghost:hover{background:var(--card2);color:var(--txt);border-color:var(--border);box-shadow:var(--shadow-sm)}
+.draft-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 auto 12px;padding:12px 18px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;background:color-mix(in srgb,var(--card) 95%,transparent);box-shadow:var(--shadow-sm);transition:all var(--transition);backdrop-filter:blur(10px)}
+.draft-copy{display:grid;gap:4px}
+.draft-title{font:600 15px/1.2 var(--font-ui)}
+.draft-meta{font-size:12px;color:var(--muted);line-height:1.5}
+.draft-actions{display:flex;gap:10px;flex-wrap:wrap}
+.tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:4px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);border-radius:14px;margin:0 auto 12px;width:min(680px,100%);box-shadow:var(--shadow-sm);backdrop-filter:blur(10px)}
+.tab{border:1px solid transparent;background:transparent;color:var(--txt);padding:12px 16px;border-radius:10px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;text-align:center;transition:all var(--transition)}
+.tab:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 6%, var(--card2));box-shadow:none}
+.tab:active{transform:scale(.97)}
+.tab.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 12%, var(--card2));box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent)}
+body.theme-light .tabs{background:var(--card2)}
+body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(--card2));border-color:var(--blue)}
+.settings-jump{display:flex;gap:8px;overflow-x:auto;padding:0 2px 12px;margin:0 auto;max-width:980px;scrollbar-width:thin}
+.settings-jump{justify-content:center}
+.settings-jump .btn{flex:0 0 auto;padding:8px 11px}
+.panel{display:none}.panel.active{display:block}
+.raw-layout{display:grid;grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr);gap:12px;min-width:0}
+.raw-pane{min-width:0;display:grid;gap:10px;align-content:start}
+.raw-tree{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);border-radius:12px;min-height:460px;max-height:min(72dvh,840px);overflow:auto;padding:10px;backdrop-filter:blur(8px)}
+.raw-tree .empty-state{margin:0}
+.raw-tree details{margin:0 0 4px 0;padding-left:0}
+.raw-tree summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:4px}
+.raw-tree summary::-webkit-details-marker{display:none}
+.raw-tree summary:hover{background:color-mix(in srgb, var(--blue) 10%, var(--card2))}
+.raw-tree .raw-file-btn{display:flex;align-items:center;justify-content:space-between;width:100%;border:1px solid transparent;background:transparent;color:var(--txt);padding:6px 8px;border-radius:4px;cursor:pointer;font:600 13px/1.3 var(--font-ui);text-align:left}
+.raw-tree .raw-file-btn:hover{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 8%, var(--card2))}
+.raw-tree .raw-file-btn.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 14%, var(--card2))}
+.raw-tree .raw-dir-child{padding-left:14px;border-left:1px solid var(--border);margin:2px 0 6px 10px}
+.raw-main{display:grid;gap:10px;min-width:0}
+.raw-meta{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;padding:12px 14px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;background:color-mix(in srgb,var(--card2) 96%,transparent);backdrop-filter:blur(8px)}
+.raw-meta .meta-copy{display:grid;gap:4px;min-width:0}
+.raw-meta .meta-title{font:600 15px/1.2 var(--font-ui)}
+.raw-meta .meta-sub{font-size:12px;color:var(--muted);line-height:1.5;word-break:break-word}
+.raw-editor{min-height:54dvh;height:calc(100dvh - 390px);max-height:min(78dvh,920px)}
+.raw-lock{padding:14px;border:1px dashed var(--border);border-radius:4px;background:color-mix(in srgb, var(--warn) 6%, var(--card2));display:grid;gap:10px}
+.raw-lock strong{font-size:15px}
+.raw-toolbar{display:flex;gap:10px;flex-wrap:wrap;justify-content:space-between;align-items:center}
+.raw-toolbar .row-actions{justify-content:flex-end}
+.passkey-list{display:grid;gap:8px}
+.passkey-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:4px;background:var(--card2)}
+.passkey-meta{display:grid;gap:4px;min-width:0}
+.passkey-title{font:600 14px/1.2 var(--font-ui)}
+.passkey-sub{font-size:12px;color:var(--muted);line-height:1.4;word-break:break-word}
+.passkey-badges{display:flex;gap:6px;flex-wrap:wrap}
+.passkey-badge{font-size:11px;line-height:1;padding:4px 7px;border:1px solid var(--border);border-radius:999px;background:var(--card)}
+.visual-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(360px,.88fr);gap:12px}
+.stack{display:grid;gap:12px;min-width:0;align-content:start}
+.stack-label{font:700 12px/1 var(--font-ui);letter-spacing:0;color:var(--muted);padding:2px 2px 0}
+.card{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:color-mix(in srgb,var(--card) 95%,transparent);padding:18px;box-shadow:var(--shadow-sm);min-width:0;overflow:hidden;animation:icloudCardIn .24s cubic-bezier(.22,1,.36,1) both;transition:border-color var(--transition),box-shadow var(--transition),transform var(--transition),background-color var(--transition);backdrop-filter:blur(10px)}
+.card:hover{box-shadow:0 8px 20px rgba(44,90,148,.08);transform:translateY(-1px)}
+.card.dirty{border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 22%, transparent),0 8px 18px var(--glow)}
+.card.dirty h2{color:var(--blue)}
+.card h2{margin:0;font:600 18px/1 var(--font-ui);letter-spacing:.01em}
+.card.settings-collapsible>.section-head{cursor:pointer;user-select:none}
+.card.settings-collapsible>.section-head::after{content:'收起';font:700 12px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:5px 7px;background:var(--card)}
+.card.settings-collapsible.collapsed>.section-head::after{content:'展开'}
+.card.settings-collapsible.collapsed>:not(.section-head){display:none}
+.hint{color:var(--muted);font-size:13px;line-height:1.6}
+.section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.section-copy{margin-top:4px;color:var(--muted);font-size:13px;line-height:1.45;max-width:58ch}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.field{display:grid;gap:6px}
+.field.full{grid-column:1/-1}
+.field label{font:600 12px/1.15 var(--font-ui);letter-spacing:.01em;color:var(--muted)}
+.field input,.field select,.field textarea{width:100%;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);color:var(--txt);border-radius:10px;padding:11px 13px;font:600 14px/1.35 var(--font-ui);transition:all var(--transition);backdrop-filter:blur(6px)}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 4px color-mix(in srgb, var(--blue) 18%, transparent)}
+.field input[type="checkbox"],input[type="checkbox"]{width:16px;height:16px;min-width:16px;flex:0 0 auto;padding:0;margin:0;accent-color:var(--blue)}
+.field input:not([type="checkbox"]),.field select,.token-actions input{height:42px}
+.field-inline .btn,.token-actions .btn{height:42px}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 38%, transparent)}
+.field textarea{min-height:440px;resize:vertical;font-family:var(--font-mono);font-size:13px}
+.field-inline{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
+.field-inline input[disabled]{opacity:.9;background:color-mix(in srgb, var(--card2) 92%, black)}
+.checks{display:flex;flex-wrap:wrap;gap:12px}
+.checks label{display:flex;align-items:center;gap:8px;font-size:15px;color:var(--txt)}
+.checks.pref-checks{display:grid;grid-template-columns:1fr;gap:10px}
+.row-actions{display:flex;gap:10px;flex-wrap:wrap}
+.token-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;min-width:0}
+.token-actions input{flex:1 1 260px;min-width:0}
+.sso-link-list{margin-top:10px}
+.sso-link-options{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(110px,.7fr) auto;gap:10px;align-items:end;margin-top:10px}
+.sso-link-options .field{min-width:0}
+.sso-single-use{height:42px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt)}
+.sso-link-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}
+.sso-link-row .btn{white-space:nowrap}
+.sso-link-meta{min-width:0;overflow:hidden}
+.sso-link-title{font:700 13px/1.25 var(--font-ui);color:var(--txt);display:flex;gap:8px;align-items:center;min-width:0;flex-wrap:wrap}
+.sso-link-badge{font:700 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 5px;background:var(--card)}
+.sso-link-badge.bad{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--border))}
+.field.hidden{display:none}
+.policy-grid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:end}
+.disabled-block{opacity:.52;filter:saturate(.65);pointer-events:none}
+.status{margin-top:12px;color:#8fd0a8;white-space:pre-wrap;line-height:1.65}
+.status.err{color:#ff9b9b}
+.secret-note,.micro{font-size:12px;color:var(--muted);line-height:1.55}
+.micro{margin-top:6px}
+.list-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.list-wrap{display:grid;gap:8px}
+.list-row{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;padding:12px;background:color-mix(in srgb,var(--card2) 96%,transparent);backdrop-filter:blur(6px)}
+.access-group{display:grid;gap:12px}
+.access-subgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.access-subcard{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;background:color-mix(in srgb,var(--card2) 96%,transparent);padding:14px;display:grid;gap:12px;min-width:0;backdrop-filter:blur(8px)}
+.access-subcard.full{grid-column:1/-1}
+.access-subhead{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.access-subcard.collapsible>.access-subhead{cursor:pointer;user-select:none}
+.access-subcard.collapsible>.access-subhead::after{content:'收起';font:700 12px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:5px 7px;background:var(--card)}
+.access-subcard.collapsible.collapsed>.access-subhead::after{content:'展开'}
+.access-subcard.collapsible.collapsed>:not(.access-subhead){display:none}
+.access-subtitle{font:700 15px/1.2 var(--font-ui);color:var(--txt)}
+.access-subcopy{margin-top:4px;color:var(--muted);font-size:12px;line-height:1.5}
+.access-subcard .list-row,.access-subcard .empty-state{background:var(--card)}
+.api-token-list{display:grid;gap:8px;max-height:420px;overflow:auto;padding-right:4px}
+.api-token-row{border:1px solid var(--border);border-radius:4px;background:var(--card);padding:10px;display:grid;gap:10px;min-width:0}
+.api-token-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}
+.api-token-name{font:700 13px/1.25 var(--font-ui);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.api-token-badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.api-token-badge{font:700 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:4px 6px;background:var(--card2);white-space:nowrap}
+.api-token-badge.bad{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--border))}
+.api-token-create-grid{display:grid;grid-template-columns:minmax(150px,1fr) minmax(130px,.65fr) minmax(120px,.6fr) auto auto;gap:8px;align-items:end}
+.api-token-grid{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}
+.api-token-grid .field{min-width:0}
+.api-token-grid input:not([type="checkbox"]),.api-token-grid select,.api-token-create-grid input:not([type="checkbox"]),.api-token-create-grid select{height:38px}
+.model-update-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center}
+.model-editor{display:grid;gap:10px;margin-top:10px}
+.model-editor-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
+.model-editor-toolbar input{height:42px}
+.model-map-list{display:grid;gap:8px;max-height:360px;overflow:auto;padding-right:4px}
+.model-map-row{display:grid;grid-template-columns:minmax(100px,.42fr) minmax(0,1fr) auto;gap:8px;align-items:center;border:1px solid var(--border);border-radius:4px;background:var(--card2);padding:8px}
+.model-map-row input{height:38px;border:1px solid var(--border);background:var(--card);color:var(--txt);border-radius:4px;padding:8px 10px;font:600 13px/1.25 var(--font-ui);min-width:0}
+.model-map-row input.model-prefix{font-family:var(--font-mono);text-transform:uppercase}
+.model-map-empty{padding:16px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);background:var(--card2)}
+.metric-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+.metric-toolbar .btn.active{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,var(--card2))}
+.metric-toggle{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;margin-right:4px}
+.metric-toggle input{width:16px;height:16px}
+.metric-retention{display:grid;grid-template-columns:auto 82px auto;gap:8px;align-items:center;margin-left:auto;color:var(--muted);font-size:12px}
+.metric-retention input{height:36px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:4px;padding:7px 9px;font:600 13px/1 var(--font-ui)}
+.metric-list{display:grid;gap:12px;margin-top:12px}
+.metric-item{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"label value" "chart chart";gap:9px;align-items:center;border:1px solid var(--border);border-radius:4px;background:var(--card2);padding:10px 12px;min-width:0}
+.metric-label{grid-area:label;display:flex;align-items:center;gap:7px;min-width:0;font:600 13px/1.2 var(--font-ui)}
+.metric-label i{width:12px;height:12px;border-radius:50%;display:inline-block;flex:0 0 auto}
+.metric-spark-wrap{grid-area:chart;position:relative;height:136px;min-width:0;cursor:crosshair;touch-action:none;user-select:none}
+.metric-spark-wrap.dragging{cursor:grabbing}
+.metric-spark{width:100%;height:100%;display:block}
+.metric-chart-tip{position:absolute;z-index:3;display:none;max-width:240px;transform:translate(-50%,calc(-100% - 10px));padding:7px 9px;border:1px solid color-mix(in srgb,var(--blue) 46%,var(--border));border-radius:4px;background:color-mix(in srgb,var(--card) 94%,transparent);box-shadow:0 12px 28px rgba(0,0,0,.24);font:600 12px/1.45 var(--font-mono);color:var(--txt);white-space:pre-line;pointer-events:none}
+.metric-chart-tip.below{transform:translate(-50%,10px)}
+.metric-value{grid-area:value;font:700 13px/1.2 var(--font-mono);text-align:right;color:var(--txt)}
+.metric-zoom{display:grid;grid-template-columns:auto minmax(120px,1fr) auto;gap:8px;align-items:center;margin-top:10px;color:var(--muted);font-size:12px}
+.metric-zoom input{width:100%}
+.hook-layout{display:grid;grid-template-columns:minmax(110px,.7fr) minmax(0,1.5fr) 88px auto;gap:10px;align-items:end;min-width:0}
+.zone-layout{display:grid;grid-template-columns:minmax(120px,1.2fr) 86px repeat(4,minmax(0,1fr)) auto;gap:10px;align-items:end;min-width:0}
+.hook-layout>.field,.zone-layout>.field{min-width:0}
+.empty-state{padding:14px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);background:var(--card2)}
+.security-alert{display:none;gap:8px;margin-top:14px;padding:12px;border:1px solid color-mix(in srgb,var(--warn) 46%,var(--border));border-radius:4px;background:color-mix(in srgb,var(--warn) 10%,var(--card2));color:var(--txt)}
+.security-alert.show{display:grid}
+.security-alert.ok{border-color:color-mix(in srgb,var(--green) 38%,var(--border));background:color-mix(in srgb,var(--green) 9%,var(--card2))}
+.security-alert-title{font:700 14px/1.2 var(--font-ui);color:var(--txt)}
+.security-alert-copy{font-size:13px;line-height:1.55;color:var(--muted)}
+.security-alert.warn .security-alert-copy{color:color-mix(in srgb,var(--warn) 58%,white)}
+.security-alert-actions{display:flex;gap:10px;flex-wrap:wrap}
+.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.stat{border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--card2)}
+.stat .k{font:600 12px/1 var(--font-ui);color:var(--muted);letter-spacing:.01em}
+.stat .v{margin-top:8px;font:600 20px/1.1 var(--font-ui)}
+.stat .v.ip-lines{font:600 13px/1.45 var(--font-mono);display:grid;gap:5px;max-width:100%}
+.ip-line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;min-width:0}
+.ip-text{display:block;min-width:0;max-width:100%;white-space:nowrap;overflow-x:auto;overflow-y:hidden;text-overflow:clip;scrollbar-width:thin}
+.ip-len{font:600 11px/1 var(--font-ui);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 5px;background:var(--card)}
+.settings-ap-scroll{max-height:min(42vh,420px);overflow:auto;padding-right:4px}
+.settings-ap-row-grid{display:grid;grid-template-columns:46px minmax(120px,.9fr) minmax(0,1.2fr) 86px;gap:10px;align-items:center;min-width:0}
+.settings-ap-row-grid>*{min-width:0}
+.settings-ap-row-grid .clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+details.advanced{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;padding:14px;background:color-mix(in srgb,var(--card2) 96%,transparent);backdrop-filter:blur(8px)}
+details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-spacing:.01em}
+.network-bind-module{margin-top:16px}
+.network-bind-module[open]{box-shadow:var(--shadow-sm)}
+.network-bind-module summary{display:flex;align-items:center;justify-content:space-between;gap:10px;list-style:none}
+.network-bind-module summary::-webkit-details-marker{display:none}
+.network-bind-module summary::after{content:'展开';font:700 12px/1 var(--font-ui);color:var(--muted);border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:10px;padding:6px 10px;background:color-mix(in srgb,var(--card) 96%,transparent)}
+.network-bind-module[open] summary::after{content:'收起'}
+.network-bind-module .network-bind-head{display:grid;gap:4px}
+.network-bind-module .network-bind-title{font:700 15px/1.2 var(--font-ui);color:var(--txt)}
+.network-bind-module .network-bind-copy{font-size:12px;line-height:1.55;color:var(--muted)}
+.network-bind-module .network-bind-body{display:grid;gap:12px;margin-top:14px}
+.split-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
+.modal-mask{position:fixed;inset:0;background:rgba(4,8,14,.28);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
+.modal-mask.show{display:flex}
+.modal-card{width:min(480px,100%);border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:color-mix(in srgb,var(--card) 96%,transparent);padding:20px;box-shadow:var(--shadow);backdrop-filter:blur(10px)}
+.modal-card.wide{width:min(900px,100%)}
+.modal-card h3{margin:0 0 10px;font:600 20px/1 var(--font-ui)}
+.one-time-secret{font:600 12px/1.55 var(--font-mono);word-break:break-all;border:1px solid var(--border);background:var(--card2);border-radius:4px;padding:12px;margin-top:12px;max-height:160px;overflow:auto}
+.toast-stack{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:72;width:min(420px,calc(100vw - 28px));pointer-events:none}
+.toast{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;background:color-mix(in srgb, var(--card) 97%, transparent);padding:13px 15px;box-shadow:var(--shadow-sm);opacity:0;transform:translateY(8px);transition:opacity .22s ease,transform .22s ease,border-color .22s ease;background-clip:padding-box;pointer-events:auto;backdrop-filter:blur(8px)}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.ok{border-color:color-mix(in srgb, var(--green) 38%, var(--border))}
+.toast.warn{border-color:color-mix(in srgb, var(--warn) 42%, var(--border))}
+.toast-title{font:600 14px/1.2 var(--font-ui);margin-bottom:5px}
+.toast-text{font-size:13px;line-height:1.5;color:var(--muted);white-space:pre-wrap}
+.rid-loading-overlay{position:fixed;inset:0;z-index:88;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(9,15,24,.38);backdrop-filter:blur(12px);pointer-events:auto}
+.rid-loading-overlay.show{display:flex}
+.rid-loading-shell{width:min(460px,calc(100vw - 32px))}
+.rid-loading-box{display:grid;gap:16px;padding:22px 22px 18px;border-radius:16px;border:1px solid color-mix(in srgb,var(--border) 96%,rgba(255,255,255,.42));background:linear-gradient(180deg,color-mix(in srgb,var(--card2) 92%,rgba(255,255,255,.38)),color-mix(in srgb,var(--card) 96%,rgba(255,255,255,.18)));box-shadow:0 18px 40px rgba(19,42,71,.12);backdrop-filter:blur(14px)}
+.rid-loading-head{display:grid;grid-template-columns:48px minmax(0,1fr);gap:14px;align-items:center}
+.rid-loading-spinner{position:relative;width:48px;height:48px;border-radius:14px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--border));background:linear-gradient(180deg,rgba(255,255,255,.46),rgba(255,255,255,.16));display:grid;place-items:center}
+.rid-loading-spinner::before{content:"";width:22px;height:22px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 14%,var(--border));border-top-color:var(--blue);animation:ridSettingsLoadingSpin .9s linear infinite}
+.rid-loading-copy-wrap{display:grid;gap:6px}
+.rid-loading-title{font:700 18px/1.14 var(--font-ui);color:var(--txt);letter-spacing:.01em}
+.rid-loading-copy{font:600 13px/1.55 var(--font-ui);color:color-mix(in srgb,var(--txt) 82%,var(--muted));text-align:left}
+.rid-loading-meta{display:grid;gap:8px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--border) 84%,transparent)}
+.rid-loading-meta-line{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px;font:600 12px/1.5 var(--font-ui)}
+.rid-loading-meta-label{color:var(--muted)}
+.rid-loading-meta-value{color:var(--txt);text-align:left;word-break:break-word}
+body.rid-loading-active{overflow:hidden}
+body.theme-light .rid-loading-overlay{background:rgba(236,242,250,.58)}
+body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255,255,.94),rgba(245,249,255,.90));box-shadow:0 18px 36px rgba(35,53,79,.10)}
+@keyframes ridSettingsLoadingSpin{to{transform:rotate(360deg)}}
+@keyframes icloudCardIn{from{opacity:0;transform:translateY(16px) scale(.985)}to{opacity:1;transform:none}}
+@media (max-width:1360px){
+  .hook-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .api-token-create-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .zone-layout{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .hook-layout .field:last-child,.api-token-create-grid .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
+}
+@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.access-subgrid,.hook-layout,.api-token-head,.api-token-create-grid,.api-token-grid,.policy-grid,.zone-layout,.field-inline,.model-update-row,.model-editor-toolbar,.model-map-row,.sso-link-options{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
+@media (max-width:700px){
+  .wrap{width:min(100vw - 12px,1420px);padding:10px 6px 18px}
+  .topbar,.draft-bar{gap:10px}
+  .actions,.draft-actions{width:100%}
+  .actions .btn,.draft-actions .btn{flex:1 1 140px}
+  .card{padding:14px}
+  .metric-item{grid-template-columns:minmax(0,1fr) auto;gap:7px}
+  .metric-spark-wrap{height:118px}
+  .toast-stack{right:10px;left:10px;bottom:10px;width:auto}
+}
+</style></head><body><div class="wrap">
+  <div class="settings-sticky-head">
+  <div class="topbar">
+    <div>
+      <div class="title">设置</div>
+      <div class="sub">常用运行项在配置面板；文件级修改放在原始配置。</div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="btn-back" type="button">返回主页</button>
+      <button class="btn" id="btn-logs" type="button">日志</button>
+      <button class="btn ghost" id="btn-logout" type="button">登出</button>
+      <button class="btn" id="btn-theme" type="button">浅色</button>
+      <button class="btn" id="btn-reload-view" type="button">刷新</button>
+    </div>
+  </div>
+  <div class="draft-bar">
+    <div class="draft-copy">
+      <div class="draft-title" id="draft-title">当前没有未保存修改</div>
+      <div class="draft-meta" id="draft-meta">修改会先进入草稿；保存前可测试，或直接写入配置。</div>
+    </div>
+    <div class="draft-actions">
+      <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
+      <button class="btn warn" id="btn-save-visual" type="button" disabled>保存设置</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="visual" type="button">配置面板</button>
+    <button class="tab" data-tab="raw" type="button">原始配置</button>
+  </div>
+  <div class="settings-jump" aria-label="设置分组导航">
+    <button class="btn ghost" data-jump="settings-capture" type="button">采集</button>
+    <button class="btn ghost" data-jump="settings-map" type="button">地图</button>
+    <button class="btn ghost" data-jump="settings-access" type="button">访问</button>
+    <button class="btn ghost" data-jump="settings-status" type="button">状态</button>
+    <button class="btn ghost" data-jump="settings-data" type="button">数据</button>
+    <button class="btn ghost" data-jump="settings-runtime" type="button">诊断</button>
+  </div>
+  </div>
+  <div class="panel active" data-tab="visual">
+    <div class="visual-grid">
+      <div class="stack">
+        <div class="stack-label">采集与访问</div>
+        <div class="card" id="settings-capture" data-card-key="capture">
+          <div class="section-head">
+            <div>
+              <h2>采集</h2>
+              <div class="section-copy">设置采集网卡、信道、离线判定和机型识别库。</div>
+            </div>
+          </div>
+          <div class="grid" style="margin-top:14px">
+            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">未绑定</option></select><div class="micro">固定采集网卡仍在这里设置；多用途网卡绑定已移到下方独立模块。</div></div>
+            <div class="field">
+              <label>固定信道</label>
+              <div class="field-inline">
+                <input id="cfg-channel" type="number" min="1" max="196" disabled>
+                <button class="btn ghost" id="btn-channel-edit" type="button">编辑</button>
+                <button class="btn ghost" id="btn-channel-reset" type="button">默认</button>
+              </div>
+              <div class="micro" id="channel-hint" style="display:none"></div>
+            </div>
+            <div class="field"><label>飞机离线判定(s)</label><input id="cfg-lost-timeout" type="number" min="3" max="3600" step="1"></div>
+            <div class="field full"><label>机型识别库</label><input id="cfg-model-map" type="text"></div>
+            <div style="display:none">
+              <input id="cfg-time" type="number" step="0.1">
+              <input id="cfg-min-gap" type="number" step="0.1">
+              <input id="cfg-rssi-delta" type="number">
+              <input id="cfg-rssi-change" type="checkbox">
+              <input id="cfg-payload-change" type="checkbox">
+            </div>
+            <div class="field full" data-card-key="capture">
+              <label>识别库在线更新</label>
+              <div class="model-update-row">
+                <label><input id="cfg-model-update-enabled" type="checkbox"> 自动更新</label>
+                <input id="cfg-model-update-url" type="text" placeholder="留空使用官方源">
+                <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
+              </div>
+              <div class="micro" id="model-update-state">识别库可从默认源或自定义地址同步。</div>
+              <div class="model-update-row" style="margin-top:10px">
+                <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
+                <div class="micro" id="app-update-state">当前版本与最新版本尚未检查。</div>
+                <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
+              </div>
+              <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
+            </div>
+            <div class="field full"><label>扫描数据文件</label><input id="cfg-history-file" type="text"></div>
+          </div>
+          <div class="checks" style="margin-top:14px">
+            <label><input id="cfg-heal" type="checkbox"> 自愈恢复</label>
+            <label><input id="cfg-debug" type="checkbox"> 调试日志</label>
+          </div>
+          <details class="advanced" style="margin-top:14px">
+            <summary>高级采集参数</summary>
+            <div class="grid" style="margin-top:14px">
+              <div class="field"><label>2.4G 驻留(ms)</label><input id="cfg-dwell2g" type="number"></div>
+              <div class="field"><label>5G 驻留(ms)</label><input id="cfg-dwell5g" type="number"></div>
+              <div class="field"><label>切换稳定等待(ms)</label><input id="cfg-settle" type="number"></div>
+              <div class="field"><label>命中驻留(ms)</label><input id="cfg-hit-dwell" type="number"></div>
+              <div class="field"><label>命中上限(ms)</label><input id="cfg-hit-cap" type="number"></div>
+            </div>
+            <div class="checks" style="margin-top:14px">
+              <label><input id="cfg-hop" type="checkbox"> 自动跳频</label>
+              <label><input id="cfg-hop5g" type="checkbox"> 跳频含 5G</label>
+              <label><input id="cfg-fast" type="checkbox"> 扫描 WiFi 快传</label>
+            </div>
+          </details>
+          <details class="advanced network-bind-module" id="network-bind-module">
+            <summary>
+              <div class="network-bind-head">
+                <div class="network-bind-title">自定义网卡绑定</div>
+                <div class="network-bind-copy">单独管理扫描、AP 与桥接用途，默认折叠，避免把主采集设置区挤乱。</div>
+              </div>
+            </summary>
+            <div class="network-bind-body">
+              <div class="model-editor-toolbar">
+                <button class="btn ghost" id="btn-network-bind-refresh" type="button">扫描网卡</button>
+                <button class="btn" id="btn-network-bind-save" type="button">写入草稿</button>
+                <button class="btn warn" id="btn-network-bind-apply" type="button">应用到系统</button>
+              </div>
+              <div class="grid">
+                <div class="field"><label>热点 SSID</label><input id="net-ap-ssid" type="text"></div>
+                <div class="field"><label>热点密码</label><input id="net-ap-password" type="password" placeholder="留空为开放热点"></div>
+                <div class="field"><label>热点信道</label><input id="net-ap-channel" type="number" min="1" max="196"></div>
+                <div class="field"><label>HTTP 监听</label><input id="net-ap-http" type="text" value="172.16.0.1:80" disabled></div>
+              </div>
+              <div id="network-bind-list" class="list-wrap"></div>
+              <div id="status-network-bind" class="status">-</div>
+            </div>
+          </details>
+        </div>
+        <div class="card" id="settings-map" data-card-key="map">
+          <div class="section-head">
+            <div>
+              <h2>地图与基站</h2>
+              <div class="section-copy">控制地图中心、基站坐标、默认缩放和航向参考。</div>
+            </div>
+          </div>
+          <div class="grid">
+            <div class="field"><label>基站名称</label><input id="cfg-base-name" type="text"></div>
+            <div class="field"><label>DJI 查询地址</label><input id="cfg-dji-url" type="text"></div>
+            <div class="field"><label>基站纬度</label><input id="cfg-base-lat" type="number" step="0.000001"></div>
+            <div class="field"><label>基站经度</label><input id="cfg-base-lon" type="number" step="0.000001"></div>
+            <div class="field"><label>默认缩放</label><input id="cfg-base-zoom" type="number" min="3" max="30"></div>
+            <div class="field"><label>参考航向(°)</label><input id="cfg-heading-ref" type="number" step="0.1"></div>
+            <div class="field"><label>自动回中冷却(s)</label><input id="cfg-map-idle" type="number" min="5" max="600"></div>
+            <div class="field full">
+              <label>定位</label>
+              <div class="row-actions">
+                <button class="btn" id="btn-browser-loc" type="button">读取浏览器位置</button>
+                <button class="btn ghost" id="btn-clear-base-loc" type="button">清空基站坐标</button>
+              </div>
+              <div class="micro" id="base-geo-hint">浏览器定位能力由当前访问协议和浏览器权限决定。</div>
+            </div>
+          </div>
+        </div>
+        <div class="card" data-card-key="zones">
+          <div class="list-head">
+            <div>
+              <h2>报警区域</h2>
+              <div class="section-copy">用两组经纬度边界定义矩形告警范围。</div>
+            </div>
+            <button class="btn" id="btn-zone-add" type="button">添加区域</button>
+          </div>
+          <div id="zone-list" class="list-wrap"></div>
+        </div>
+        <div class="card access-group" id="settings-access" data-card-key="access">
+          <div class="section-head">
+            <div>
+              <h2>通知与访问控制</h2>
+              <div class="section-copy">管理通知、登录方式、API Token 和访问来源规则。</div>
+            </div>
+          </div>
+          <div class="access-subgrid">
+            <div class="access-subcard full">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">通知通道</div>
+                  <div class="access-subcopy">企业微信机器人通道、通知开关和发送节奏。</div>
+                </div>
+                <button class="btn" id="btn-hook-add" type="button">添加通道</button>
+              </div>
+              <div id="wecom-list" class="list-wrap"></div>
+              <div class="grid">
+                <div class="field"><label>重上线冷却(s)</label><input id="cfg-reonline" type="number"></div>
+                <div class="field"><label>通知超时(s)</label><input id="cfg-send-timeout" type="number"></div>
+              </div>
+              <div class="checks">
+                <label><input id="cfg-notify-enabled" type="checkbox"> 启用企业微信通知</label>
+                <label><input id="cfg-notify-reonline" type="checkbox"> 允许重上线通知</label>
+              </div>
+            </div>
+            <div class="access-subcard full collapsible collapsed">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">网页登录</div>
+                  <div class="access-subcopy">控制设置页和内置页面的账号密码登录会话。</div>
+                </div>
+              </div>
+              <div class="grid">
+                <div class="field"><label>登录标题</label><input id="cfg-auth-realm" type="text"><div class="micro">显示在登录框和认证域。</div></div>
+                <div class="field"><label>会话有效期(min)</label><input id="cfg-auth-ttl" type="number" min="1" max="10080" step="1"><div class="micro">范围 1 分钟到 7 天。</div></div>
+                <div class="field"><label>网页登录账号</label><input id="cfg-auth-user" type="text" placeholder="留空即不修改"></div>
+                <div class="field"><label>网页登录密码</label><input id="cfg-auth-pass" type="password" placeholder="留空即不修改"></div>
+              </div>
+              <div class="checks">
+                <label><input id="cfg-auth-enabled" type="checkbox"> 启用网页登录鉴权</label>
+              </div>
+              <div class="checks">
+                <label><input id="cfg-auth-method-password" type="checkbox"> 账号密码登录</label>
+                <label><input id="cfg-auth-method-passkey" type="checkbox"> PassKey 登录</label>
+              </div>
+              <div class="micro" id="auth-method-state">至少保留一种网页登录方式；关闭账号密码直接登录后，账号密码仍用于设置页二次确认。</div>
+            </div>
+            <div class="access-subcard full collapsible collapsed">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">通行密钥登录</div>
+                  <div class="access-subcopy">为网页登录账号绑定浏览器通行密钥，支持一键登录。</div>
+                </div>
+              </div>
+              <div class="grid">
+                <div class="field full"><label>通行密钥名称</label><input id="cfg-passkey-name" type="text" placeholder="留空即自动命名"><div class="micro">用于区分不同设备或浏览器。</div></div>
+              </div>
+              <div class="row-actions">
+                <button class="btn" id="btn-passkey-add" type="button">验证并添加</button>
+              </div>
+              <div class="micro" id="passkey-state">完成网页登录账号和密码配置后，可在这里添加通行密钥。</div>
+              <div id="passkey-list" class="passkey-list"></div>
+            </div>
+            <div class="access-subcard full collapsible collapsed">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">SSO 登录链接</div>
+                  <div class="access-subcopy">SSO 不作为可关闭的登录方式；只要存在有效链接，它就是最高优先级验证入口。</div>
+                </div>
+              </div>
+              <div class="token-actions">
+                <input id="login-link-name" type="text" placeholder="链接名称">
+                <button class="btn" id="btn-login-link-create" type="button">生成</button>
+              </div>
+              <div class="sso-link-options">
+                <div class="field"><label>有效期</label><select id="login-link-expire-mode">
+                  <option value="86400">24 小时</option>
+                  <option value="3600">1 小时</option>
+                  <option value="604800">7 天</option>
+                  <option value="never">无限时间</option>
+                  <option value="custom">自定义分钟</option>
+                </select></div>
+                <div class="field hidden" id="login-link-custom-field"><label>自定义有效期(min)</label><input id="login-link-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
+                <label class="sso-single-use"><input id="login-link-single-use" type="checkbox"> 单次登录</label>
+              </div>
+              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制；命中有效 SSO 链接时优先于其它网页登录方式。</div>
+              <div id="login-link-list" class="list-wrap sso-link-list"></div>
+            </div>
+            <div class="access-subcard full collapsible collapsed">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">API Token</div>
+                  <div class="access-subcopy">外部 API Token 随机生成，只在创建成功时显示一次。</div>
+                </div>
+              </div>
+              <div class="api-token-create-grid">
+                <div class="field"><label>名称</label><input id="api-token-new-name" type="text" placeholder="Token 名称"></div>
+                <div class="field"><label>有效期</label><select id="api-token-new-expire-mode">
+                  <option value="86400">24 小时</option>
+                  <option value="3600">1 小时</option>
+                  <option value="604800">7 天</option>
+                  <option value="never">无限时间</option>
+                  <option value="custom">自定义分钟</option>
+                </select></div>
+                <div class="field hidden" id="api-token-custom-field"><label>自定义(min)</label><input id="api-token-new-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
+                <label class="sso-single-use"><input id="api-token-new-single-use" type="checkbox"> 单次使用</label>
+                <div class="field"><label>&nbsp;</label><button class="btn" id="btn-api-token-add" type="button">验证并生成</button></div>
+              </div>
+              <div id="api-token-list" class="api-token-list"></div>
+              <div class="checks">
+                <label><input id="cfg-api-enabled" type="checkbox"> 启用外部 API</label>
+              </div>
+            </div>
+            <div class="access-subcard full collapsible collapsed">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">API 白名单</div>
+                  <div class="access-subcopy">限制外部 API 来源地址</div>
+                </div>
+              </div>
+              <div id="api-whitelist-block">
+                <div class="policy-grid">
+                  <div class="field"><label>模式</label><select id="cfg-api-whitelist-mode"><option value="allow">白名单</option><option value="deny">黑名单</option></select></div>
+                  <div class="checks"><label><input id="cfg-api-whitelist-enabled" type="checkbox"> 启用 API 访问规则</label></div>
+                </div>
+                <div class="field full"><label>地址列表</label><textarea id="cfg-api-whitelist" spellcheck="false" style="min-height:140px"></textarea><div class="micro">每行一个 IP 或 CIDR。</div></div>
+              </div>
+            </div>
+            <div class="access-subcard full collapsible collapsed">
+              <div class="access-subhead">
+                <div>
+                  <div class="access-subtitle">网页访问规则</div>
+                  <div class="access-subcopy">限制设置页、主页和内置页面的访问来源。</div>
+                </div>
+              </div>
+              <div class="policy-grid">
+                <div class="field"><label>模式</label><select id="cfg-web-access-mode"><option value="allow">白名单</option><option value="deny">黑名单</option></select></div>
+                <div class="checks"><label><input id="cfg-web-access-enabled" type="checkbox"> 启用网页访问规则</label></div>
+              </div>
+              <div class="field full"><label>地址列表</label><textarea id="cfg-web-access-list" spellcheck="false" style="min-height:120px"></textarea><div class="micro">每行一个 IP 或 CIDR；拒绝时页面返回 403。</div></div>
+            </div>
+          </div>
+          <div class="secret-note" id="secret-state">通知、登录、Token 和外部 API 状态摘要。</div>
+          <div id="status-visual" class="status">-</div>
+        </div>
+      </div>
+      <div class="stack">
+        <div class="stack-label">状态与维护</div>
+        <div class="card" id="settings-status">
+          <div class="section-head">
+            <div>
+              <h2>主机状态</h2>
+              <div class="section-copy">查看主机负载、网络地址和当前采集状态。</div>
+            </div>
+            <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
+          </div>
+          <div id="host-stats" class="stats-grid" style="margin-top:14px"></div>
+          <div id="host-meta" class="micro">-</div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-open-hw" type="button">打开硬件助手</button>
+            <button class="btn" id="btn-diagnostic-export" type="button">导出质量分析包</button>
+          </div>
+        </div>
+        <div class="card settings-collapsible collapsed" id="settings-data">
+          <div class="section-head">
+            <div>
+              <h2>权限与 systemd 服务</h2>
+              <div class="section-copy">检查运行权限；需要修复时再写入 systemd 配置。</div>
+            </div>
+          </div>
+          <div id="runtime-security-alert" class="security-alert">
+            <div class="security-alert-title" id="runtime-security-title">权限检测</div>
+            <div class="security-alert-copy" id="runtime-security-copy">正在读取运行权限...</div>
+            <div class="security-alert-actions">
+              <button class="btn warn" id="btn-security-repair" type="button">一键修复</button>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn ghost" id="btn-service-refresh" type="button">刷新服务状态</button>
+            <button class="btn" id="btn-service-register" type="button">注册/更新服务</button>
+            <button class="btn" id="btn-iw-install" type="button">安装无线工具</button>
+          </div>
+          <div class="micro" style="margin-top:10px">修复会创建运行账号、整理文件权限，并授予采集与热点所需能力；sudo 密码只用于本次操作。</div>
+          <div id="status-system-service" class="status">正在读取服务状态...</div>
+        </div>
+        <div class="card" data-card-key="metrics">
+          <div class="section-head">
+            <div>
+              <h2>节点负载</h2>
+              <div class="section-copy">记录 CPU、内存、温度、负载和 AP 数趋势。</div>
+            </div>
+          </div>
+          <div class="metric-toolbar">
+            <label class="metric-toggle"><input id="cfg-metrics-enabled" type="checkbox"><span>启用节点负载记录</span></label>
+            <button class="btn ghost metric-window active" data-window="12h" type="button">12小时</button>
+            <button class="btn ghost metric-window" data-window="24h" type="button">24小时</button>
+            <button class="btn ghost metric-window" data-window="7d" type="button">7天</button>
+            <label class="metric-retention"><span>保留</span><input id="cfg-metrics-retention" type="number" min="1" max="90" step="1"><span>天</span></label>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <div class="field">
+              <label>温度数据来源</label>
+              <select id="cfg-metrics-temp-source">
+                <option value="auto">自动（优先 vcgencmd）</option>
+                <option value="vcgencmd">仅 vcgencmd</option>
+                <option value="vcgencmd_pmic">仅 vcgencmd PMIC</option>
+                <option value="thermal_zone">仅 /sys/class/thermal</option>
+                <option value="hwmon">仅 /sys/class/hwmon</option>
+                <option value="w1">仅 DS18B20 / w1</option>
+                <option value="off">关闭温度采集</option>
+              </select>
+              <div class="micro">节点温度会写入主机状态和温度曲线；关闭后显示为空值。</div>
+            </div>
+          </div>
+          <div class="metric-list" id="metrics-list">
+            <div class="metric-item" data-metric="cpu"><div class="metric-label"><i style="background:#2899f5"></i>CPU</div><div class="metric-spark-wrap"><canvas class="metric-spark" data-metric="cpu"></canvas></div><div class="metric-value" id="metric-value-cpu">—</div></div>
+            <div class="metric-item" data-metric="mem"><div class="metric-label"><i style="background:#92c353"></i>内存</div><div class="metric-spark-wrap"><canvas class="metric-spark" data-metric="mem"></canvas></div><div class="metric-value" id="metric-value-mem">—</div></div>
+            <div class="metric-item" data-metric="temp"><div class="metric-label"><i style="background:#f7630c"></i>温度</div><div class="metric-spark-wrap"><canvas class="metric-spark" data-metric="temp"></canvas></div><div class="metric-value" id="metric-value-temp">—</div></div>
+            <div class="metric-item" data-metric="load"><div class="metric-label"><i style="background:#c19c00"></i>负载</div><div class="metric-spark-wrap"><canvas class="metric-spark" data-metric="load"></canvas></div><div class="metric-value" id="metric-value-load">—</div></div>
+            <div class="metric-item" data-metric="ap"><div class="metric-label"><i style="background:#8764b8"></i>AP数</div><div class="metric-spark-wrap"><canvas class="metric-spark" data-metric="ap"></canvas></div><div class="metric-value" id="metric-value-ap">—</div></div>
+          </div>
+          <label class="metric-zoom"><span>缩放</span><input id="metrics-zoom" type="range" min="1" max="100" step="1" value="1"><span id="metrics-zoom-value">1x</span></label>
+          <div id="status-metrics" class="micro">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>设置与扫描数据</h2>
+              <div class="section-copy">分别导入导出配置与扫描数据，避免两类文件混用。</div>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-export-settings-file" type="button">导出设置文件</button>
+            <button class="btn ghost" id="btn-import-settings-file" type="button">导入设置文件</button>
+            <input id="import-settings-file" type="file" accept=".json,application/json" style="display:none">
+          </div>
+          <div class="row-actions" style="margin-top:10px">
+            <button class="btn" id="btn-export-scan-data" type="button">导出扫描数据</button>
+            <button class="btn ghost" id="btn-import-scan-data" type="button">导入扫描数据</button>
+            <button class="btn ghost" id="btn-reidentify-recent-history" type="button">识别所有飞机近100包</button>
+            <input id="import-scan-data-file" type="file" accept=".json,application/json" style="display:none">
+          </div>
+          <div class="micro" id="settings-config-path" style="margin-top:10px">设置文件: -</div>
+          <div class="micro" id="settings-scan-data-path">扫描数据文件: -</div>
+          <div class="micro" id="settings-scan-data-size">历史数据大小: -</div>
+          <div id="status-data-transfer" class="status">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>许可协议</h2>
+              <div class="section-copy">查看或撤回 EULA 确认；撤回后会重新要求确认。</div>
+            </div>
+          </div>
+          <div class="row-actions" style="margin-top:14px">
+            <button class="btn" id="btn-eula-view" type="button">查看 EULA</button>
+            <button class="btn warn" id="btn-eula-revoke" type="button">撤回同意</button>
+          </div>
+          <div id="status-eula" class="status">-</div>
+        </div>
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>浏览器偏好</h2>
+              <div class="section-copy">仅影响当前浏览器的显示偏好。</div>
+            </div>
+          </div>
+          <div class="checks pref-checks" style="margin-top:14px">
+            <label><input id="pref-new-firmware-parser" type="checkbox"> 显示 RID 包解析结果</label>
+          </div>
+          <div class="micro">只控制当前浏览器显示；后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
+        </div>
+        <div class="card settings-collapsible collapsed" id="settings-runtime">
+          <div class="section-head">
+            <div>
+              <h2>实时 AP</h2>
+              <div class="section-copy">查看最近扫描到的 AP 和运行日志片段。</div>
+            </div>
+            <button class="btn ghost" id="btn-refresh-runtime" type="button">刷新</button>
+          </div>
+          <div id="settings-ap-list" class="list-wrap" style="margin-top:14px"></div>
+          <div class="field full" style="margin-top:14px"><label>扫描日志</label><textarea id="settings-runtime-log" readonly spellcheck="false" style="min-height:220px"></textarea></div>
+          <div id="status-runtime" class="status">-</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="panel" data-tab="raw">
+    <div class="card">
+      <div class="raw-toolbar">
+        <div>
+          <h2>原始配置</h2>
+          <div class="section-copy">浏览配置目录树、切换文件、编辑保存和删除配置文件。进入前需要先验证网页登录密码。</div>
+        </div>
+        <div class="row-actions">
+          <button class="btn" id="btn-load-raw" type="button">刷新目录</button>
+          <button class="btn warn" id="btn-save-raw" type="button">保存当前文件</button>
+          <button class="btn warn" id="btn-delete-raw" type="button">删除当前文件</button>
+          <button class="btn ghost" id="btn-raw-unlock" type="button">验证密码</button>
+        </div>
+      </div>
+      <div class="raw-lock" id="raw-lock-card">
+        <strong id="raw-lock-title">原始配置已锁定</strong>
+        <div class="micro" id="raw-lock-copy">需要先验证网页登录密码，才能查看和编辑配置文件。</div>
+        <div class="row-actions">
+          <button class="btn" id="btn-raw-unlock-inline" type="button">验证密码</button>
+        </div>
+      </div>
+      <div class="raw-layout" id="raw-layout">
+        <aside class="raw-pane">
+          <div class="raw-meta">
+            <div class="meta-copy">
+              <div class="meta-title" id="raw-tree-title">配置目录</div>
+              <div class="meta-sub" id="raw-tree-path">-</div>
+            </div>
+          </div>
+          <div id="raw-tree" class="raw-tree"></div>
+        </aside>
+        <section class="raw-main">
+          <div class="raw-meta">
+            <div class="meta-copy">
+              <div class="meta-title" id="raw-file-title">未选择文件</div>
+              <div class="meta-sub" id="raw-file-path">-</div>
+            </div>
+            <div class="meta-copy" style="text-align:right">
+              <div class="meta-title" id="raw-file-size">-</div>
+              <div class="meta-sub" id="raw-file-mtime">-</div>
+            </div>
+          </div>
+          <textarea id="raw-editor" class="raw-editor" spellcheck="false"></textarea>
+          <div id="status-raw" class="status">-</div>
+        </section>
+      </div>
+    </div>
+  </div>
+<div id="settings-toast-stack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+<div class="modal-mask" id="reauth-modal">
+  <div class="modal-card">
+    <h3>再次验证</h3>
+    <div class="section-copy">二次验证保护 Token 显示、复制、PassKey 添加和原始配置解锁。</div>
+    <div class="grid" style="margin-top:14px">
+      <div class="field full"><label>账号</label><input id="reauth-user" type="text" autocomplete="username"></div>
+      <div class="field full"><label>密码</label><input id="reauth-pass" type="password" autocomplete="current-password"></div>
+    </div>
+    <div class="row-actions" style="margin-top:14px">
+      <button class="btn ghost" id="btn-reauth-cancel" type="button">取消</button>
+      <button class="btn" id="btn-reauth-confirm" type="button">确认</button>
+    </div>
+    <div id="reauth-status" class="status">-</div>
+  </div>
+</div>
+<div class="modal-mask" id="elevate-modal">
+  <div class="modal-card">
+    <h3>临时提权</h3>
+    <div class="section-copy" id="elevate-copy">此操作需要 root 权限；sudo 密码只用于本次请求，不会保存。</div>
+    <div class="grid" style="margin-top:14px">
+      <div class="field full"><label>sudo 密码</label><input id="elevate-pass" type="password" autocomplete="off"></div>
+    </div>
+    <div class="row-actions" style="margin-top:14px">
+      <button class="btn ghost" id="btn-elevate-cancel" type="button">取消</button>
+      <button class="btn" id="btn-elevate-confirm" type="button">确认</button>
+    </div>
+    <div id="elevate-status" class="status">-</div>
+  </div>
+</div>
+<div class="modal-mask" id="one-time-modal">
+  <div class="modal-card">
+    <h3 id="one-time-title">只显示一次</h3>
+    <div class="section-copy" id="one-time-note">关闭后不能再次查看或复制。</div>
+    <div class="one-time-secret" id="one-time-secret"></div>
+    <div class="row-actions" style="margin-top:14px">
+      <button class="btn" id="btn-one-time-copy" type="button">复制</button>
+      <button class="btn ghost" id="btn-one-time-close" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+<div class="modal-mask" id="model-map-modal">
+  <div class="modal-card wide">
+    <h3>识别库编辑</h3>
+    <div class="section-copy">编辑本地 rid-models.json 条目，保存后立即刷新实时和历史机型。</div>
+    <div class="model-editor">
+      <div class="model-editor-toolbar">
+        <input id="model-map-search" type="text" placeholder="前缀或机型">
+        <button class="btn ghost" id="btn-model-map-add" type="button">新增</button>
+        <button class="btn" id="btn-model-map-save" type="button">保存列表</button>
+      </div>
+      <div id="model-map-list" class="model-map-list"></div>
+      <div class="micro" id="model-map-editor-state">当前机型识别库保存识别条目。</div>
+    </div>
+    <div class="row-actions" style="margin-top:14px"><button class="btn ghost" id="btn-model-map-close" type="button">关闭</button></div>
+  </div>
+</div>
+</body></html>

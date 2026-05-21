@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 
-from viewer.paths import APP_VERSION, STATION_WEB_SERVER
+from viewer.paths import APP_VERSION, ASSETS_DIR, STATION_WEB_SERVER
 
 
 _CACHE: dict[str, str] | None = None
@@ -14,6 +14,15 @@ def _inject_html_once(html_src: str, marker: str, extra: str) -> str:
     if marker not in html_src:
         return html_src + extra
     return html_src.replace(marker, extra + marker, 1)
+
+def _rid_home_asset_url() -> str:
+    asset_url = "/assets/vue/rid-home.js"
+    asset_path = ASSETS_DIR / "vue" / "rid-home.js"
+    try:
+        st = asset_path.stat()
+        return f"{asset_url}?v={int(st.st_mtime)}-{int(st.st_size)}"
+    except OSError:
+        return asset_url
 
 
 def _load_station_template_parts() -> dict[str, str]:
@@ -128,6 +137,7 @@ def _viewer_patch_js() -> str:
           clearViewerLoadingState();
         }
         oldOnData(d);
+        setTimeout(tick, 0);
         if(isLoading) setViewerLoadingState();
       };
       window.onData.__viewerLoadingPatched = true;
@@ -142,51 +152,70 @@ def _viewer_patch_js() -> str:
     }
     return '向 ' + viewerLoadingTargetText + ' 获取数据超时，仍在等待返回';
   }
-  function ensureLoadingOverlay(message){
+  function loadingState(){
+    if(!viewerLoadingStartedAt) viewerLoadingStartedAt = Date.now();
+    var elapsed = Math.floor((Date.now() - viewerLoadingStartedAt) / 1000);
+    var remain = Math.max(0, viewerLoadingTimeoutSec - elapsed);
+    if(remain > 0){
+      return {
+        detail: '\u6b63\u5728\u5411 ' + viewerLoadingTargetText + ' \u83b7\u53d6\u6570\u636e',
+        status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u9884\u8ba1 ' + remain + 's \u540e\u63d0\u793a\u8d85\u65f6'
+      };
+    }
+    return {
+      detail: '\u5411 ' + viewerLoadingTargetText + ' \u83b7\u53d6\u6570\u636e\u8d85\u65f6\uff0c\u4ecd\u5728\u7b49\u5f85\u8fd4\u56de',
+      status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u6682\u4e0d\u5173\u95ed\u9875\u9762'
+    };
+  }
+  function ensureLoadingOverlay(state){
     var host = qs('rid-loading-overlay');
     if(!host){
       host = document.createElement('div');
       host.id = 'rid-loading-overlay';
       host.className = 'rid-loading-overlay';
-      host.innerHTML = '<div class="rid-loading-box"><div class="rid-loading-spinner"></div><div class="rid-loading-title">正在读取数据</div><div class="rid-loading-copy"></div></div>';
+      host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"><div class="rid-loading-spinner-core"><div class="rid-loading-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title">\u6b63\u5728\u8bfb\u53d6\u6570\u636e</div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u5f53\u524d\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u8be6\u7ec6\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
       document.body.appendChild(host);
     }
     var title = host.querySelector('.rid-loading-title');
-    if(title) title.textContent = '正在读取数据';
     var copy = host.querySelector('.rid-loading-copy');
-    if(copy) copy.textContent = message;
+    if(copy) copy.textContent = state.detail;
+    if(title) title.textContent = '\u6b63\u5728\u8bfb\u53d6\u6570\u636e';
+    var target = host.querySelector('[data-role="target"]');
+    if(target) target.textContent = viewerLoadingTargetText;
+    var status = host.querySelector('[data-role="status"]');
+    if(status) status.textContent = state.status;
     host.classList.add('show');
+    document.body.classList.add('rid-loading-active');
   }
   function clearViewerLoadingState(){
     var host = qs('rid-loading-overlay');
     if(host) host.classList.remove('show');
+    document.body.classList.remove('rid-loading-active');
+    try{
+      var rows = Array.isArray(window.latestDroneRows) ? window.latestDroneRows : [];
+      if(typeof window.renderDroneTable === 'function') window.renderDroneTable(rows);
+      if(typeof window.renderLiveCards === 'function') window.renderLiveCards(rows);
+    }catch(_e){}
   }
   function setViewerLoadingState(){
     if(viewerDataLoaded) return;
-    var msg = loadingMessage();
-    var safeMsg = escViewer(msg);
+    var msg = loadingState();
     ensureLoadingOverlay(msg);
-    var tbody = qs('tbody');
-    if(tbody){
-      tbody.innerHTML = '<tr><td colspan="10" class="empty viewer-loading-state">'+safeMsg+'</td></tr>';
-    }
-    var cards = qs('live-card-list');
-    if(cards){
-      cards.innerHTML = '<div class="ap-empty viewer-loading-state">'+safeMsg+'</div>';
-    }
     var count = qs('live-card-count');
     if(count) count.textContent = '-';
     var hint = qs('map-hint');
-    if(hint) hint.textContent = msg;
+    if(hint) hint.textContent = msg.detail;
     var status = qs('ws-status');
     if(status) status.textContent = '正在读取数据';
     var ts = qs('cur-ts');
     if(ts) ts.textContent = '读取中';
+    if(status) status.textContent = '\u6b63\u5728\u8bfb\u53d6\u6570\u636e';
+    if(ts) ts.textContent = '\u8bfb\u53d6\u4e2d';
     var logbox = qs('logbox');
     if(logbox && !logbox.childElementCount){
       var line = document.createElement('div');
       line.className = 'ap';
-      line.textContent = '[loading] ' + msg;
+      line.textContent = '[loading] ' + msg.detail;
       logbox.appendChild(line);
     }
   }
@@ -244,9 +273,12 @@ def _viewer_patch_js() -> str:
     }
   }
   function tick(){ patchTitle(); patchViewerFunctions(); deleteStationOnlyUi(); syncViewerBaseLabels(); setViewerLoadingState(); }
-  tick();
-  var timer = setInterval(tick, 250);
-  setTimeout(function(){ clearInterval(timer); tick(); }, 8000);
+  function scheduleTicks(){
+    [0, 120, 360, 900, 1800].forEach(function(delay){
+      setTimeout(tick, delay);
+    });
+  }
+  scheduleTicks();
 })();
 """
 
@@ -273,6 +305,6 @@ body.theme-light .viewer-base-label{background:color-mix(in srgb,var(--blue) 7%,
         + "\n"
         + _viewer_patch_js()
         + "\n</script>\n"
-        + '<script src="/assets/vue/rid-home.js"></script>\n',
+        + f'<script src="{_rid_home_asset_url()}"></script>\n',
     )
     return html_src

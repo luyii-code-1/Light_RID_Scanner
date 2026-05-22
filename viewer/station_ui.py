@@ -148,9 +148,9 @@ def _viewer_patch_js() -> str:
     var elapsed = Math.floor((Date.now() - viewerLoadingStartedAt) / 1000);
     var remain = Math.max(0, viewerLoadingTimeoutSec - elapsed);
     if(remain > 0){
-      return '正在向 ' + viewerLoadingTargetText + ' 获取数据，' + remain + 's 后超时';
+      return '正在从 ' + viewerLoadingTargetText + ' 读取数据，预计 ' + remain + 's 后提示超时';
     }
-    return '向 ' + viewerLoadingTargetText + ' 获取数据超时，仍在等待返回';
+    return viewerLoadingTargetText + ' 返回较慢，仍在等待数据';
   }
   function loadingState(){
     if(!viewerLoadingStartedAt) viewerLoadingStartedAt = Date.now();

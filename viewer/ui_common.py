@@ -128,8 +128,8 @@ function viewerPageLoadingText(target, timeoutSec){
   var limit = Math.max(5, Number(timeoutSec || 15) || 15);
   var remain = Math.max(0, limit - elapsed);
   var name = String(target || '页面数据');
-  if(remain > 0) return '正在读取 ' + name + '，' + remain + 's 后超时';
-  return '读取 ' + name + '超时，仍在等待返回';
+  if(remain > 0) return '正在读取' + name + '，预计 ' + remain + 's 后提示超时';
+  return name + ' 返回较慢，仍在等待';
 }
 function showViewerPageLoading(target, title, timeoutSec){
   viewerPageLoadingStartedAt = Date.now();

@@ -16,12 +16,12 @@ html,body{height:100%}
 :root{
   --font-ui:Inter,Roboto,"Noto Sans SC","Microsoft YaHei UI","Segoe UI Variable Text","Segoe UI",sans-serif;
   --font-mono:"Roboto Mono","SFMono-Regular","Cascadia Mono","Consolas",monospace;
-  --bg:#f5f8fc;--bg2:#e9f0fa;--panel:rgba(255,255,255,.94);--panel2:rgba(241,245,251,.92);--border:rgba(37,99,235,.12);--txt:#102033;
-  --green:#16a34a;--yellow:#f59e0b;--dim:#52657a;--blue:#2563eb;
-  --purple:#7c5cff;--cyan:#3b82f6;--glow:rgba(37,99,235,.16);--soft:rgba(255,255,255,.78);
-  --warn:#ef4444;--muted:#7a8aa0;--surface-tonal:#eaf2ff;
-  --radius-sm:10px;--radius:12px;--radius-lg:22px;--radius-xl:24px;
-  --shadow-sm:0 4px 12px rgba(15,23,42,.05);--shadow:0 8px 24px rgba(15,23,42,.08);--shadow-lg:0 16px 40px rgba(15,23,42,.14);
+  --bg:#f3f5f8;--bg2:#e8edf3;--panel:rgba(255,255,255,.98);--panel2:#f7f9fc;--border:rgba(15,23,42,.09);--txt:#162033;
+  --green:#1f9d68;--yellow:#d99315;--dim:#617083;--blue:#2f6fed;
+  --purple:#6d63ff;--cyan:#3182ce;--glow:rgba(47,111,237,.12);--soft:rgba(255,255,255,.86);
+  --warn:#d95050;--muted:#7c889a;--surface-tonal:#eef4fb;
+  --radius-sm:8px;--radius:10px;--radius-lg:16px;--radius-xl:18px;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.04);--shadow:0 8px 18px rgba(15,23,42,.06);--shadow-lg:0 14px 30px rgba(15,23,42,.10);
   --transition:0.32s cubic-bezier(.22,1,.36,1)
 }
 body{background:var(--bg);color:var(--txt);font-family:var(--font-ui);font-size:16px;
@@ -33,11 +33,11 @@ body{background:var(--bg);color:var(--txt);font-family:var(--font-ui);font-size:
         radial-gradient(circle at top right, rgba(96,165,250,.18), rgba(96,165,250,0) 30%),
         linear-gradient(180deg,var(--bg),var(--bg2) 34%,var(--bg))}
 body.theme-light{
-  --bg:#f5f8fc;--bg2:#e9f0fa;--panel:rgba(255,255,255,.96);--panel2:rgba(241,245,251,.96);--border:rgba(37,99,235,.12);--txt:#102033;
-  --green:#16a34a;--yellow:#f59e0b;--dim:#52657a;--blue:#2563eb;
-  --purple:#7c5cff;--cyan:#3b82f6;--glow:rgba(37,99,235,.14);--soft:rgba(255,255,255,.82);
-  --warn:#ef4444;--muted:#7a8aa0;
-  --shadow-sm:0 4px 12px rgba(15,23,42,.05);--shadow:0 8px 24px rgba(15,23,42,.08);--shadow-lg:0 16px 40px rgba(15,23,42,.14)
+  --bg:#f3f5f8;--bg2:#e8edf3;--panel:#ffffff;--panel2:#f7f9fc;--border:rgba(15,23,42,.09);--txt:#162033;
+  --green:#1f9d68;--yellow:#d99315;--dim:#617083;--blue:#2f6fed;
+  --purple:#6d63ff;--cyan:#3182ce;--glow:rgba(47,111,237,.12);--soft:rgba(255,255,255,.86);
+  --warn:#d95050;--muted:#7c889a;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.04);--shadow:0 8px 18px rgba(15,23,42,.06);--shadow-lg:0 14px 30px rgba(15,23,42,.10)
 }
 body::before{
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
@@ -54,14 +54,14 @@ header,.tbl-wrap,.panel,footer{position:relative;z-index:1}
 .mono, code, .logbox, .aplist, .adv-input, .stat b{font-family:var(--font-mono)}
 
 /* -- Header -- */
-header{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid color-mix(in srgb,var(--border) 92%,transparent);
+header{background:var(--panel);border:1px solid color-mix(in srgb,var(--border) 96%,transparent);
        margin:10px 12px 0;padding:12px 16px;display:grid;grid-template-columns:auto auto minmax(0,1fr);
-       align-items:center;gap:8px 16px;position:sticky;top:10px;z-index:10;border-radius:20px;
-       box-shadow:0 4px 14px rgba(15,23,42,.06)}
+       align-items:center;gap:8px 16px;position:sticky;top:10px;z-index:10;border-radius:16px;
+       box-shadow:0 8px 18px rgba(15,23,42,.05)}
 header .head-stats{display:flex;align-items:center;justify-content:flex-end;
        gap:8px 16px;flex-wrap:wrap;min-width:0;grid-column:3}
 header h1{font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.01em;text-transform:none}
-.app-version-label{font-family:var(--font-mono);font-size:11px;font-weight:600;line-height:1;color:var(--muted);white-space:nowrap;padding:4px 8px;border-radius:9px;background:color-mix(in srgb,var(--surface-tonal) 60%,white);border:1px solid color-mix(in srgb,var(--border) 82%,transparent)}
+.app-version-label{font-family:var(--font-mono);font-size:11px;font-weight:600;line-height:1;color:var(--muted);white-space:nowrap;padding:4px 8px;border-radius:8px;background:var(--panel2);border:1px solid color-mix(in srgb,var(--border) 90%,transparent)}
 .adv-modal{
   position:fixed;inset:0;z-index:10006;background:rgba(3,8,14,.62);
   display:none;align-items:center;justify-content:center;padding:12px;
@@ -148,11 +148,10 @@ header h1{font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.01em;t
   opacity:0;transform:translateY(-12px) scale(.97);position:relative;overflow:hidden;
   transition:opacity .28s ease-out,transform .28s cubic-bezier(.22,.61,.36,1);
   width:min(420px,calc(100vw - 32px));min-height:78px;pointer-events:auto;cursor:pointer;
-  border:1px solid var(--border);border-radius:var(--radius-lg);
-  background:color-mix(in srgb,var(--panel) 92%,transparent);color:var(--txt);
+  border:1px solid var(--border);border-radius:14px;
+  background:var(--panel);color:var(--txt);
   padding:14px 16px 14px 18px;font:650 13px/1.45 var(--font-ui);
-  box-shadow:var(--shadow-lg),0 0 0 1px rgba(255,255,255,.035);
-  backdrop-filter:blur(12px);
+  box-shadow:0 12px 24px rgba(15,23,42,.10);
 }
 .banner:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--blue)}
 .banner.show{opacity:1;transform:translateY(0) scale(1)}
@@ -177,7 +176,7 @@ header h1{font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.01em;t
 body.rid-loading-active{overflow:hidden}
 @keyframes ridLoadingSpin{to{transform:rotate(360deg)}}
 .notify-center-button{
-  position:fixed;right:18px;bottom:18px;z-index:9999;width:52px;height:52px;border-radius:var(--radius-xl);
+  position:fixed;right:18px;bottom:18px;z-index:9999;width:52px;height:52px;border-radius:14px;
   border:1px solid color-mix(in srgb, var(--blue) 40%, var(--border));
   background:color-mix(in srgb, var(--panel) 92%, transparent);color:var(--txt);
   box-shadow:0 10px 22px rgba(15,23,42,.12);
@@ -199,7 +198,7 @@ body.rid-loading-active{overflow:hidden}
 .notify-center-panel{
   position:fixed;right:18px;bottom:84px;z-index:9999;width:min(380px,calc(100vw - 28px));
   max-height:min(560px,calc(100vh - 110px));display:none;flex-direction:column;overflow:hidden;
-  border:1px solid var(--border);border-radius:var(--radius-lg);background:color-mix(in srgb, var(--panel) 96%, transparent);
+  border:1px solid var(--border);border-radius:16px;background:var(--panel);
   box-shadow:0 14px 28px rgba(15,23,42,.12);
   transform:translateX(calc(100% + 20px));opacity:0;
   transition:transform .28s cubic-bezier(.22,.61,.36,1),opacity .22s ease-out;
@@ -225,11 +224,11 @@ body.rid-loading-active{overflow:hidden}
 
 /* -- Table -- */
 .tbl-wrap{margin:0 12px;min-height:0;overflow:auto;
-          border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:22px;background:color-mix(in srgb,var(--panel) 97%,white);
+          border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:18px;background:var(--panel);
           box-shadow:0 4px 14px rgba(15,23,42,.06)}
 table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:980px}
-thead tr{background:color-mix(in srgb,var(--panel2) 98%,white);position:sticky;top:0;z-index:9}
-thead th{padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:var(--dim);
+thead tr{background:var(--panel2);position:sticky;top:0;z-index:9}
+thead th{padding:10px 12px;text-align:left;font-size:12px;font-weight:600;color:var(--dim);
           border-bottom:1px solid var(--border);white-space:nowrap}
 thead th.sortable{cursor:pointer;user-select:none;position:relative;padding-right:24px;transition:color var(--transition),background-color var(--transition)}
 thead th.sortable:hover{color:var(--txt);background:color-mix(in srgb,var(--blue) 5%,transparent)}
@@ -388,8 +387,8 @@ body.bottom-all-collapsed{
 
 .panel{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;overflow:hidden;
        display:flex;flex-direction:column;min-height:0;
-       box-shadow:var(--shadow),0 1px 0 rgba(255,255,255,.32) inset;background:color-mix(in srgb,var(--panel) 94%,transparent);backdrop-filter:blur(10px)}
-.panel-hdr{background:color-mix(in srgb,var(--panel2) 96%,transparent);padding:10px 16px;font-size:14px;
+       box-shadow:var(--shadow-sm);background:var(--panel)}
+.panel-hdr{background:var(--panel2);padding:10px 16px;font-size:14px;
            color:var(--txt);font-weight:600;border-bottom:1px solid var(--border);
            display:flex;justify-content:space-between;align-items:center}
 .panel-hdr span.sub{color:var(--dim);font-size:13px;font-weight:400}
@@ -481,8 +480,8 @@ body.bottom-all-collapsed{
 .panel-hdr label{display:flex;align-items:center;gap:6px;cursor:pointer;
                  color:var(--dim);font-weight:400;font-size:13px}
 .btn-mini{
-  border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--panel2) 96%,transparent);color:var(--txt);
-  padding:7px 12px;border-radius:10px;font:600 13px/1 var(--font-ui);cursor:pointer;
+  border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:var(--panel2);color:var(--txt);
+  padding:7px 12px;border-radius:9px;font:600 13px/1 var(--font-ui);cursor:pointer;
   letter-spacing:0;display:inline-flex;align-items:center;gap:5px;user-select:none;
   transition:background-color 160ms ease,border-color 160ms ease,color 160ms ease,box-shadow 160ms ease,transform 160ms ease;
   box-shadow:var(--shadow-sm);
@@ -491,7 +490,7 @@ body.bottom-all-collapsed{
 .btn-mini:active{transform:scale(.97)}
 .btn-mini:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
 .btn-mini.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700}
-.btn-mini.primary:hover{background:color-mix(in srgb, var(--blue) 88%, #1a1a1a);box-shadow:0 4px 18px var(--glow);transform:translateY(-1px)}
+.btn-mini.primary:hover{background:color-mix(in srgb, var(--blue) 90%, #0f172a);box-shadow:0 4px 14px var(--glow);transform:translateY(-1px)}
 .btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:var(--warn)}
 .btn-mini.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn);box-shadow:0 4px 14px rgba(255,123,114,.18)}
 .btn-mini.ghost{background:transparent;border-color:transparent;color:var(--dim);box-shadow:none}
@@ -520,7 +519,7 @@ body.bottom-all-collapsed #bottom-restore{display:inline-flex}
   transition:background-color 160ms ease,border-color 160ms ease,color 160ms ease,box-shadow 160ms ease,transform 160ms ease;
   box-shadow:var(--shadow-sm);
 }
-.icon-btn:hover{background:color-mix(in srgb, var(--blue) 10%, var(--panel2));color:var(--txt);border-color:var(--blue);transform:translateY(-1px);box-shadow:0 3px 8px rgba(37,99,235,.10)}
+.icon-btn:hover{background:color-mix(in srgb, var(--blue) 8%, var(--panel2));color:var(--txt);border-color:var(--blue);transform:translateY(-1px);box-shadow:0 2px 6px rgba(37,99,235,.08)}
 .icon-btn:active{transform:scale(.94)}
 .icon-btn.done{border-color:color-mix(in srgb, var(--green) 42%, var(--border));color:color-mix(in srgb, var(--green) 72%, white)}
 tbody tr.data-row{cursor:pointer}
@@ -536,9 +535,9 @@ tbody td.hl{
 .info-card{
   width:min(360px, calc(100vw - 24px));
   max-height:min(68vh, 560px);
-  border:1px solid color-mix(in srgb, var(--border) 92%, transparent);border-radius:18px;overflow:hidden;
-  background:color-mix(in srgb, var(--panel) 94%, rgba(255,255,255,.08));
-  box-shadow:0 10px 22px rgba(15,23,42,.10);
+  border:1px solid color-mix(in srgb, var(--border) 92%, transparent);border-radius:16px;overflow:hidden;
+  background:var(--panel);
+  box-shadow:0 12px 28px rgba(15,23,42,.10);
   display:flex;flex-direction:column;
   pointer-events:auto;
   animation:icloudFloatIn .32s cubic-bezier(.22,1,.36,1);
@@ -5529,18 +5528,18 @@ header.app-shell-header h1{
   box-shadow:var(--shadow-sm)
 }
 .main-more-menu{position:relative;display:inline-flex}
-.main-more-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;min-width:150px;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--panel);box-shadow:0 14px 28px rgba(0,0,0,.22);z-index:45}
+.main-more-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;min-width:170px;padding:8px;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 12px 28px rgba(15,23,42,.10);z-index:45}
 .main-more-menu.open .main-more-pop{display:grid;gap:6px}
 .main-more-pop .header-link-btn{width:100%;text-align:left;box-shadow:none}
 .app-tab-btn,.header-link-btn,.btn-mini,.icon-btn,.info-card-close{
   border:1px solid var(--border);
   background:var(--panel2);
   color:var(--txt);
-  border-radius:var(--radius);
+  border-radius:9px;
   font:600 14px/1 var(--font-ui);
   letter-spacing:0;
   cursor:pointer;
-  transition:all var(--transition);
+  transition:background-color 160ms ease,border-color 160ms ease,color 160ms ease,box-shadow 160ms ease,transform 160ms ease;
   box-shadow:var(--shadow-sm);
 }
 .app-tab-btn,.header-link-btn,.btn-mini{
@@ -5565,9 +5564,9 @@ header.app-shell-header h1{
 .app-tab-btn:active,.header-link-btn:active,.btn-mini:active,.icon-btn:active,.info-card-close:active{transform:scale(.97)}
 .app-tab-btn.active{
   border-color:var(--blue);
-  background:color-mix(in srgb, var(--blue) 14%, var(--panel2));
+  background:color-mix(in srgb, var(--blue) 10%, var(--panel2));
   color:var(--txt);
-  box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 26%, transparent)
+  box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent)
 }
 .btn-mini.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:var(--warn)}
 .btn-mini.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn);box-shadow:0 4px 14px rgba(255,123,114,.18)}
@@ -5593,11 +5592,11 @@ body.app-paged{grid-template-rows:auto minmax(0,1fr) auto}
 body[data-page="live"] .app-page[data-page="live"],
 body[data-page="history"] .app-page[data-page="history"]{display:block}
 .live-layout{display:grid;grid-template-columns:minmax(340px,30vw) minmax(0,1fr);gap:14px;height:100%;min-height:0}
-.live-card-panel{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--panel) 97%,white);border-radius:22px;box-shadow:0 4px 14px rgba(15,23,42,.06);display:flex;flex-direction:column;min-height:0;overflow:hidden}
-.live-card-head{padding:14px 16px;border-bottom:1px solid color-mix(in srgb,var(--border) 84%,transparent);font:700 14px/1 var(--font-ui);color:var(--txt);display:flex;justify-content:space-between;gap:10px;background:color-mix(in srgb,var(--panel2) 96%,white)}
+.live-card-panel{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:var(--panel);border-radius:18px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.live-card-head{padding:14px 16px;border-bottom:1px solid color-mix(in srgb,var(--border) 84%,transparent);font:700 14px/1 var(--font-ui);color:var(--txt);display:flex;justify-content:space-between;gap:10px;background:var(--panel2)}
 .live-card-list{padding:12px;display:grid;gap:10px;overflow:auto;min-height:0;align-content:start}
-.live-card{border:1px solid color-mix(in srgb,var(--border) 88%,transparent);background:color-mix(in srgb,var(--panel2) 96%,white);border-radius:18px;padding:14px;display:grid;gap:10px;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease,box-shadow 120ms ease}
-.live-card:hover{border-color:color-mix(in srgb,var(--blue) 22%,var(--border));box-shadow:0 5px 12px rgba(15,23,42,.06)}
+.live-card{border:1px solid color-mix(in srgb,var(--border) 88%,transparent);background:var(--panel2);border-radius:14px;padding:14px;display:grid;gap:10px;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease,box-shadow 120ms ease}
+.live-card:hover{border-color:color-mix(in srgb,var(--blue) 18%,var(--border));box-shadow:0 4px 10px rgba(15,23,42,.05)}
 .live-card.selected{border-color:color-mix(in srgb,var(--blue) 28%,var(--border));background:color-mix(in srgb, var(--blue) 8%, white);box-shadow:inset 3px 0 0 var(--blue)}
 .live-card.lost{opacity:.72}
 .live-card.alarm-zone{border-color:rgba(255,79,79,.78);background:color-mix(in srgb, #ff3b30 10%, var(--panel2));animation:alarmRowPulse .9s ease-in-out infinite alternate}
@@ -5614,7 +5613,7 @@ body[data-page="history"] .app-page[data-page="history"]{display:block}
 .live-card-snrow .label{font-size:11px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}
 .live-card-sntext{font:700 13px/1.25 var(--font-mono);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .live-card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-.live-card-item{border:1px solid color-mix(in srgb, var(--border) 84%, transparent);border-radius:14px;padding:9px 10px;background:color-mix(in srgb, var(--surface-tonal) 34%, white)}
+.live-card-item{border:1px solid color-mix(in srgb, var(--border) 84%, transparent);border-radius:12px;padding:9px 10px;background:color-mix(in srgb, var(--surface-tonal) 48%, white)}
 .live-card-item .k{font-size:11px;color:var(--dim);line-height:1;text-transform:uppercase;letter-spacing:.04em}
 .live-card-item .v{margin-top:6px;font:600 13px/1.35 var(--font-ui);word-break:break-word}
 .live-card-foot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--dim);font-size:12px}
@@ -5638,8 +5637,8 @@ body[data-page="history"] .app-page[data-page="history"]{display:block}
   z-index:1200;
   width:clamp(260px,25%,360px);
   border:1px solid color-mix(in srgb,var(--border) 88%,transparent);
-  border-radius:24px;
-  background:color-mix(in srgb, var(--panel) 96%, white);
+  border-radius:18px;
+  background:var(--panel);
   backdrop-filter:blur(12px);
   box-shadow:var(--shadow-lg);
   padding:16px;
@@ -5664,10 +5663,10 @@ body[data-page="history"] .app-page[data-page="history"]{display:block}
 .app-page[data-page="ops"] .bottom .panel .aplist{flex:1;min-height:0;max-height:none}
 #map-panel-toggle,#log-panel-toggle,#ap-panel-toggle,#bottom-restore{display:none!important}
 #map-panel .panel-hdr,#log-panel .panel-hdr,#ap-panel .panel-hdr{cursor:default!important}
-.app-page .panel{border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.08);animation:officeFade .16s ease-out both}
+.app-page .panel{border-radius:16px;box-shadow:var(--shadow-sm);animation:officeFade .16s ease-out both}
 .app-page .panel-hdr{font-size:13px;letter-spacing:.01em}
 .tbl-wrap,.app-page .panel,.map-mini-list{
-  border-radius:4px;
+  border-radius:16px;
 }
 .tbl-wrap{
   box-shadow:0 1px 3px rgba(0,0,0,.08);
@@ -6709,12 +6708,12 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
     )
     if not status_message:
         if passkey_enabled and (not has_passkey) and (not password_enabled) and (not sso_available):
-            status_message = "当前已启用 PassKey 登录，但尚未登记可用密钥。"
+            status_message = "已启用 PassKey 登录，但还没有登记可用密钥。"
         elif (not password_enabled) and (not has_passkey):
             if sso_available:
-                status_message = "当前仅允许通过 SSO URL 登录，请使用已生成的登录链接进入。"
+                status_message = "当前只允许通过 SSO URL 登录，请使用已生成的登录链接进入。"
             else:
-                status_message = "当前没有可用的网页登录方式，请返回设置检查登录方式配置。"
+                status_message = "现在没有可用的网页登录方式，请回到设置页检查登录方式。"
     status_class = "status err" if status_error else "status"
     status_html = '<div class="' + status_class + '" id="status">' + _html_escape(status_message, quote=False) + "</div>"
     method_labels: list[str] = []
@@ -6723,10 +6722,10 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
     if has_passkey:
         method_labels.append("PassKey")
     elif passkey_enabled:
-        method_labels.append("PassKey(待登记)")
+        method_labels.append("PassKey（待登记）")
     if sso_available:
-        method_labels.append("SSO URL(最高优先级)")
-    login_method_copy = ("可用方式: " + " / ".join(method_labels)) if method_labels else "当前没有可用的网页登录方式。"
+        method_labels.append("SSO URL（优先）")
+    login_method_copy = ("可用方式：" + " / ".join(method_labels)) if method_labels else "现在没有可用的网页登录方式。"
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -6758,7 +6757,7 @@ button:hover{{transform:translateY(-1px);filter:brightness(1.05)}}
 </style></head><body>
 <main class="card">
   <h1 class="brand">Light RID Scanner</h1>
-  <p class="desc">登录到在线监控平台。{_html_escape(login_method_copy, quote=False)}</p>
+  <p class="desc">登录监控平台。{_html_escape(login_method_copy, quote=False)}</p>
 {password_login_html}{passkey_login_html}
   {status_html}
 </main>
@@ -6929,7 +6928,7 @@ button:disabled{{opacity:.58;cursor:not-allowed}}
   </div>
   <article class="license" id="eula-scroll" tabindex="0" aria-label="许可协议正文">{eula_html}</article>
   <section class="accept">
-    <div class="read-state" id="read-state">请阅读 EULA，5 秒后才能勾选同意。</div>
+    <div class="read-state" id="read-state">请先阅读 EULA，5 秒后才能勾选同意。</div>
     <label class="check"><input id="agree" type="checkbox" disabled> <span>我已完整阅读并同意以上许可协议，确认继续使用本软件。</span></label>
     <div class="actions">
       <button class="warn" id="decline" type="button">不同意</button>
@@ -6955,7 +6954,7 @@ function updateReadState(){{
   if(!ready){{
     qs('agree').checked = false;
     qs('accept').disabled = true;
-    qs('read-state').textContent = '请阅读 EULA，' + Math.ceil(left / 1000) + ' 秒后才能勾选同意。';
+    qs('read-state').textContent = '请先阅读 EULA，' + Math.ceil(left / 1000) + ' 秒后才能勾选同意。';
   }}else{{
     qs('read-state').textContent = '已达到阅读等待时间，可以勾选同意。';
     qs('accept').disabled = !qs('agree').checked;
@@ -6969,7 +6968,7 @@ var readTimer = setInterval(function(){{
 }}, 250);
 setTimeout(updateReadState, 60);
 qs('agree').addEventListener('change', function(){{ updateReadState(); }});
-qs('decline').addEventListener('click', function(){{ setStatus('未同意许可协议，当前不会进入系统。', true); }});
+qs('decline').addEventListener('click', function(){{ setStatus('你还没有同意许可协议，当前不会进入系统。', true); }});
 qs('accept').addEventListener('click', async function(){{
   if(readWaitLeft() > 0){{ setStatus('请先阅读 EULA，等待时间结束后再继续。', true); return; }}
   if(!qs('agree').checked){{ setStatus('请先勾选同意许可协议。', true); return; }}
@@ -7024,7 +7023,7 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
 @media(max-width:720px){.wrap{width:calc(100vw - 10px);padding:10px 5px}.title{font-size:22px}pre{height:calc(100dvh - 230px);font-size:12px}}
 </style></head><body><div class="wrap">
   <div class="topbar">
-    <div><div class="title">日志</div><div class="meta">运行、操作、扫描与扫描差异。</div></div>
+    <div><div class="title">日志</div><div class="meta">查看运行、操作、扫描和扫描差异日志。</div></div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
       <button class="btn" id="btn-settings" type="button">设置</button>
@@ -7046,7 +7045,7 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
         <button class="btn" id="btn-export-all" type="button">导出全部</button>
       </div>
     </div>
-    <pre id="log-view">正在加载...</pre>
+    <pre id="log-view">正在读取日志...</pre>
     <div id="status" class="status">-</div>
   </div>
 </div>
@@ -7063,7 +7062,7 @@ function applyTheme(t){var light=t==='light'; document.body.classList.toggle('th
 var currentType='runtime';
 async function loadLogs(){
   var limit=Math.max(20, Math.min(5000, Number(qs('limit').value||500)));
-  qs('status').textContent='读取中...';
+  qs('status').textContent='正在读取...';
   var r=await fetch(apiUrl('/api/logs/view?type='+encodeURIComponent(currentType)+'&limit='+limit), {cache:'no-store', headers:pageHeaders()});
   var d=await r.json().catch(function(){return {}});
   if(authExpired(r,d)){redirectLogin();throw new Error('login required')}
@@ -8687,6 +8686,17 @@ def http_server_thread() -> None:
                 self._read_json_body()
                 rsp = _check_app_update_once(manual=True)
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/settings/app-update/start":
+                body = self._read_json_body()
+                if not bool(body.get("confirm")):
+                    self._send_json({"ok": False, "error": "confirm required", "state": _app_update_status_payload()}, 400)
+                    return
+                rsp = _start_app_update_install(manual=True, sudo_password=_sudo_password_from_body(body))
+                _op_log("app-update-start", str(rsp.get("error") or rsp.get("message") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                code = 200 if rsp.get("ok") else 500
+                if (not rsp.get("ok")) and ("root" in str(rsp.get("error") or "") or "sudo" in str(rsp.get("error") or "") or "权限" in str(rsp.get("error") or "")):
+                    code = 403
+                self._send_json(rsp, code)
             elif path == "/api/network-bindings/save":
                 body = self._read_json_body()
                 rsp = _network_bindings_save_payload(body)

@@ -1352,6 +1352,7 @@ def _state_snapshot() -> dict:
             "runtime_security": _runtime_security_payload(unit_text=""),
             "alert_zone": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zone"),
             "alert_zones": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zones"),
+            "app_update": _app_update_status_payload(consume_notice=True),
             "settings_path": "/settings",
         },
     }
@@ -1370,6 +1371,82 @@ def _load_build_info() -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+def _app_update_state_dir() -> str:
+    if str(platform.system() or "").lower() == "linux":
+        return os.path.join(RUNTIME_SERVICE_HOME, "app_update")
+    return os.path.join(tempfile.gettempdir(), "light_rid_app_update")
+
+def _app_update_lock_path() -> str:
+    return os.path.join(_app_update_state_dir(), "lock.json")
+
+def _app_update_notice_path() -> str:
+    return os.path.join(_app_update_state_dir(), "notice.json")
+
+def _app_update_current_path() -> str:
+    return os.path.join(_app_update_state_dir(), "current.json")
+
+def _app_update_stage_root() -> str:
+    return os.path.join(tempfile.gettempdir(), "light_rid_app_update_stage")
+
+def _app_update_ensure_dir(path: str) -> str:
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def _app_update_read_json(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _app_update_write_json(path: str, payload: dict) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        _app_update_ensure_dir(parent)
+    fd, tmp_path = tempfile.mkstemp(prefix="light-rid-update-", suffix=".json", dir=parent or None)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload if isinstance(payload, dict) else {}, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+def _app_update_remove_file(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+def _app_update_pop_notice() -> dict:
+    path = _app_update_notice_path()
+    data = _app_update_read_json(path)
+    if data:
+        _app_update_remove_file(path)
+    return data
+
+def _local_git_tag() -> str:
+    repo = _app_root_dir()
+    try:
+        proc = subprocess.run(
+            ["git", "describe", "--tags", "--exact-match", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if proc.returncode == 0:
+            return str((proc.stdout or "").strip())
+    except Exception:
+        pass
+    return ""
 
 def _local_git_commit() -> str:
     repo = _app_root_dir()
@@ -1397,6 +1474,16 @@ def _local_app_commit() -> str:
     if re.fullmatch(r"[0-9a-fA-F]{7,40}", commit or ""):
         return commit.lower()
     return ""
+
+def _local_app_tag() -> str:
+    tag = _local_git_tag()
+    if tag:
+        return tag
+    info = _load_build_info()
+    tag = str(info.get("release_tag") or info.get("tag") or "").strip()
+    if tag:
+        return tag
+    return str(_app_update_read_json(_app_update_current_path()).get("installed_tag") or "").strip()
 
 def _fallback_private_commit() -> str:
     try:
@@ -1427,19 +1514,195 @@ def _short_commit(commit: str) -> str:
     text = str(commit or "").strip()
     return text[:12] if text else ""
 
-def _app_update_status_payload() -> dict:
-    current = _local_app_commit() or _fallback_private_commit()
+def _app_update_target_arch() -> str:
+    machine = ""
+    try:
+        if hasattr(os, "uname"):
+            machine = str(os.uname().machine or "")
+    except Exception:
+        machine = ""
+    if not machine:
+        machine = str(platform.machine() or "")
+    aliases = {
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "i386": "x32",
+        "i686": "x32",
+        "x86": "x32",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "armv7l": "armv7",
+        "armv7": "armv7",
+        "armhf": "armv7",
+        "arm": "armv7",
+    }
+    return aliases.get(str(machine or "").strip().lower(), "")
+
+def _app_update_runtime_support() -> dict:
+    if str(platform.system() or "").lower() != "linux":
+        return {"supported": False, "reason": "自动更新仅支持 Linux systemd 部署。", "target_arch": "", "target_path": ""}
+    if not _command_path("systemctl"):
+        return {"supported": False, "reason": "未检测到 systemctl，无法自动更新 systemd 服务。", "target_arch": "", "target_path": ""}
+    target_arch = _app_update_target_arch()
+    if not target_arch:
+        return {"supported": False, "reason": "未识别当前系统架构，无法匹配 GitHub Release 资产。", "target_arch": "", "target_path": ""}
+    if not getattr(sys, "frozen", False):
+        return {"supported": False, "reason": "当前为源码/Python 运行模式；自动更新仅支持单文件发布版。", "target_arch": target_arch, "target_path": ""}
+    target_path = os.path.abspath(sys.executable or _runtime_entrypoint_path())
+    if not os.path.isfile(target_path):
+        return {"supported": False, "reason": "当前可执行文件路径无效，无法执行替换。", "target_arch": target_arch, "target_path": target_path}
+    return {"supported": True, "reason": "", "target_arch": target_arch, "target_path": target_path}
+
+def _fetch_latest_release(release_url: str) -> dict:
+    req = urllib.request.Request(
+        release_url,
+        headers={
+            "User-Agent": APP_HTTP_USER_AGENT + " (+release update)",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        data = json.loads(resp.read(1024 * 1024).decode("utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        raise RuntimeError("GitHub Release 响应无效")
+    assets = data.get("assets")
+    return {
+        "tag_name": str(data.get("tag_name") or "").strip(),
+        "name": str(data.get("name") or "").strip(),
+        "target_commitish": str(data.get("target_commitish") or "").strip(),
+        "html_url": str(data.get("html_url") or "").strip(),
+        "published_at": str(data.get("published_at") or "").strip(),
+        "assets": list(assets) if isinstance(assets, list) else [],
+    }
+
+def _pick_release_asset(assets: list[dict], target_arch: str) -> dict:
+    expected = [
+        f"light_rid_station-linux-{target_arch}",
+        f"light_rid_station-{target_arch}",
+    ]
+    normalized: list[dict] = []
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        url = str(item.get("browser_download_url") or item.get("url") or "").strip()
+        if not name or not url:
+            continue
+        normalized.append({
+            "name": name,
+            "url": url,
+            "size": int(item.get("size") or 0),
+            "content_type": str(item.get("content_type") or "").strip(),
+        })
+    for candidate in expected:
+        for item in normalized:
+            if item["name"] == candidate:
+                return item
+    for candidate in expected:
+        for item in normalized:
+            if item["name"].endswith(candidate):
+                return item
+    return {}
+
+def _app_update_download_asset(asset: dict, latest_tag: str) -> tuple[str, str]:
+    name = str((asset or {}).get("name") or "").strip()
+    url = str((asset or {}).get("url") or "").strip()
+    if not name or not url:
+        raise RuntimeError("未找到可下载的 Release 资产。")
+    stage_root = _app_update_ensure_dir(_app_update_stage_root())
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_tag = re.sub(r"[^0-9A-Za-z._-]+", "_", str(latest_tag or "latest"))[:40] or "latest"
+    stage_dir = tempfile.mkdtemp(prefix=f"{safe_tag}_{stamp}_", dir=stage_root)
+    download_path = os.path.join(stage_dir, name)
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp, open(download_path, "wb") as f:
+        shutil.copyfileobj(resp, f, length=1024 * 1024)
+    return stage_dir, download_path
+
+def _app_update_helper_command(plan_path: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [os.path.abspath(sys.executable or _runtime_entrypoint_path()), "--update-helper-plan", plan_path]
+    return [os.path.abspath(sys.executable or "python3"), os.path.abspath(_runtime_entrypoint_path()), "--update-helper-plan", plan_path]
+
+def _app_update_spawn_helper(plan_path: str, sudo_password: str | None = None) -> tuple[bool, str]:
+    helper_cmd = _app_update_helper_command(plan_path)
+    unit_name = f"light-rid-update-{os.getpid()}-{int(time.time())}"
+    systemd_run = _command_path("systemd-run")
+    if not systemd_run:
+        return False, "未检测到 systemd-run，无法创建独立更新进程。"
+    args = [
+        systemd_run,
+        f"--unit={unit_name}",
+        "--collect",
+        "--property=Type=simple",
+        "--same-dir",
+        *helper_cmd,
+    ]
+    ok, out, _rc = _run_privileged(args, timeout=20, sudo_password=sudo_password)
+    if not ok:
+        return False, out or "启动更新进程失败"
+    return True, unit_name
+
+def _app_update_lock_state(payload: dict) -> dict:
+    lock_path = _app_update_lock_path()
+    current = _app_update_read_json(lock_path)
+    merged = dict(current)
+    merged.update(payload if isinstance(payload, dict) else {})
+    merged["updated_at"] = time.time()
+    _app_update_write_json(lock_path, merged)
+    return merged
+
+def _app_update_write_notice(payload: dict) -> None:
+    notice = dict(payload if isinstance(payload, dict) else {})
+    notice["id"] = str(notice.get("id") or f"update-{int(time.time())}")
+    notice["ts"] = float(notice.get("ts") or time.time())
+    _app_update_write_json(_app_update_notice_path(), notice)
+
+def _app_update_status_payload(consume_notice: bool = False) -> dict:
+    current_commit = _local_app_commit() or _fallback_private_commit()
+    current_tag = _local_app_tag()
     with app_update_lock:
         cfg = dict(APP_UPDATE_CFG)
         state = dict(APP_UPDATE_STATE)
-    state["current_commit"] = current
-    state["current_short"] = _short_commit(current)
+    support = _app_update_runtime_support()
+    lock_state = _app_update_read_json(_app_update_lock_path())
+    if lock_state:
+        status = str(lock_state.get("status") or "")
+        state["installing"] = status not in ("", "completed", "failed")
+        state["install_status"] = status
+        state["asset_name"] = str(lock_state.get("asset_name") or state.get("asset_name") or "")
+        state["asset_url"] = str(lock_state.get("asset_url") or state.get("asset_url") or "")
+        state["latest_tag"] = str(lock_state.get("latest_tag") or state.get("latest_tag") or "")
+        state["latest_commit"] = str(lock_state.get("latest_commit") or state.get("latest_commit") or "")
+        state["last_error"] = str(lock_state.get("last_error") or state.get("last_error") or "")
+        state["install_message"] = str(lock_state.get("message") or "")
+        state["helper_pid"] = int(lock_state.get("helper_pid") or 0)
+        state["backup_path"] = str(lock_state.get("backup_path") or "")
+    else:
+        state["installing"] = False
+        state["install_status"] = ""
+        state["install_message"] = ""
+        state["helper_pid"] = 0
+        state["backup_path"] = ""
+    state["current_commit"] = current_commit
+    state["current_tag"] = current_tag
+    state["current_short"] = _short_commit(current_commit)
     state["latest_short"] = _short_commit(state.get("latest_commit") or "")
-    state["commit_url"] = str(cfg.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT)
+    state["release_url"] = str(cfg.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    state["install_supported"] = bool(support.get("supported"))
+    state["support_reason"] = str(support.get("reason") or "")
+    state["target_arch"] = str(support.get("target_arch") or state.get("target_arch") or "")
     state["checked"] = bool(state.get("last_check_ts"))
+    notice = _app_update_pop_notice() if consume_notice else {}
+    if notice:
+        state["completion_notice"] = notice
     return state
 
-def _check_app_update_once(manual: bool = False) -> dict:
+def _check_app_update_once(manual: bool = False, auto_apply: bool = False) -> dict:
     if not manual and not bool(APP_UPDATE_CFG.get("enabled", True)):
         return {"ok": True, "skipped": True, "state": _app_update_status_payload()}
     with app_update_lock:
@@ -1449,30 +1712,42 @@ def _check_app_update_once(manual: bool = False) -> dict:
             busy = False
             APP_UPDATE_STATE["running"] = True
             APP_UPDATE_STATE["last_error"] = ""
-            commit_url = str(APP_UPDATE_CFG.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT)
+            release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
     if busy:
         return {"ok": False, "error": "程序更新检查正在运行", "state": _app_update_status_payload()}
     try:
-        local_commit = _local_app_commit()
-        if not local_commit:
-            local_commit = _fallback_private_commit()
-        req = urllib.request.Request(
-            commit_url,
-            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+version check)"},
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read(256 * 1024).decode("utf-8", errors="replace"))
-        remote_commit = str((data if isinstance(data, dict) else {}).get("sha") or "").strip()
-        update_available = bool(remote_commit and local_commit and not remote_commit.startswith(local_commit) and not local_commit.startswith(remote_commit[:7]))
+        release = _fetch_latest_release(release_url)
+        latest_tag = str(release.get("tag_name") or "")
+        latest_commit = str(release.get("target_commitish") or "")
+        current_tag = _local_app_tag()
+        current_commit = _local_app_commit() or _fallback_private_commit()
+        support = _app_update_runtime_support()
+        asset = _pick_release_asset(release.get("assets") or [], str(support.get("target_arch") or ""))
+        update_available = bool(latest_tag and current_tag and latest_tag != current_tag)
         with app_update_lock:
             APP_UPDATE_STATE.update({
                 "running": False,
                 "last_check_ts": time.time(),
-                "latest_commit": remote_commit,
-                "current_commit": local_commit,
+                "latest_tag": latest_tag,
+                "latest_commit": latest_commit,
+                "current_tag": current_tag,
+                "current_commit": current_commit,
+                "target_arch": str(support.get("target_arch") or ""),
+                "asset_name": str(asset.get("name") or ""),
+                "asset_url": str(asset.get("url") or ""),
+                "install_supported": bool(support.get("supported")),
+                "support_reason": str(support.get("reason") or ""),
                 "update_available": update_available,
                 "last_error": "",
             })
+        if update_available:
+            _log(f"[INFO] 检测到程序更新: local_tag={current_tag} latest_tag={latest_tag}")
+        elif latest_tag:
+            _log(f"[INFO] 程序更新检查完成: current_tag={current_tag or '-'} latest_tag={latest_tag}")
+        rsp = {"ok": True, "manual": bool(manual), "state": _app_update_status_payload()}
+        if auto_apply and update_available and bool(support.get("supported")):
+            return _start_app_update_install(manual=False, sudo_password=None)
+        return rsp
         if update_available:
             _log(f"[INFO] 检测到程序更新: local={local_commit[:12]} remote={remote_commit[:12]}")
         elif remote_commit:
@@ -1483,14 +1758,202 @@ def _check_app_update_once(manual: bool = False) -> dict:
             APP_UPDATE_STATE.update({
                 "running": False,
                 "last_check_ts": time.time(),
+                "current_tag": _local_app_tag(),
                 "current_commit": _local_app_commit() or _fallback_private_commit(),
                 "last_error": str(e),
             })
         _log(f"[WARN] 程序更新检查失败: {e}")
         return {"ok": False, "error": str(e), "state": _app_update_status_payload()}
 
+def _start_app_update_install(*, manual: bool = False, sudo_password: str | None = None) -> dict:
+    check_rsp = _check_app_update_once(manual=manual, auto_apply=False)
+    if not check_rsp.get("ok"):
+        return check_rsp
+    state = dict(check_rsp.get("state") or {})
+    if bool(state.get("installing")):
+        return {"ok": False, "error": "更新进程已在运行。", "state": state}
+    if not bool(state.get("install_supported")):
+        return {"ok": False, "error": str(state.get("support_reason") or "当前运行模式不支持自动更新。"), "state": state}
+    if not bool(state.get("update_available")):
+        return {"ok": False, "error": "当前已是最新 Tag，或本地 Tag 无法比较。", "state": state}
+    release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    release = _fetch_latest_release(release_url)
+    asset = _pick_release_asset(release.get("assets") or [], str(state.get("target_arch") or ""))
+    if not asset:
+        return {"ok": False, "error": "最新 Release 中没有匹配当前架构的资产。", "state": _app_update_status_payload()}
+    stage_dir, download_path = _app_update_download_asset(asset, str(release.get("tag_name") or ""))
+    plan = {
+        "version": 1,
+        "requested_at": time.time(),
+        "requested_by": "manual" if manual else "auto",
+        "latest_tag": str(release.get("tag_name") or ""),
+        "latest_commit": str(release.get("target_commitish") or ""),
+        "current_tag": str(state.get("current_tag") or ""),
+        "current_commit": str(state.get("current_commit") or ""),
+        "target_arch": str(state.get("target_arch") or ""),
+        "target_path": str(_app_update_runtime_support().get("target_path") or ""),
+        "asset_name": str(asset.get("name") or ""),
+        "asset_url": str(asset.get("url") or ""),
+        "download_path": download_path,
+        "stage_dir": stage_dir,
+        "response_grace_sec": 2,
+    }
+    plan_path = os.path.join(stage_dir, "plan.json")
+    _app_update_write_json(plan_path, plan)
+    _app_update_lock_state({
+        "status": "scheduled",
+        "requested_at": plan["requested_at"],
+        "latest_tag": plan["latest_tag"],
+        "latest_commit": plan["latest_commit"],
+        "target_arch": plan["target_arch"],
+        "target_path": plan["target_path"],
+        "asset_name": plan["asset_name"],
+        "asset_url": plan["asset_url"],
+        "stage_dir": stage_dir,
+        "download_path": download_path,
+        "message": "更新进程已创建，等待接管 systemd 服务。",
+    })
+    ok, helper_ref = _app_update_spawn_helper(plan_path, sudo_password=sudo_password)
+    if not ok:
+        _app_update_lock_state({"status": "failed", "last_error": helper_ref, "message": helper_ref})
+        return {"ok": False, "error": helper_ref, "state": _app_update_status_payload()}
+    with app_update_lock:
+        APP_UPDATE_STATE["installing"] = True
+        APP_UPDATE_STATE["install_status"] = "scheduled"
+        APP_UPDATE_STATE["asset_name"] = str(asset.get("name") or "")
+        APP_UPDATE_STATE["asset_url"] = str(asset.get("url") or "")
+        APP_UPDATE_STATE["latest_tag"] = str(release.get("tag_name") or "")
+        APP_UPDATE_STATE["latest_commit"] = str(release.get("target_commitish") or "")
+    _op_log("app-update-start", f"tag={plan['latest_tag']} asset={plan['asset_name']} helper={helper_ref}", ok=True)
+    return {
+        "ok": True,
+        "message": "更新进程已启动，服务将短暂重启。",
+        "helper": helper_ref,
+        "restart_expected": True,
+        "state": _app_update_status_payload(),
+    }
+
 def start_app_update_check() -> None:
-    Thread(target=_check_app_update_once, daemon=True).start()
+    Thread(target=lambda: _check_app_update_once(auto_apply=True), daemon=True).start()
+
+def _app_update_mark_startup_ready() -> None:
+    lock = _app_update_read_json(_app_update_lock_path())
+    if not lock:
+        return
+    target_path = os.path.abspath(str(lock.get("target_path") or ""))
+    current_path = os.path.abspath(sys.executable or _runtime_entrypoint_path())
+    status = str(lock.get("status") or "")
+    if target_path and current_path != target_path:
+        return
+    if status not in ("scheduled", "installing", "starting", "waiting_start"):
+        return
+    _app_update_lock_state({
+        "status": "activated",
+        "activated_at": time.time(),
+        "current_pid": os.getpid(),
+        "message": "新版本已启动，等待更新进程收尾。",
+    })
+    _log("[INFO] 检测到更新锁，已标记新版本启动成功")
+
+def _run_app_update_helper(plan_path: str) -> int:
+    plan = _app_update_read_json(str(plan_path or ""))
+    if not plan:
+        print("update helper plan missing", file=sys.stderr)
+        return 2
+    lock_path = _app_update_lock_path()
+    stage_dir = str(plan.get("stage_dir") or "")
+    download_path = os.path.abspath(str(plan.get("download_path") or ""))
+    target_path = os.path.abspath(str(plan.get("target_path") or ""))
+    asset_name = str(plan.get("asset_name") or "")
+    latest_tag = str(plan.get("latest_tag") or "")
+    response_grace = max(1, int(plan.get("response_grace_sec") or 2))
+    backup_path = ""
+    try:
+        _app_update_lock_state({
+            "status": "installing",
+            "helper_pid": os.getpid(),
+            "asset_name": asset_name,
+            "asset_url": str(plan.get("asset_url") or ""),
+            "latest_tag": latest_tag,
+            "latest_commit": str(plan.get("latest_commit") or ""),
+            "target_arch": str(plan.get("target_arch") or ""),
+            "target_path": target_path,
+            "message": "更新进程已接管，准备停止服务。",
+        })
+        time.sleep(response_grace)
+        ok_stop, out_stop, rc_stop = _systemctl(["stop", SYSTEMD_SERVICE_NAME], timeout=40)
+        if not ok_stop:
+            raise RuntimeError(f"停止 systemd 服务失败: rc={rc_stop} {out_stop}")
+        _app_update_lock_state({"status": "installing", "message": "服务已停止，正在备份旧文件。"})
+        if not os.path.isfile(download_path):
+            raise RuntimeError("下载好的更新文件不存在。")
+        if not os.path.isfile(target_path):
+            raise RuntimeError("当前安装目标不存在，无法备份。")
+        backup_dir = os.path.join(os.path.dirname(target_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(
+            backup_dir,
+            os.path.basename(target_path) + ".bak_" + time.strftime("%Y%m%d_%H%M%S"),
+        )
+        shutil.copy2(target_path, backup_path)
+        staged_target = target_path + ".new"
+        shutil.copy2(download_path, staged_target)
+        os.chmod(staged_target, 0o755)
+        os.replace(staged_target, target_path)
+        try:
+            os.chmod(target_path, 0o755)
+        except Exception:
+            pass
+        _app_update_lock_state({
+            "status": "starting",
+            "backup_path": backup_path,
+            "message": "新文件已替换，正在启动 systemd 服务。",
+        })
+        ok_start, out_start, rc_start = _systemctl(["start", SYSTEMD_SERVICE_NAME], timeout=40)
+        if not ok_start:
+            raise RuntimeError(f"启动 systemd 服务失败: rc={rc_start} {out_start}")
+        deadline = time.time() + 120.0
+        while time.time() < deadline:
+            time.sleep(1.0)
+            lock = _app_update_read_json(lock_path)
+            status = str(lock.get("status") or "")
+            if status == "activated":
+                _app_update_write_json(_app_update_current_path(), {
+                    "installed_tag": latest_tag,
+                    "installed_commit": str(plan.get("latest_commit") or ""),
+                    "asset_name": asset_name,
+                    "target_arch": str(plan.get("target_arch") or ""),
+                    "target_path": target_path,
+                    "installed_at": time.time(),
+                    "backup_path": backup_path,
+                })
+                _app_update_write_notice({
+                    "kind": "ok",
+                    "title": "更新完成",
+                    "text": f"已升级到 {latest_tag or asset_name or '新版本'}。",
+                    "tag": latest_tag,
+                    "asset_name": asset_name,
+                    "backup_path": backup_path,
+                })
+                _app_update_remove_file(lock_path)
+                try:
+                    if stage_dir and os.path.isdir(stage_dir):
+                        shutil.rmtree(stage_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                return 0
+            if status == "failed":
+                raise RuntimeError(str(lock.get("last_error") or "更新流程失败"))
+        raise RuntimeError("新版本启动确认超时，更新进程未收到启动握手。")
+    except Exception as e:
+        _app_update_lock_state({
+            "status": "failed",
+            "backup_path": backup_path,
+            "last_error": str(e),
+            "message": str(e),
+        })
+        print(str(e), file=sys.stderr)
+        return 1
 
 def _api_meta() -> dict:
     auth_configured = _auth_hashes_present(AUTH_CFG)

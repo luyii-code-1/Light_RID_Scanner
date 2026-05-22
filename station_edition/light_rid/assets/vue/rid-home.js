@@ -7209,6 +7209,21 @@ Expected function or array of functions, received type ${typeof value}.`
     appState.liveRows = normalized;
     updateLiveCount(normalized);
   }
+  function consumeAppUpdateNotice(payload) {
+    const meta = payload && payload.meta ? payload.meta : {};
+    const updateState = meta && meta.app_update ? meta.app_update : {};
+    const notice = updateState && updateState.completion_notice ? updateState.completion_notice : null;
+    if (!notice || !notice.text) {
+      return;
+    }
+    const noticeId = String(notice.id || notice.tag || notice.text);
+    if (window.__RID_LAST_APP_UPDATE_NOTICE__ === noticeId) {
+      return;
+    }
+    window.__RID_LAST_APP_UPDATE_NOTICE__ = noticeId;
+    fn("showToast", () => {
+    })(String(notice.text), "success", 5e3);
+  }
   function afterTableRender(rows) {
     const list = normalizeRows(rows);
     nextTick(() => {
@@ -7764,6 +7779,7 @@ Expected function or array of functions, received type ${typeof value}.`
     if (legacyFns.onData) {
       window.onData = function onDataBridge(payload) {
         appState.loading = !!(payload && payload.meta && payload.meta.viewer_loading);
+        consumeAppUpdateNotice(payload);
         return legacyFns.onData(payload);
       };
     }

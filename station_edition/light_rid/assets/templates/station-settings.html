@@ -7,40 +7,40 @@
 :root{
   --font-ui:"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei UI","Segoe UI Variable Text","Segoe UI",sans-serif;
   --font-mono:"SFMono-Regular","Cascadia Mono","Consolas",monospace;
-  --bg:#f5f9ff;--bg2:#e5eefb;--card:rgba(255,255,255,.82);--card2:rgba(246,250,255,.92);--border:rgba(137,164,206,.28);--txt:#16324f;
-  --muted:#8094ad;--blue:#1677ff;--green:#1f9d68;--warn:#d95050;--glow:rgba(22,119,255,.14);--soft:rgba(255,255,255,.64);--app-vh:100dvh;
-  --radius:10px;--radius-lg:16px;--shadow-sm:0 2px 10px rgba(44,90,148,.06);--shadow:0 10px 28px rgba(44,90,148,.08);--shadow-lg:0 18px 40px rgba(44,90,148,.10);--transition:0.28s cubic-bezier(.22,1,.36,1)
+  --bg:#f3f5f8;--bg2:#e8edf3;--card:rgba(255,255,255,.98);--card2:#f7f9fc;--border:rgba(15,23,42,.09);--txt:#162033;
+  --muted:#7c889a;--blue:#2f6fed;--green:#1f9d68;--warn:#d95050;--glow:rgba(47,111,237,.12);--soft:rgba(255,255,255,.86);--app-vh:100dvh;
+  --surface-tonal:#eef4fb;--app-radius-sm:8px;--radius:10px;--radius-lg:16px;--radius-xl:18px;--shadow-sm:0 1px 2px rgba(15,23,42,.04);--shadow:0 8px 18px rgba(15,23,42,.06);--shadow-lg:0 14px 30px rgba(15,23,42,.10);--transition:0.2s ease
 }
 body.theme-light{
-  --bg:#f5f9ff;--bg2:#e5eefb;--card:rgba(255,255,255,.84);--card2:rgba(246,250,255,.94);--border:rgba(137,164,206,.28);--txt:#16324f;
-  --muted:#8094ad;--blue:#1677ff;--green:#1f9d68;--warn:#d95050;--glow:rgba(22,119,255,.14);--soft:rgba(255,255,255,.64)
+  --bg:#f3f5f8;--bg2:#e8edf3;--card:rgba(255,255,255,.98);--card2:#f7f9fc;--border:rgba(15,23,42,.09);--txt:#162033;
+  --muted:#7c889a;--blue:#2f6fed;--green:#1f9d68;--warn:#d95050;--glow:rgba(47,111,237,.12);--soft:rgba(255,255,255,.86);--surface-tonal:#eef4fb
 }
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
 body{min-height:var(--app-vh);background:
-  radial-gradient(circle at top left, rgba(255,255,255,.94), rgba(255,255,255,0) 28%),
-  radial-gradient(circle at top right, rgba(95,172,255,.14), rgba(95,172,255,0) 24%),
+  radial-gradient(circle at top left, rgba(255,255,255,.92), rgba(255,255,255,0) 28%),
+  radial-gradient(circle at top right, rgba(47,111,237,.08), rgba(47,111,237,0) 24%),
   linear-gradient(180deg,var(--bg),var(--bg2) 30%,var(--bg))}
 .wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
-.settings-sticky-head{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,color-mix(in srgb,var(--bg) 96%,white),color-mix(in srgb,var(--bg) 86%,transparent));padding-top:clamp(8px,1.2vw,14px);padding-bottom:4px;backdrop-filter:blur(10px)}
+.settings-sticky-head{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,color-mix(in srgb,var(--bg) 97%,white),color-mix(in srgb,var(--bg) 90%,transparent));padding-top:clamp(8px,1.2vw,14px);padding-bottom:4px}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
 .title{font:600 32px/1 var(--font-ui);letter-spacing:.01em}
 .sub{color:var(--muted);margin-top:5px;max-width:780px;line-height:1.45}
 .actions{display:flex;gap:10px;flex-wrap:wrap}
 .btn[disabled]{opacity:.5;cursor:not-allowed;transform:none!important;box-shadow:none!important}
-.btn{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);color:var(--txt);padding:10px 15px;border-radius:12px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;transition:all var(--transition);box-shadow:var(--shadow-sm);display:inline-flex;align-items:center;gap:6px;user-select:none;backdrop-filter:blur(8px)}
-.btn:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 8%, var(--card2));box-shadow:0 6px 16px var(--glow)}
+.btn{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:var(--card2);color:var(--txt);padding:10px 15px;border-radius:10px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;transition:background-color var(--transition),border-color var(--transition),color var(--transition),box-shadow var(--transition),transform var(--transition);box-shadow:var(--shadow-sm);display:inline-flex;align-items:center;gap:6px;user-select:none}
+.btn:hover{transform:translateY(-1px);border-color:color-mix(in srgb,var(--blue) 42%,var(--border));background:color-mix(in srgb, var(--blue) 6%, var(--card2));box-shadow:0 8px 16px rgba(15,23,42,.06)}
 .btn:active{transform:scale(.97)}
 .btn.warn{border-color:color-mix(in srgb, var(--warn) 45%, var(--border));color:var(--warn)}
 .btn.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn);box-shadow:0 4px 14px rgba(255,123,114,.16)}
 .btn.ghost{background:transparent;border-color:transparent;color:var(--muted);box-shadow:none}
 .btn.ghost:hover{background:var(--card2);color:var(--txt);border-color:var(--border);box-shadow:var(--shadow-sm)}
-.draft-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 auto 12px;padding:12px 18px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;background:color-mix(in srgb,var(--card) 95%,transparent);box-shadow:var(--shadow-sm);transition:all var(--transition);backdrop-filter:blur(10px)}
+.draft-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 auto 12px;padding:12px 18px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;background:var(--card);box-shadow:var(--shadow-sm);transition:background-color var(--transition),border-color var(--transition),box-shadow var(--transition)}
 .draft-copy{display:grid;gap:4px}
 .draft-title{font:600 15px/1.2 var(--font-ui)}
 .draft-meta{font-size:12px;color:var(--muted);line-height:1.5}
 .draft-actions{display:flex;gap:10px;flex-wrap:wrap}
-.tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:4px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);border-radius:14px;margin:0 auto 12px;width:min(680px,100%);box-shadow:var(--shadow-sm);backdrop-filter:blur(10px)}
-.tab{border:1px solid transparent;background:transparent;color:var(--txt);padding:12px 16px;border-radius:10px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;text-align:center;transition:all var(--transition)}
+.tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:4px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:var(--card2);border-radius:14px;margin:0 auto 12px;width:min(680px,100%);box-shadow:var(--shadow-sm)}
+.tab{border:1px solid transparent;background:transparent;color:var(--txt);padding:12px 16px;border-radius:10px;cursor:pointer;font:600 14px/1 var(--font-ui);letter-spacing:0;text-align:center;transition:background-color var(--transition),border-color var(--transition),color var(--transition),transform var(--transition)}
 .tab:hover{transform:translateY(-1px);border-color:var(--blue);background:color-mix(in srgb, var(--blue) 6%, var(--card2));box-shadow:none}
 .tab:active{transform:scale(.97)}
 .tab.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 12%, var(--card2));box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--blue) 18%, transparent)}
@@ -52,7 +52,7 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .panel{display:none}.panel.active{display:block}
 .raw-layout{display:grid;grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr);gap:12px;min-width:0}
 .raw-pane{min-width:0;display:grid;gap:10px;align-content:start}
-.raw-tree{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);border-radius:12px;min-height:460px;max-height:min(72dvh,840px);overflow:auto;padding:10px;backdrop-filter:blur(8px)}
+.raw-tree{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:var(--card2);border-radius:12px;min-height:460px;max-height:min(72dvh,840px);overflow:auto;padding:10px}
 .raw-tree .empty-state{margin:0}
 .raw-tree details{margin:0 0 4px 0;padding-left:0}
 .raw-tree summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:4px}
@@ -63,7 +63,7 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .raw-tree .raw-file-btn.active{border-color:var(--blue);background:color-mix(in srgb, var(--blue) 14%, var(--card2))}
 .raw-tree .raw-dir-child{padding-left:14px;border-left:1px solid var(--border);margin:2px 0 6px 10px}
 .raw-main{display:grid;gap:10px;min-width:0}
-.raw-meta{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;padding:12px 14px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;background:color-mix(in srgb,var(--card2) 96%,transparent);backdrop-filter:blur(8px)}
+.raw-meta{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;padding:12px 14px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;background:var(--card2)}
 .raw-meta .meta-copy{display:grid;gap:4px;min-width:0}
 .raw-meta .meta-title{font:600 15px/1.2 var(--font-ui)}
 .raw-meta .meta-sub{font-size:12px;color:var(--muted);line-height:1.5;word-break:break-word}
@@ -78,12 +78,12 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .passkey-title{font:600 14px/1.2 var(--font-ui)}
 .passkey-sub{font-size:12px;color:var(--muted);line-height:1.4;word-break:break-word}
 .passkey-badges{display:flex;gap:6px;flex-wrap:wrap}
-.passkey-badge{font-size:11px;line-height:1;padding:4px 7px;border:1px solid var(--border);border-radius:999px;background:var(--card)}
+.passkey-badge{font-size:11px;line-height:1;padding:4px 7px;border:1px solid var(--border);border-radius:8px;background:var(--card)}
 .visual-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(360px,.88fr);gap:12px}
 .stack{display:grid;gap:12px;min-width:0;align-content:start}
 .stack-label{font:700 12px/1 var(--font-ui);letter-spacing:0;color:var(--muted);padding:2px 2px 0}
-.card{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:color-mix(in srgb,var(--card) 95%,transparent);padding:18px;box-shadow:var(--shadow-sm);min-width:0;overflow:hidden;animation:icloudCardIn .24s cubic-bezier(.22,1,.36,1) both;transition:border-color var(--transition),box-shadow var(--transition),transform var(--transition),background-color var(--transition);backdrop-filter:blur(10px)}
-.card:hover{box-shadow:0 8px 20px rgba(44,90,148,.08);transform:translateY(-1px)}
+.card{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:var(--card);padding:18px;box-shadow:var(--shadow-sm);min-width:0;overflow:hidden;animation:icloudCardIn .24s cubic-bezier(.22,1,.36,1) both;transition:border-color var(--transition),box-shadow var(--transition),transform var(--transition),background-color var(--transition)}
+.card:hover{box-shadow:0 10px 22px rgba(15,23,42,.07);transform:translateY(-1px)}
 .card.dirty{border-color:var(--blue);box-shadow:0 0 0 1px color-mix(in srgb, var(--blue) 22%, transparent),0 8px 18px var(--glow)}
 .card.dirty h2{color:var(--blue)}
 .card h2{margin:0;font:600 18px/1 var(--font-ui);letter-spacing:.01em}
@@ -98,7 +98,7 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .field{display:grid;gap:6px}
 .field.full{grid-column:1/-1}
 .field label{font:600 12px/1.15 var(--font-ui);letter-spacing:.01em;color:var(--muted)}
-.field input,.field select,.field textarea{width:100%;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:color-mix(in srgb,var(--card2) 96%,transparent);color:var(--txt);border-radius:10px;padding:11px 13px;font:600 14px/1.35 var(--font-ui);transition:all var(--transition);backdrop-filter:blur(6px)}
+.field input,.field select,.field textarea{width:100%;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);background:var(--card2);color:var(--txt);border-radius:10px;padding:11px 13px;font:600 14px/1.35 var(--font-ui);transition:border-color var(--transition),box-shadow var(--transition),background-color var(--transition)}
 .field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 4px color-mix(in srgb, var(--blue) 18%, transparent)}
 .field input[type="checkbox"],input[type="checkbox"]{width:16px;height:16px;min-width:16px;flex:0 0 auto;padding:0;margin:0;accent-color:var(--blue)}
 .field input:not([type="checkbox"]),.field select,.token-actions input{height:42px}
@@ -132,10 +132,10 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .micro{margin-top:6px}
 .list-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 .list-wrap{display:grid;gap:8px}
-.list-row{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;padding:12px;background:color-mix(in srgb,var(--card2) 96%,transparent);backdrop-filter:blur(6px)}
+.list-row{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;padding:12px;background:var(--card2)}
 .access-group{display:grid;gap:12px}
 .access-subgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.access-subcard{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;background:color-mix(in srgb,var(--card2) 96%,transparent);padding:14px;display:grid;gap:12px;min-width:0;backdrop-filter:blur(8px)}
+.access-subcard{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;background:var(--card2);padding:14px;display:grid;gap:12px;min-width:0}
 .access-subcard.full{grid-column:1/-1}
 .access-subhead{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
 .access-subcard.collapsible>.access-subhead{cursor:pointer;user-select:none}
@@ -206,7 +206,7 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .settings-ap-row-grid{display:grid;grid-template-columns:46px minmax(120px,.9fr) minmax(0,1.2fr) 86px;gap:10px;align-items:center;min-width:0}
 .settings-ap-row-grid>*{min-width:0}
 .settings-ap-row-grid .clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-details.advanced{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;padding:14px;background:color-mix(in srgb,var(--card2) 96%,transparent);backdrop-filter:blur(8px)}
+details.advanced{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:14px;padding:14px;background:var(--card2)}
 details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-spacing:.01em}
 .network-bind-module{margin-top:16px}
 .network-bind-module[open]{box-shadow:var(--shadow-sm)}
@@ -219,25 +219,25 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 .network-bind-module .network-bind-copy{font-size:12px;line-height:1.55;color:var(--muted)}
 .network-bind-module .network-bind-body{display:grid;gap:12px;margin-top:14px}
 .split-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
-.modal-mask{position:fixed;inset:0;background:rgba(4,8,14,.28);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
+.modal-mask{position:fixed;inset:0;background:rgba(9,15,24,.24);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
 .modal-mask.show{display:flex}
-.modal-card{width:min(480px,100%);border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:color-mix(in srgb,var(--card) 96%,transparent);padding:20px;box-shadow:var(--shadow);backdrop-filter:blur(10px)}
+.modal-card{width:min(480px,100%);border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:var(--card);padding:20px;box-shadow:var(--shadow)}
 .modal-card.wide{width:min(900px,100%)}
 .modal-card h3{margin:0 0 10px;font:600 20px/1 var(--font-ui)}
 .one-time-secret{font:600 12px/1.55 var(--font-mono);word-break:break-all;border:1px solid var(--border);background:var(--card2);border-radius:4px;padding:12px;margin-top:12px;max-height:160px;overflow:auto}
 .toast-stack{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:72;width:min(420px,calc(100vw - 28px));pointer-events:none}
-.toast{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;background:color-mix(in srgb, var(--card) 97%, transparent);padding:13px 15px;box-shadow:var(--shadow-sm);opacity:0;transform:translateY(8px);transition:opacity .22s ease,transform .22s ease,border-color .22s ease;background-clip:padding-box;pointer-events:auto;backdrop-filter:blur(8px)}
+.toast{border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:12px;background:var(--card);padding:13px 15px;box-shadow:var(--shadow-sm);opacity:0;transform:translateY(8px);transition:opacity .22s ease,transform .22s ease,border-color .22s ease;background-clip:padding-box;pointer-events:auto}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast.ok{border-color:color-mix(in srgb, var(--green) 38%, var(--border))}
 .toast.warn{border-color:color-mix(in srgb, var(--warn) 42%, var(--border))}
 .toast-title{font:600 14px/1.2 var(--font-ui);margin-bottom:5px}
 .toast-text{font-size:13px;line-height:1.5;color:var(--muted);white-space:pre-wrap}
-.rid-loading-overlay{position:fixed;inset:0;z-index:88;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(9,15,24,.38);backdrop-filter:blur(12px);pointer-events:auto}
+.rid-loading-overlay{position:fixed;inset:0;z-index:88;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(9,15,24,.26);pointer-events:auto}
 .rid-loading-overlay.show{display:flex}
 .rid-loading-shell{width:min(460px,calc(100vw - 32px))}
-.rid-loading-box{display:grid;gap:16px;padding:22px 22px 18px;border-radius:16px;border:1px solid color-mix(in srgb,var(--border) 96%,rgba(255,255,255,.42));background:linear-gradient(180deg,color-mix(in srgb,var(--card2) 92%,rgba(255,255,255,.38)),color-mix(in srgb,var(--card) 96%,rgba(255,255,255,.18)));box-shadow:0 18px 40px rgba(19,42,71,.12);backdrop-filter:blur(14px)}
+.rid-loading-box{display:grid;gap:16px;padding:22px 22px 18px;border-radius:16px;border:1px solid color-mix(in srgb,var(--border) 96%,rgba(255,255,255,.42));background:var(--card);box-shadow:0 18px 40px rgba(15,23,42,.12)}
 .rid-loading-head{display:grid;grid-template-columns:48px minmax(0,1fr);gap:14px;align-items:center}
-.rid-loading-spinner{position:relative;width:48px;height:48px;border-radius:14px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--border));background:linear-gradient(180deg,rgba(255,255,255,.46),rgba(255,255,255,.16));display:grid;place-items:center}
+.rid-loading-spinner{position:relative;width:48px;height:48px;border-radius:12px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--border));background:var(--surface-tonal);display:grid;place-items:center}
 .rid-loading-spinner::before{content:"";width:22px;height:22px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 14%,var(--border));border-top-color:var(--blue);animation:ridSettingsLoadingSpin .9s linear infinite}
 .rid-loading-copy-wrap{display:grid;gap:6px}
 .rid-loading-title{font:700 18px/1.14 var(--font-ui);color:var(--txt);letter-spacing:.01em}
@@ -247,8 +247,8 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 .rid-loading-meta-label{color:var(--muted)}
 .rid-loading-meta-value{color:var(--txt);text-align:left;word-break:break-word}
 body.rid-loading-active{overflow:hidden}
-body.theme-light .rid-loading-overlay{background:rgba(236,242,250,.58)}
-body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255,255,.94),rgba(245,249,255,.90));box-shadow:0 18px 36px rgba(35,53,79,.10)}
+body.theme-light .rid-loading-overlay{background:rgba(236,242,250,.52)}
+body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px rgba(15,23,42,.10)}
 @keyframes ridSettingsLoadingSpin{to{transform:rotate(360deg)}}
 @keyframes icloudCardIn{from{opacity:0;transform:translateY(16px) scale(.985)}to{opacity:1;transform:none}}
 @media (max-width:1360px){
@@ -273,7 +273,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
   <div class="topbar">
     <div>
       <div class="title">设置</div>
-      <div class="sub">常用运行项在配置面板；文件级修改放在原始配置。</div>
+      <div class="sub">常用设置都在这里，文件级修改放到“原始配置”。</div>
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
@@ -285,8 +285,8 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
   </div>
   <div class="draft-bar">
     <div class="draft-copy">
-      <div class="draft-title" id="draft-title">当前没有未保存修改</div>
-      <div class="draft-meta" id="draft-meta">修改会先进入草稿；保存前可测试，或直接写入配置。</div>
+      <div class="draft-title" id="draft-title">当前没有未保存的改动</div>
+      <div class="draft-meta" id="draft-meta">改动会先留在草稿里。可以先测试，也可以直接保存。</div>
     </div>
     <div class="draft-actions">
       <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
@@ -314,11 +314,11 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>采集</h2>
-              <div class="section-copy">设置采集网卡、信道、离线判定和机型识别库。</div>
+              <div class="section-copy">配置采集网卡、信道、离线判定和机型识别库。</div>
             </div>
           </div>
           <div class="grid" style="margin-top:14px">
-            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">未绑定</option></select><div class="micro">固定采集网卡仍在这里设置；多用途网卡绑定已移到下方独立模块。</div></div>
+            <div class="field"><label>默认网卡</label><select id="cfg-iface"><option value="">未绑定</option></select><div class="micro">固定采集网卡仍在这里设置。多用途网卡绑定已移到下方独立模块。</div></div>
             <div class="field">
               <label>固定信道</label>
               <div class="field-inline">
@@ -348,7 +348,10 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
               <div class="model-update-row" style="margin-top:10px">
                 <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
                 <div class="micro" id="app-update-state">当前版本与最新版本尚未检查。</div>
-                <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
+                <div class="row-actions">
+                  <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
+                  <button class="btn" id="btn-app-update-start" type="button">立即自动更新</button>
+                </div>
               </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
@@ -401,7 +404,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>地图与基站</h2>
-              <div class="section-copy">控制地图中心、基站坐标、默认缩放和航向参考。</div>
+              <div class="section-copy">设置地图中心、基站坐标、默认缩放和航向参考。</div>
             </div>
           </div>
           <div class="grid">
@@ -436,7 +439,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>通知与访问控制</h2>
-              <div class="section-copy">管理通知、登录方式、API Token 和访问来源规则。</div>
+              <div class="section-copy">管理通知、登录方式、API Token 和访问来源限制。</div>
             </div>
           </div>
           <div class="access-subgrid">
@@ -478,7 +481,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
                 <label><input id="cfg-auth-method-password" type="checkbox"> 账号密码登录</label>
                 <label><input id="cfg-auth-method-passkey" type="checkbox"> PassKey 登录</label>
               </div>
-              <div class="micro" id="auth-method-state">至少保留一种网页登录方式；关闭账号密码直接登录后，账号密码仍用于设置页二次确认。</div>
+              <div class="micro" id="auth-method-state">至少保留一种网页登录方式。关闭账号密码直登后，账号密码仍用于设置页二次确认。</div>
             </div>
             <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
@@ -493,14 +496,14 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
               <div class="row-actions">
                 <button class="btn" id="btn-passkey-add" type="button">验证并添加</button>
               </div>
-              <div class="micro" id="passkey-state">完成网页登录账号和密码配置后，可在这里添加通行密钥。</div>
+              <div class="micro" id="passkey-state">先配好网页登录账号和密码，再来这里添加通行密钥。</div>
               <div id="passkey-list" class="passkey-list"></div>
             </div>
             <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">SSO 登录链接</div>
-                  <div class="access-subcopy">SSO 不作为可关闭的登录方式；只要存在有效链接，它就是最高优先级验证入口。</div>
+                  <div class="access-subcopy">SSO 不是单独开关。只要存在有效链接，它就会优先用于登录。</div>
                 </div>
               </div>
               <div class="token-actions">
@@ -518,7 +521,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
                 <div class="field hidden" id="login-link-custom-field"><label>自定义有效期(min)</label><input id="login-link-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
                 <label class="sso-single-use"><input id="login-link-single-use" type="checkbox"> 单次登录</label>
               </div>
-              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制；命中有效 SSO 链接时优先于其它网页登录方式。</div>
+              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制。命中有效链接时，会优先于其他网页登录方式。</div>
               <div id="login-link-list" class="list-wrap sso-link-list"></div>
             </div>
             <div class="access-subcard full collapsible collapsed">
@@ -572,7 +575,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
                 <div class="field"><label>模式</label><select id="cfg-web-access-mode"><option value="allow">白名单</option><option value="deny">黑名单</option></select></div>
                 <div class="checks"><label><input id="cfg-web-access-enabled" type="checkbox"> 启用网页访问规则</label></div>
               </div>
-              <div class="field full"><label>地址列表</label><textarea id="cfg-web-access-list" spellcheck="false" style="min-height:120px"></textarea><div class="micro">每行一个 IP 或 CIDR；拒绝时页面返回 403。</div></div>
+              <div class="field full"><label>地址列表</label><textarea id="cfg-web-access-list" spellcheck="false" style="min-height:120px"></textarea><div class="micro">每行一个 IP 或 CIDR。命中拒绝规则时，页面会返回 403。</div></div>
             </div>
           </div>
           <div class="secret-note" id="secret-state">通知、登录、Token 和外部 API 状态摘要。</div>
@@ -585,7 +588,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>主机状态</h2>
-              <div class="section-copy">查看主机负载、网络地址和当前采集状态。</div>
+              <div class="section-copy">查看主机负载、网络地址和当前采集情况。</div>
             </div>
             <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
           </div>
@@ -600,7 +603,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>权限与 systemd 服务</h2>
-              <div class="section-copy">检查运行权限；需要修复时再写入 systemd 配置。</div>
+              <div class="section-copy">检查当前运行权限；需要修复时再写入 systemd 配置。</div>
             </div>
           </div>
           <div id="runtime-security-alert" class="security-alert">
@@ -615,7 +618,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
             <button class="btn" id="btn-service-register" type="button">注册/更新服务</button>
             <button class="btn" id="btn-iw-install" type="button">安装无线工具</button>
           </div>
-          <div class="micro" style="margin-top:10px">修复会创建运行账号、整理文件权限，并授予采集与热点所需能力；sudo 密码只用于本次操作。</div>
+          <div class="micro" style="margin-top:10px">修复会创建运行账号、整理文件权限，并补齐采集和热点所需能力。sudo 密码只用于本次操作。</div>
           <div id="status-system-service" class="status">正在读取服务状态...</div>
         </div>
         <div class="card" data-card-key="metrics">
@@ -644,7 +647,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
                 <option value="w1">仅 DS18B20 / w1</option>
                 <option value="off">关闭温度采集</option>
               </select>
-              <div class="micro">节点温度会写入主机状态和温度曲线；关闭后显示为空值。</div>
+              <div class="micro">节点温度会写入主机状态和温度曲线。关闭后显示为空值。</div>
             </div>
           </div>
           <div class="metric-list" id="metrics-list">
@@ -661,7 +664,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>设置与扫描数据</h2>
-              <div class="section-copy">分别导入导出配置与扫描数据，避免两类文件混用。</div>
+              <div class="section-copy">配置和扫描数据分开导入导出，避免混用。</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -684,7 +687,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="section-head">
             <div>
               <h2>许可协议</h2>
-              <div class="section-copy">查看或撤回 EULA 确认；撤回后会重新要求确认。</div>
+              <div class="section-copy">查看或撤回 EULA 确认；撤回后需要重新同意。</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -703,7 +706,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
           <div class="checks pref-checks" style="margin-top:14px">
             <label><input id="pref-new-firmware-parser" type="checkbox"> 显示 RID 包解析结果</label>
           </div>
-          <div class="micro">只控制当前浏览器显示；后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
+          <div class="micro">只影响当前浏览器的显示。后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
         </div>
         <div class="card settings-collapsible collapsed" id="settings-runtime">
           <div class="section-head">
@@ -725,7 +728,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
       <div class="raw-toolbar">
         <div>
           <h2>原始配置</h2>
-          <div class="section-copy">浏览配置目录树、切换文件、编辑保存和删除配置文件。进入前需要先验证网页登录密码。</div>
+          <div class="section-copy">按目录浏览配置文件，支持切换、编辑、保存和删除。进入前需要先验证网页登录密码。</div>
         </div>
         <div class="row-actions">
           <button class="btn" id="btn-load-raw" type="button">刷新目录</button>
@@ -772,7 +775,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
     <h3>再次验证</h3>
-    <div class="section-copy">二次验证保护 Token 显示、复制、PassKey 添加和原始配置解锁。</div>
+    <div class="section-copy">敏感操作需要再次验证，包括查看/复制 Token、添加 PassKey 和解锁原始配置。</div>
     <div class="grid" style="margin-top:14px">
       <div class="field full"><label>账号</label><input id="reauth-user" type="text" autocomplete="username"></div>
       <div class="field full"><label>密码</label><input id="reauth-pass" type="password" autocomplete="current-password"></div>
@@ -812,7 +815,7 @@ body.theme-light .rid-loading-box{background:linear-gradient(180deg,rgba(255,255
 <div class="modal-mask" id="model-map-modal">
   <div class="modal-card wide">
     <h3>识别库编辑</h3>
-    <div class="section-copy">编辑本地 rid-models.json 条目，保存后立即刷新实时和历史机型。</div>
+    <div class="section-copy">编辑本地 rid-models.json 条目，保存后会立即刷新实时和历史中的机型识别。</div>
     <div class="model-editor">
       <div class="model-editor-toolbar">
         <input id="model-map-search" type="text" placeholder="前缀或机型">

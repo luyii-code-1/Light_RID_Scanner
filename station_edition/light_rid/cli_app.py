@@ -391,6 +391,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
     parser.add_argument("--notify-test", action="store_true", help="send one WeCom test notification then exit")
+    parser.add_argument("--update-helper-plan", default="", help=argparse.SUPPRESS)
     return parser
 
 _BASIC_CFG_ARG_DESTS = {
@@ -567,8 +568,12 @@ def main() -> None:
     parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
     parser.add_argument("--notify-test", action="store_true", help="send one WeCom test notification then exit")
+    parser.add_argument("--update-helper-plan", default="", help=argparse.SUPPRESS)
     APP_START_CWD = os.getcwd()
     args = parser.parse_args()
+
+    if str(getattr(args, "update_helper_plan", "") or "").strip():
+        raise SystemExit(_run_app_update_helper(str(args.update_helper_plan)))
 
     cfg_path = os.path.abspath(str(args.config)) if args.config else None
     APP_CONFIG_PATH = cfg_path
@@ -722,6 +727,7 @@ def main() -> None:
     start_model_update_worker()
     start_config_update_worker()
     start_app_update_check()
+    _app_update_mark_startup_ready()
 
     def sniff_thread():
         global sniff_iface_name

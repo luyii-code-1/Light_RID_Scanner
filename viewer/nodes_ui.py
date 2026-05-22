@@ -24,7 +24,7 @@ def build_nodes_page() -> str:
         <div class="node-hero-icon">◎</div>
         <div>
           <div class="title">节点管理器</div>
-          <div class="sub">集中维护 Viewer 管理的 Station 节点，查看连通性、负载、扫描统计，并执行批量远程操作。</div>
+          <div class="sub">集中管理 Viewer 下的 Station 节点，查看连通性、负载和扫描情况，也可以批量远程操作。</div>
         </div>
       </div>
       <div class="actions">
@@ -42,7 +42,7 @@ def build_nodes_page() -> str:
         <div class="section-head">
           <div>
             <h2>添加 / 编辑节点</h2>
-            <div class="section-copy">Viewer 只保存节点 API 地址和 Token，实时、历史、轨迹和负载数据仍然直接从各子站接口获取。</div>
+            <div class="section-copy">这里只保存 API 地址和 Token，实时、历史、轨迹和负载仍然直接从子站读取。</div>
           </div>
           <button class="btn ghost" id="btn-clear-form" type="button">清空</button>
         </div>
@@ -63,7 +63,7 @@ def build_nodes_page() -> str:
         <div class="section-head">
           <div>
             <h2>批量远程管理</h2>
-            <div class="section-copy">对勾选节点执行重启、机型库更新和强制重新解析。</div>
+            <div class="section-copy">对勾选节点执行重启、更新识别库和重解析。</div>
           </div>
         </div>
         <div class="row-actions" style="margin-top:14px">
@@ -79,7 +79,7 @@ def build_nodes_page() -> str:
         <div class="list-head">
           <div>
             <h2>节点基本信息</h2>
-            <div class="section-copy">点击标题头排序，点击节点卡片在右侧查看完整详情。</div>
+            <div class="section-copy">点击表头排序，点节点卡片可在右侧查看详情。</div>
           </div>
         </div>
         <div id="node-basic-list" class="list-wrap"></div>
@@ -88,7 +88,7 @@ def build_nodes_page() -> str:
         <div class="list-head">
           <div>
             <h2>节点负载</h2>
-            <div class="section-copy">显示 CPU、内存、温度和最近负载快照，点击节点可读取 12 小时负载曲线。</div>
+            <div class="section-copy">查看 CPU、内存、温度和最近负载；点节点可读 12 小时曲线。</div>
           </div>
         </div>
         <div id="node-load-list" class="list-wrap"></div>
@@ -97,7 +97,7 @@ def build_nodes_page() -> str:
         <div class="list-head">
           <div>
             <h2>扫描数据</h2>
-            <div class="section-copy">显示累计扫描数、当前在线数和最近刷新时间。</div>
+            <div class="section-copy">查看累计扫描、当前在线和最近刷新时间。</div>
           </div>
         </div>
         <div id="node-scan-list" class="list-wrap"></div>
@@ -109,7 +109,7 @@ def build_nodes_page() -> str:
         <div class="section-head">
           <div>
             <h2 id="detail-title">节点详情</h2>
-            <div class="section-copy" id="detail-copy">从左侧选择节点查看完整信息、负载曲线和 SSO 登录入口。</div>
+            <div class="section-copy" id="detail-copy">从左侧选一个节点，查看详情、负载曲线和 SSO 登录入口。</div>
           </div>
         </div>
         <div class="row-actions" style="margin-top:14px">
@@ -245,7 +245,7 @@ function showBasic(id){
     ['采集状态', svc.sniff_state || '—'], ['采集消息', svc.sniff_msg || '—'], ['采集网卡', svc.sniff_iface || '—'],
     ['Token', rec.token_configured ? '已配置' : '未配置'], ['创建时间', fmtTime(rec.created_at)], ['更新时间', fmtTime(rec.updated_at)]
   ]);
-  setStatus('detail-status', state.selectedSsoUrl ? '已读取浏览器缓存的 SSO URL，可直接一键登录。' : '-', false);
+  setStatus('detail-status', state.selectedSsoUrl ? '已拿到缓存里的 SSO 链接，可以直接登录。' : '-', false);
   renderLists();
 }
 async function showLoad(id){
@@ -262,7 +262,7 @@ async function showLoad(id){
       return api('/api/nodes/metrics?node_id=' + encodeURIComponent(id) + '&window=12h');
     });
     drawChart(Array.isArray(d.items) ? d.items : []);
-    setStatus('detail-status', d.items && d.items.length ? ('样本 ' + d.items.length) : (d.error || '没有可用负载样本，请确认子站已启用节点负载记录。'), !(d.items && d.items.length));
+    setStatus('detail-status', d.items && d.items.length ? ('已加载 ' + d.items.length + ' 条样本') : (d.error || '还没有可用的负载样本，请先确认子站已开启负载记录。'), !(d.items && d.items.length));
   }catch(e){
     drawChart([]);
     setStatus('detail-status', '负载读取失败: ' + (e.message || e), true);
@@ -321,7 +321,7 @@ async function loadAll(){
   state.nodes = agg.nodes || [];
   renderLists();
   if(state.selectedId && nodeById(state.selectedId)) showBasic(state.selectedId);
-  setStatus('bulk-status', '节点 ' + String(agg.online_node_count || 0) + '/' + String(agg.node_count || 0) + ' 在线，飞机 ' + String(agg.online_drone_count || 0) + '/' + String(agg.drone_count || 0), false);
+  setStatus('bulk-status', '在线节点 ' + String(agg.online_node_count || 0) + '/' + String(agg.node_count || 0) + '，在线飞机 ' + String(agg.online_drone_count || 0) + '/' + String(agg.drone_count || 0), false);
 }
 function normalizeNodeRootInput(raw){
   var value = String(raw || '').trim();
@@ -346,13 +346,13 @@ async function saveNode(testOnly){
   var body = collectNodeBody();
   setStatus('node-status', testOnly ? '正在测试...' : '正在保存...', false);
   var d = await post(testOnly ? '/api/nodes/test' : '/api/nodes', body);
-  if(testOnly){ var n=d.node||{}; setStatus('node-status', '测试完成：' + (n.ok ? '在线' : '离线') + (n.error ? ' · ' + n.error : ''), !n.ok); return; }
+  if(testOnly){ var n=d.node||{}; setStatus('node-status', '测试完成，节点当前' + (n.ok ? '在线' : '离线') + (n.error ? '：' + n.error : '。'), !n.ok); return; }
   clearForm(); await loadAll(); setStatus('node-status','已保存。',false);
 }
 function editSelected(){
   var rec = recordById(state.selectedId); if(!rec) return;
   qs('node-id').value = rec.id; qs('node-name').value = rec.name || ''; qs('node-url').value = rec.base_url || ''; qs('node-token').value = ''; qs('node-enabled').checked = !!rec.enabled;
-  setStatus('node-status', '编辑模式：Token 留空会保留原值。', false);
+  setStatus('node-status', '编辑模式：留空 Token 会保留原值。', false);
   window.scrollTo({top:0, behavior:'smooth'});
 }
 async function deleteSelected(){
@@ -367,29 +367,29 @@ async function createSso(){
   var cached = readCachedSso(node);
   if(cached){
     state.selectedSsoUrl = cached;
-    qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl], ['节点', node.name || state.selectedId], ['说明', '已使用浏览器缓存；需要更换时请清理本地缓存或等待过期。']]);
+    qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl], ['节点', node.name || state.selectedId], ['说明', '当前使用的是浏览器缓存里的链接；要换新的，请清理本地缓存或等它过期。']]);
     qs('btn-open-sso').disabled = false;
-    setStatus('detail-status', '已使用浏览器缓存的 SSO URL。', false);
+    setStatus('detail-status', '已使用浏览器缓存中的 SSO URL。', false);
     return;
   }
   setStatus('detail-status', '正在生成 SSO 登录链接...', false);
   var d = await post('/api/nodes/sso', {node_id:state.selectedId});
   state.selectedSsoUrl = d.url || '';
   writeCachedSso(node, d);
-  qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl || '—'], ['节点', (nodeById(state.selectedId)||{}).name || state.selectedId], ['说明', '链接由子站 API 创建，按子站设置控制有效期和单次使用。']]);
+  qs('detail-body').innerHTML = detailRows([['SSO URL', state.selectedSsoUrl || '—'], ['节点', (nodeById(state.selectedId)||{}).name || state.selectedId], ['说明', '链接由子站生成，有效期和是否单次使用都按子站设置执行。']]);
   qs('btn-open-sso').disabled = !state.selectedSsoUrl;
-  setStatus('detail-status', state.selectedSsoUrl ? '已生成，可点击一键登录。' : '子站没有返回 URL。', !state.selectedSsoUrl);
+  setStatus('detail-status', state.selectedSsoUrl ? '链接已生成，可以直接登录。' : '子站没有返回可用链接。', !state.selectedSsoUrl);
 }
 async function remoteOp(op){
   var ids = selectedIds();
   if(!ids.length && state.selectedId) ids = [state.selectedId];
-  if(!ids.length){ setStatus('bulk-status','请先勾选节点或选择一个节点。',true); return; }
+  if(!ids.length){ setStatus('bulk-status','请先勾选节点，或先选中一个节点。',true); return; }
   if(op === 'restart' && !confirm('确认重启 ' + ids.length + ' 个节点的主程序？')) return;
   if(op === 'force_reparse' && !confirm('确认要求 ' + ids.length + ' 个节点强制重新解析最近存储包？')) return;
   setStatus('bulk-status', '正在执行...', false);
   var d = await post('/api/nodes/remote', {node_ids:ids, operation:op});
   var rows = d.results || [];
-  setStatus('bulk-status', rows.map(function(r){ return (r.name || r.id) + ': ' + (r.ok ? '完成' : ('失败 ' + (r.error || ''))); }).join('\n'), rows.some(function(r){ return !r.ok; }));
+  setStatus('bulk-status', rows.map(function(r){ return (r.name || r.id) + '：' + (r.ok ? '已完成' : ('失败，' + (r.error || ''))); }).join('\n'), rows.some(function(r){ return !r.ok; }));
   setTimeout(loadAll, 1200);
 }
 function updateSelectionButtons(){

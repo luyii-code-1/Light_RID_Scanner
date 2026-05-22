@@ -107,7 +107,7 @@
   },
   "app_update": {
     "enabled": true,
-    "commit_url": "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
+    "release_url": "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/releases/latest"
   },
   "metrics": {
     "enabled": false,

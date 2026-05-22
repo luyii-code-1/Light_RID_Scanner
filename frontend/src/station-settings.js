@@ -93,7 +93,7 @@ function settingsLoadingState(target){
   return {
     target: name,
     detail: '正在处理 ' + name,
-    status: '已等待 ' + elapsed + 's，页面将在完成后自动刷新状态'
+    status: '已等待 ' + elapsed + 's，完成后会自动刷新状态'
   };
 }
 function showSettingsPageLoading(target, title){
@@ -192,7 +192,7 @@ function showNotice(text, kind, timeoutMs){
   var node = document.createElement('div');
   var tone = (kind === 'warn' || kind === 'error') ? 'warn' : 'ok';
   node.className = 'toast ' + tone;
-  node.innerHTML = '<div class="toast-title">' + (tone === 'warn' ? '操作结果' : '已完成') + '</div>'
+  node.innerHTML = '<div class="toast-title">' + (tone === 'warn' ? '请留意' : '已完成') + '</div>'
     + '<div class="toast-text">' + enc(String(text || '')) + '</div>';
   host.appendChild(node);
   requestAnimationFrame(function(){ node.classList.add('show'); });
@@ -310,11 +310,11 @@ function formatBytes(bytes){
 }
 function scanDataFileLabel(info){
   info = (info && typeof info === 'object') ? info : {};
-  if(info.error) return '读取失败: ' + String(info.error);
-  if(!info.exists) return '文件不存在或尚未生成';
+  if(info.error) return '读取失败：' + String(info.error);
+  if(!info.exists) return '文件不存在，或还没生成';
   var text = formatBytes(info.size);
   if(info.mtime){
-    try{ text += ' · ' + new Date(Number(info.mtime) * 1000).toLocaleString(); }catch(_e){}
+    try{ text += '，' + new Date(Number(info.mtime) * 1000).toLocaleString(); }catch(_e){}
   }
   return text;
 }
@@ -369,7 +369,7 @@ async function exportSettingsFile(){
   setStatus('status-data-transfer', '正在导出设置文件...', false);
   var data = await getJson('/api/settings/export/settings');
   downloadJsonObject('rid_settings_' + transferStamp() + '.json', data);
-  setStatus('status-data-transfer', '设置文件已导出: ' + String(data.config_path || '-'), false);
+  setStatus('status-data-transfer', '设置文件已导出到 ' + String(data.config_path || '-'), false);
   showNotice('设置文件已导出。', 'ok', 2600);
 }
 async function exportScanDataFile(){
@@ -377,15 +377,15 @@ async function exportScanDataFile(){
   var data = await getJson('/api/settings/export/scan-data');
   downloadJsonObject('rid_scan_data_' + transferStamp() + '.json', data);
   renderScanDataFileInfo(data.data_file_info || null);
-  setStatus('status-data-transfer', '扫描数据已导出: ' + Number(data.count || 0) + ' 条', false);
+  setStatus('status-data-transfer', '扫描数据已导出，共 ' + Number(data.count || 0) + ' 条', false);
   showNotice('扫描数据已导出。', 'ok', 2600);
 }
 async function importSettingsFileFromFile(file){
   setStatus('status-data-transfer', '正在导入设置文件...', false);
   var payload = await readJsonFile(file);
   var data = await postJson('/api/settings/import/settings', {payload: payload});
-  var msg = '设置文件导入完成: ' + String(data.saved_to || '-');
-  if(data.backup_path) msg += '\n备份: ' + String(data.backup_path);
+  var msg = '设置文件已导入到 ' + String(data.saved_to || '-');
+  if(data.backup_path) msg += '\n备份文件 ' + String(data.backup_path);
   if(data.reload_msg) msg += '\n' + String(data.reload_msg);
   setStatus('status-data-transfer', msg, false);
   showNotice('设置文件已导入并生效。', 'ok', 3200);
@@ -393,18 +393,18 @@ async function importSettingsFileFromFile(file){
 }
 async function importScanDataFileFromFile(file){
   var payload = await readJsonFile(file);
-  var merge = window.confirm('扫描数据导入方式：\n确定 = 增量更新\n取消 = 覆盖已有扫描数据');
+  var merge = window.confirm('选择扫描数据导入方式：\n确定 = 合并到现有数据\n取消 = 覆盖现有数据');
   var mode = merge ? 'merge' : 'replace';
-  setStatus('status-data-transfer', '正在导入扫描数据(' + (mode === 'merge' ? '增量更新' : '覆盖导入') + ')...', false);
+  setStatus('status-data-transfer', '正在导入扫描数据（' + (mode === 'merge' ? '合并模式' : '覆盖模式') + '）...', false);
   var data = await postJson('/api/settings/import/scan-data', {mode: mode, payload: payload});
   var parts = [];
-  if(data.mode === 'replace') parts.push('已清空 ' + Number(data.replaced || 0) + ' 条旧数据');
+  if(data.mode === 'replace') parts.push('已清空旧数据 ' + Number(data.replaced || 0) + ' 条');
   parts.push('新增 ' + Number(data.added || 0));
   parts.push('更新 ' + Number(data.updated || 0));
   parts.push('跳过 ' + Number(data.skipped || 0));
   parts.push('当前共 ' + Number(data.count || 0) + ' 条');
   renderScanDataFileInfo(data.data_file_info || null);
-  setStatus('status-data-transfer', '扫描数据导入完成: ' + parts.join('，'), false);
+  setStatus('status-data-transfer', '扫描数据导入完成。' + parts.join('，'), false);
   showNotice('扫描数据导入完成。', 'ok', 3200);
 }
 async function getJson(url){
@@ -422,9 +422,9 @@ async function postJson(url, body){
   return d;
 }
 async function reidentifyRecentHistoryPackets(){
-  setStatus('status-data-transfer', '正在识别所有飞机最近存储的100个数据包...', false);
+  setStatus('status-data-transfer', '正在重新识别所有飞机最近保存的 100 个数据包...', false);
   var data = await postJson('/api/settings/history/reidentify-recent', {limit:100});
-  var msg = '历史包批量识别完成: 飞机 ' + Number(data.updated_aircraft || 0) + '/' + Number(data.aircraft_count || 0)
+  var msg = '历史包批量识别完成。飞机 ' + Number(data.updated_aircraft || 0) + '/' + Number(data.aircraft_count || 0)
     + '，数据包 ' + Number(data.decoded || 0) + '/' + Number(data.packet_count || 0);
   var extra = [];
   if(Number(data.migrated || 0) > 0) extra.push('SN迁移 ' + Number(data.migrated || 0));
@@ -432,7 +432,7 @@ async function reidentifyRecentHistoryPackets(){
   if(Number(data.failed || 0) > 0) extra.push('失败 ' + Number(data.failed || 0));
   if(extra.length) msg += '（' + extra.join('，') + '）';
   setStatus('status-data-transfer', msg, false);
-  showNotice('所有飞机近100个存储包已识别。', 'ok', 3600);
+  showNotice('最近 100 个历史包已重新识别。', 'ok', 3600);
 }
 function closeElevate(value){
   var modal = qs('elevate-modal');
@@ -448,7 +448,7 @@ function requestElevationPassword(message){
   return new Promise(function(resolve){
     elevateResolve = resolve;
     if(qs('elevate-copy')) qs('elevate-copy').textContent = String(message || '此操作需要 root 权限；sudo 密码只用于本次请求，不会保存。');
-    if(qs('elevate-status')) setStatus('elevate-status', '密码不会写入配置文件或浏览器存储。', false);
+    if(qs('elevate-status')) setStatus('elevate-status', '密码只用于这次操作，不会写入配置文件或浏览器存储。', false);
     if(qs('elevate-modal')) qs('elevate-modal').classList.add('show');
     window.setTimeout(function(){ if(qs('elevate-pass')) qs('elevate-pass').focus(); }, 40);
   });
@@ -501,25 +501,25 @@ function renderEulaState(eula){
   var status = qs('status-eula');
   var revokeBtn = qs('btn-eula-revoke');
   if(status){
-    status.textContent = (eula.accepted ? '当前已同意许可协议。' : '当前未同意许可协议。')
-      + '\n状态文件: ' + String(eula.set_path || 'EULA.set')
-      + '\n官方文本: ' + String(eula.source_url || '');
+    status.textContent = (eula.accepted ? '已同意许可协议。' : '还没有同意许可协议。')
+      + '\n状态文件 ' + String(eula.set_path || 'EULA.set')
+      + '\n协议来源 ' + String(eula.source_url || '');
     status.classList.toggle('err', !eula.accepted);
   }
   if(revokeBtn) revokeBtn.disabled = !eula.accepted;
 }
 async function revokeEulaAcceptance(){
-  if(!confirm('撤回同意后，系统会立即回到许可协议确认页。确定撤回？')) return;
+  if(!confirm('撤回后会立刻回到许可协议确认页。确定继续吗？')) return;
   var btn = qs('btn-eula-revoke');
   if(btn) btn.disabled = true;
   setStatus('status-eula', '正在撤回许可协议同意状态...', false);
   try{
     const data = await postJson('/api/eula/revoke', {});
-    setStatus('status-eula', '已撤回同意。即将跳转到 EULA 页面。\n状态文件: ' + String(data.set_path || ''), true);
+    setStatus('status-eula', '已撤回同意，即将跳转到 EULA 页面。\n状态文件 ' + String(data.set_path || ''), true);
     showNotice('已撤回 EULA 同意状态。', 'warn', 2600);
     window.setTimeout(function(){ location.href = '/eula?next=/settings'; }, 700);
   }catch(e){
-    setStatus('status-eula', '撤回失败: ' + (e.message || e), true);
+    setStatus('status-eula', '撤回失败：' + (e.message || e), true);
     showNotice(e.message || e, 'warn', 3600);
     if(btn) btn.disabled = false;
   }
@@ -572,7 +572,7 @@ function ensureAuthLoginMethodSelection(preferredId, noisy){
   if(qs(fallbackId)) qs(fallbackId).checked = true;
   methods = checkedAuthLoginMethods();
   if(noisy){
-    if(qs('auth-method-state')) qs('auth-method-state').textContent = '至少保留一种网页登录方式；账号密码仍用于设置页二次确认。';
+    if(qs('auth-method-state')) qs('auth-method-state').textContent = '至少保留一种网页登录方式。账号密码仍用于设置页二次确认。';
     showNotice('至少保留一种网页登录方式。', 'warn', 2400);
   }
   return methods;
@@ -587,22 +587,22 @@ function syncAuthMethodUi(){
     var labels = [];
     if(allowPassword) labels.push('账号密码');
     if(allowPasskey) labels.push('PassKey');
-    qs('auth-method-state').textContent = '当前允许: ' + (labels.join(' / ') || '未选择') + '。至少保留一种网页登录方式；账号密码仍用于设置页二次确认和 PassKey 注册。';
+    qs('auth-method-state').textContent = '当前可用方式：' + (labels.join(' / ') || '未选择') + '。至少保留一种网页登录方式。账号密码仍用于二次确认和 PassKey 注册。';
   }
   if(qs('passkey-state')){
     if(!authEnabled || !authConfigured){
-      qs('passkey-state').textContent = '完成网页登录账号和密码配置后，可在这里登记通行密钥。';
+      qs('passkey-state').textContent = '先配好网页登录账号和密码，再来这里登记通行密钥。';
     }else if(!allowPasskey){
-      qs('passkey-state').textContent = '当前已关闭 PassKey 登录；已登记密钥会保留，但不会生效。';
+      qs('passkey-state').textContent = 'PassKey 登录当前已关闭；已登记的密钥会保留，但暂时不会生效。';
     }else{
-      qs('passkey-state').textContent = '通行密钥可以直接用于网页登录。';
+      qs('passkey-state').textContent = '已登记的通行密钥可以直接登录网页。';
     }
   }
   if(qs('login-link-state')){
     if(!authEnabled || !authConfigured){
-      qs('login-link-state').textContent = '网页登录账号密码完整后即可生成 SSO 链接。SSO 不在登录方式开关中关闭。';
+      qs('login-link-state').textContent = '填好网页登录账号和密码后，就可以生成 SSO 链接。';
     }else{
-      qs('login-link-state').textContent = 'SSO 链接已作为最高优先级验证入口；命中有效链接时会先于密码和 PassKey 会话处理。';
+      qs('login-link-state').textContent = '命中有效 SSO 链接时，会优先于密码和 PassKey 登录。';
     }
   }
   if(qs('btn-login-link-create')) qs('btn-login-link-create').disabled = !(authEnabled && authConfigured);
@@ -652,16 +652,16 @@ function renderSystemServiceStatus(data){
   var sec = data.security || {};
   var lines = [];
   if(data.supported){
-    if(data.registered && data.unit_matches === false) lines.push('当前服务文件与本页生成的启动参数不一致，可点击注册/更新服务。');
-    if(data.running_as_root) lines.push('安全告警: 当前网页服务处于 root 权限，建议一键修复为 rid 专用账号运行。');
-    if(data.registered && !data.service_uses_dedicated_user) lines.push('安全告警: 当前服务文件未声明 rid 专用账号。');
+    if(data.registered && data.unit_matches === false) lines.push('当前服务文件和本页生成的启动参数不一致，可点“注册/更新服务”修正。');
+    if(data.running_as_root) lines.push('安全提醒：当前网页服务仍在用 root 运行，建议一键修复为 rid 专用账号。');
+    if(data.registered && !data.service_uses_dedicated_user) lines.push('安全提醒：当前服务文件还没有声明 rid 专用账号。');
   }else{
-    lines.push('systemd: 不可用' + (data.reason ? ('，' + String(data.reason)) : ''));
+    lines.push('systemd 不可用' + (data.reason ? ('，' + String(data.reason)) : ''));
     if(data.manual_hint) lines.push(String(data.manual_hint));
   }
   if(iw.message && wirelessToolsMissing) lines.push(String(iw.message));
   if(iw.manual_hint && wirelessToolsMissing) lines.push(String(iw.manual_hint));
-  if(data.last_error) lines.push('状态读取错误: ' + String(data.last_error));
+  if(data.last_error) lines.push('状态读取失败：' + String(data.last_error));
   var securityWarn = !!(data.running_as_root || (data.registered && !data.service_uses_dedicated_user) || !data.dedicated_user_exists);
   setStatus('status-system-service', lines.join('\n') || '-', wirelessToolsMissing || (!!data.supported && securityWarn));
   renderRuntimeSecurityAlert(data, sec);
@@ -687,13 +687,13 @@ function renderRuntimeSecurityAlert(data, sec){
   }
     if(qs('runtime-security-copy')){
     if(runningRoot){
-      qs('runtime-security-copy').textContent = '当前网页服务和采集进程以 root 运行，存在安全风险。点击一键修复会创建/确认 rid 账号，并把 systemd 服务改为 rid 账号加网络能力运行。';
+      qs('runtime-security-copy').textContent = '当前网页服务和采集进程还在用 root 运行，风险较高。点“一键修复”后，会创建或确认 rid 账号，并把 systemd 服务切到 rid 账号运行。';
     }else if(sec && sec.risk === 'missing-capabilities'){
-      qs('runtime-security-copy').textContent = '当前进程不是 root，但没有检测到采集所需网络能力。请执行一键修复，让 systemd 以 rid 账号和网络能力启动服务。';
+      qs('runtime-security-copy').textContent = '当前进程不是 root，但缺少采集所需的网络能力。执行“一键修复”后，会让 systemd 以 rid 账号和所需能力启动服务。';
     }else if(!serviceOk){
-      qs('runtime-security-copy').textContent = '当前进程不是 root，但 systemd 服务还没有确认使用 rid 专用账号。需要 root 或临时 sudo 提权完成修复。';
+      qs('runtime-security-copy').textContent = '当前进程不是 root，但 systemd 服务还没确认切到 rid 专用账号。需要 root 或临时 sudo 提权来完成修复。';
     }else{
-      qs('runtime-security-copy').textContent = '当前服务目标为 rid 专用账号，采集所需网络能力通过 systemd capability 提供。';
+      qs('runtime-security-copy').textContent = '当前服务已经使用 rid 专用账号，采集所需网络能力也已由 systemd 提供。';
     }
   }
 }
@@ -703,7 +703,7 @@ async function loadSystemServiceStatus(){
   return data;
 }
 async function registerSystemdServiceFromSettings(){
-  if(!confirm('将写入 /etc/systemd/system/light-rid-scanner.service 并启用开机自启。继续？')) return;
+  if(!confirm('将写入 /etc/systemd/system/light-rid-scanner.service，并启用开机自启。继续吗？')) return;
   var btn = qs('btn-service-register');
   try{
     if(btn) btn.disabled = true;
@@ -756,7 +756,7 @@ function refreshSystemServiceAfterRestart(delaySec){
   setTimeout(tick, delayMs);
 }
 async function repairRuntimeSecurityFromSettings(){
-  if(!confirm('将创建/确认 rid 专用账号、授予配置与缓存写权限，把 systemd 服务改为 rid 账号运行，并在完成后自动重启服务。继续？')) return;
+  if(!confirm('将创建或确认 rid 专用账号，授予配置与缓存写权限，把 systemd 服务改为 rid 账号运行，并在完成后自动重启服务。继续吗？')) return;
   var btn = qs('btn-security-repair');
   var restartScheduled = false;
   var restartDelay = 3;
@@ -1203,15 +1203,29 @@ function renderAppUpdateState(state){
   var el = qs('app-update-state');
   if(!el) return;
   state = state || {};
-  var current = state.current_short || (state.current_commit ? String(state.current_commit).slice(0, 12) : '');
-  var latest = state.latest_short || (state.latest_commit ? String(state.latest_commit).slice(0, 12) : '');
-  var lines = ['当前 commit: ' + (current || '未知')];
-  lines.push('最新 commit: ' + (latest || '尚未检查'));
+  var currentTag = String(state.current_tag || '').trim();
+  var latestTag = String(state.latest_tag || '').trim();
+  var currentCommit = state.current_short || (state.current_commit ? String(state.current_commit).slice(0, 12) : '');
+  var latestCommit = state.latest_short || (state.latest_commit ? String(state.latest_commit).slice(0, 12) : '');
+  var lines = ['当前 Tag: ' + (currentTag || '未知')];
+  lines.push('最新 Tag: ' + (latestTag || '尚未检查'));
+  lines.push('当前 commit: ' + (currentCommit || '未知'));
+  if(latestCommit) lines.push('Release commit: ' + latestCommit);
+  if(state.target_arch) lines.push('架构: ' + String(state.target_arch));
   if(state.running) lines.push('正在检查版本...');
-  else if(state.last_error) lines.push('检查失败: ' + String(state.last_error));
-  else if(state.checked) lines.push(state.update_available ? '发现新版本，更新需手动处理。' : '当前已是检查到的最新版本。');
-  else lines.push('自动/手动检查只比较版本，不会自动更新程序。');
+  else if(state.installing) lines.push('更新状态: ' + String(state.install_message || state.install_status || '进行中'));
+  else if(state.last_error) lines.push('检查/更新失败: ' + String(state.last_error));
+  else if(state.checked) lines.push(state.update_available ? '发现新版本，可直接执行自动更新。' : '当前已是检查到的最新版本。');
+  else lines.push('启用后会检查 GitHub Release，并在满足条件时执行自动更新。');
+  if(state.install_supported === false && state.support_reason) lines.push('当前环境: ' + String(state.support_reason));
+  if(state.asset_name) lines.push('匹配资产: ' + String(state.asset_name));
   el.textContent = lines.join(' | ');
+  if(qs('btn-app-update-start')){
+    qs('btn-app-update-start').disabled = !!state.running || !!state.installing || !state.update_available || state.install_supported === false;
+  }
+  if(state.completion_notice && state.completion_notice.text){
+    showNotice(String(state.completion_notice.text), 'ok', 5200);
+  }
 }
 async function checkAppVersionNow(){
   var btn = qs('btn-app-update-check');
@@ -1223,6 +1237,46 @@ async function checkAppVersionNow(){
     showNotice(data && data.state && data.state.update_available ? '发现新版本，请手动更新。' : '版本检查完成。', 'ok', 3000);
   }catch(e){
     showNotice(e.message || e, 'warn', 4200);
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+function pollAppUpdateAfterRestart(){
+  var attempts = 0;
+  function tick(){
+    attempts += 1;
+    getJson('/api/settings/view').then(function(data){
+      var state = (((data || {}).visual || {}).app_update || {}).state || {};
+      renderAppUpdateState(state);
+      if(state.completion_notice && state.completion_notice.text){
+        setStatus('status-visual', String(state.completion_notice.text), false);
+        return;
+      }
+      if(attempts < 25){
+        setTimeout(tick, 2000);
+      }
+    }).catch(function(){
+      if(attempts < 25) setTimeout(tick, 2000);
+    });
+  }
+  setTimeout(tick, 7000);
+}
+async function startAppUpdateNow(){
+  if(!confirm('将下载最新 GitHub Release 的当前架构资产，并自动停止服务、备份旧文件、替换新文件后重新启动。继续吗？')) return;
+  var btn = qs('btn-app-update-start');
+  try{
+    if(btn) btn.disabled = true;
+    setStatus('status-visual', '正在准备自动更新...', false);
+    renderAppUpdateState({installing:true, install_status:'preparing'});
+    const body = await privilegedBody({confirm:true}, '自动更新需要停止/启动 systemd 并替换已安装文件。请输入 sudo 密码；密码只用于本次更新，不会保存。');
+    const data = await postJson('/api/settings/app-update/start', body);
+    renderAppUpdateState((data && data.state) || {});
+    setStatus('status-visual', (data && data.message) || '更新进程已启动，服务将短暂重启。', false);
+    showNotice((data && data.message) || '更新进程已启动。', 'ok', 4200);
+    if(data && data.restart_expected) pollAppUpdateAfterRestart();
+  }catch(e){
+    setStatus('status-visual', '自动更新失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 4800);
   }finally{
     if(btn) btn.disabled = false;
   }
@@ -2207,7 +2261,7 @@ function renderApiTokenRows(items){
       + '<div class="api-token-badges"><span class="api-token-badge'+bad+'">'+stateLabel+'</span><span class="api-token-badge">'+enc(fmtApiTokenExpiry(item))+'</span><span class="api-token-badge">'+(item.single_use ? '单次' : '多次')+'</span></div>'
       + '</div>'
       + '<div class="api-token-grid">'
-      + '<div class="micro">Token 只在创建成功时显示一次，之后不能查看、复制或修改。</div>'
+      + '<div class="micro">Token 只会在创建成功时显示一次，之后不能再查看、复制或修改。</div>'
       + '<button class="btn ghost warn api-token-row-remove" type="button">删除</button>'
       + '</div>'
       + '</div>';
@@ -2493,6 +2547,7 @@ function bindModelEditorActions(){
   on('model-map-modal', 'click', function(ev){ if(ev.target === qs('model-map-modal')) qs('model-map-modal').classList.remove('show'); });
   on('btn-model-update-now', 'click', updateModelsNow);
   on('btn-app-update-check', 'click', checkAppVersionNow);
+  on('btn-app-update-start', 'click', startAppUpdateNow);
   on('btn-model-map-add', 'click', function(){ addModelMapRow('', ''); });
   on('btn-model-map-save', 'click', saveModelEditor);
   on('model-map-search', 'input', function(){ syncModelRowsFromInputs(); renderModelMapRows(); });
@@ -2604,11 +2659,11 @@ async function confirmReauthAction(){
     var action = reauthAction || 'copy';
     if(action === 'login-link'){
       await createLoginLinkWithCreds();
-      setStatus('status-visual', 'SSO 登录链接已生成，只在弹窗中显示一次。', false);
+      setStatus('status-visual', 'SSO 登录链接已生成，只会在弹窗里显示一次。', false);
       showNotice('SSO 登录链接已生成。', 'ok', 2600);
     }else if(action === 'api-token-create'){
       await createApiTokenWithCreds();
-      setStatus('status-visual', 'API Token 已生成，只在弹窗中显示一次。', false);
+      setStatus('status-visual', 'API Token 已生成，只会在弹窗里显示一次。', false);
       showNotice('API Token 已生成。', 'ok', 2600);
     }else if(action === 'raw-unlock'){
       var user = String(qs('reauth-user').value || '').trim();
@@ -2619,7 +2674,7 @@ async function confirmReauthAction(){
       settingsState.rawUnlocked = true;
       rawSetLocked(false, '');
       rawRefreshButtons();
-      showNotice('原始配置已解锁', 'ok', 2600);
+      showNotice('原始配置已解锁。', 'ok', 2600);
       await loadRaw().catch(function(){});
     }else if(action === 'passkey-create'){
       await createPasskeyWithCreds();

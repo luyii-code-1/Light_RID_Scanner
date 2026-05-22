@@ -243,8 +243,8 @@ function applySettingsData(data, options = {}) {
     });
   }
   state.statuses.notify = `企业微信 ${state.draft.notify.wecom_configured ? "已配置" : "未配置"}`;
-  state.statuses.eula = `${state.draft.eula.accepted ? "当前已同意许可协议。" : "当前未同意许可协议。"}\n状态文件 ${String(state.draft.eula.set_path || "viewer/cfg.db")}`;
-  state.statuses.settings = `密码 ${state.draft.auth.password_configured ? "已配置" : "未配置"} · SSO ${state.draft.auth.sso_configured ? "已配置" : "未配置"}`;
+  state.statuses.eula = `${state.draft.eula.accepted ? "已同意许可协议。" : "还没有同意许可协议。"}\n状态文件 ${String(state.draft.eula.set_path || "viewer/cfg.db")}`;
+  state.statuses.settings = `密码：${state.draft.auth.password_configured ? "已配置" : "未配置"}\nSSO：${state.draft.auth.sso_configured ? "已配置" : "未配置"}`;
 }
 
 async function loadSettings() {
@@ -255,11 +255,11 @@ async function loadSettings() {
 async function saveSettings(options = {}) {
   const data = await postJson("/api/settings/save", buildPayload(options));
   applySettingsData(data, options);
-  state.statuses.settings = `${options.checkboxOnly ? "勾选项已保存。" : "已保存。"}密码 ${data.auth.password_configured ? "已配置" : "未配置"} · SSO ${data.auth.sso_configured ? "已配置" : "未配置"}`;
+  state.statuses.settings = `${options.checkboxOnly ? "勾选项已保存。" : "设置已保存。"}\n密码：${data.auth.password_configured ? "已配置" : "未配置"}\nSSO：${data.auth.sso_configured ? "已配置" : "未配置"}`;
 }
 
 async function loadAggregate(force) {
-  state.statuses.aggregate = force ? "正在重新聚合..." : "正在读取缓存...";
+  state.statuses.aggregate = force ? "正在重新聚合..." : "正在读取聚合缓存...";
   const data = force
     ? await postJson("/api/history/aggregate", { force: true })
     : await getJson("/api/history/aggregate");
@@ -269,7 +269,7 @@ async function loadAggregate(force) {
 
 async function clearAggregate() {
   const data = await postJson("/api/history/aggregate/clear", {});
-  state.statuses.aggregate = `已清空缓存 ${String(data.cleared || 0)}`;
+  state.statuses.aggregate = `已清空 ${String(data.cleared || 0)} 条缓存`;
 }
 
 async function testNotify() {
@@ -279,12 +279,12 @@ async function testNotify() {
 }
 
 async function revokeEula() {
-  if (!confirm("撤回许可协议同意状态？")) {
+  if (!confirm("确认撤回许可协议同意状态？")) {
     return;
   }
   const data = await postJson("/api/eula/revoke", {});
   state.draft.eula = data || {};
-  state.statuses.eula = `${state.draft.eula.accepted ? "当前已同意许可协议。" : "当前未同意许可协议。"}\n状态文件 ${String(state.draft.eula.set_path || "viewer/cfg.db")}`;
+  state.statuses.eula = `${state.draft.eula.accepted ? "已同意许可协议。" : "还没有同意许可协议。"}\n状态文件 ${String(state.draft.eula.set_path || "viewer/cfg.db")}`;
   setTimeout(() => {
     location.href = "/eula?next=/settings";
   }, 500);
@@ -300,7 +300,7 @@ async function logout() {
 
 const aggregateMetaText = computed(() => {
   const data = state.aggregateMeta || {};
-  let text = `缓存: ${data.cached ? "命中" : "已更新"} | 飞机 ${String(data.count || 0)} | 原始版本 ${String(data.raw_count || 0)} | 聚合 ${String(data.aggregate_count || 0)} | TTL ${String(data.cache_ttl_hours || state.draft.aggregate.cache_ttl_hours || 24)}小时`;
+  let text = `缓存 ${data.cached ? "命中" : "已更新"}，飞机 ${String(data.count || 0)} 架，原始记录 ${String(data.raw_count || 0)} 条，聚合结果 ${String(data.aggregate_count || 0)} 条，TTL ${String(data.cache_ttl_hours || state.draft.aggregate.cache_ttl_hours || 24)} 小时`;
   if (data.generated_at) {
     try {
       text += ` | 生成 ${new Date(Number(data.generated_at) * 1000).toLocaleString()}`;
@@ -403,7 +403,7 @@ const App = {
         (position) => {
           state.draft.map.base_lat = String(position.coords.latitude || "");
           state.draft.map.base_lon = String(position.coords.longitude || "");
-          state.statuses.settings = "已读取浏览器位置，保存后生效。";
+          state.statuses.settings = "已读取当前浏览器位置，保存后生效。";
         },
         (error) => {
           state.statuses.settings = `定位失败: ${error && error.message ? error.message : error}`;
@@ -447,7 +447,7 @@ const App = {
         h("div", { class: "topbar" }, [
           h("div", [
             h("div", { class: "title" }, "Viewer 设置"),
-            h("div", { class: "sub" }, "保留 Station 设置页的桌面布局，但由 Vue 接管状态、表单和异步动作。"),
+            h("div", { class: "sub" }, "查看和维护 Viewer 的主机、地图、聚合、登录和通知设置。"),
           ]),
           h("div", { class: "actions" }, [
             h("button", { class: "btn", type: "button", onClick: () => (location.href = "/") }, "返回实时/历史"),
@@ -473,8 +473,8 @@ const App = {
         ]),
         h("div", { class: "draft-bar" }, [
           h("div", { class: "draft-copy" }, [
-            h("div", { class: "draft-title" }, this.dirty ? "有未保存修改" : "当前没有未保存修改"),
-            h("div", { class: "draft-meta" }, this.dirty ? "复选框会立即保存，文本和数值输入需要点击保存。" : "地图、登录和通知设置会写入 viewer/cfg.db。"),
+            h("div", { class: "draft-title" }, this.dirty ? "有未保存的改动" : "没有未保存的改动"),
+            h("div", { class: "draft-meta" }, this.dirty ? "勾选项会立即保存，文本和数值改动需要点保存。" : "这些设置会写入 viewer/cfg.db。"),
           ]),
           h("div", { class: "draft-actions" }, [
             h(
@@ -520,7 +520,7 @@ const App = {
             h("div", { class: "stack-label" }, "Viewer 主机"),
             h("div", { class: "card", id: "settings-status" }, [
               h("div", { class: "section-head" }, [
-                h("div", [h("h2", "主机状态"), h("div", { class: "section-copy" }, "查看 Viewer 进程、配置库和聚合节点状态。")]),
+                h("div", [h("h2", "主机状态"), h("div", { class: "section-copy" }, "查看 Viewer 进程、本地配置库和当前聚合状态。")]),
                 h(
                   "button",
                   {
@@ -549,10 +549,10 @@ const App = {
                 statCard("节点", `${String(host.online_node_count || 0)}/${String(host.node_count || 0)}`, "在线 / 已添加"),
                 statCard("飞机", `${String(host.online_drone_count || 0)}/${String(host.drone_count || 0)}`, "当前在线 / 聚合总数"),
               ]),
-              h("div", { class: "micro" }, `配置库 ${String(host.db_path || "-")} | 监听: ${String(host.listen || "-")}`),
+              h("div", { class: "micro" }, `配置库 ${String(host.db_path || "-")}，监听地址 ${String(host.listen || "-")}`),
             ]),
             h("div", { class: "card", id: "settings-map" }, [
-              h("div", { class: "section-head" }, [h("div", [h("h2", "地图默认位置"), h("div", { class: "section-copy" }, "没有任何可显示飞机时，实时和历史地图使用这里的默认中心和缩放。")])]),
+              h("div", { class: "section-head" }, [h("div", [h("h2", "地图默认位置"), h("div", { class: "section-copy" }, "实时和历史页没有可显示飞机时，会回到这里的中心点和缩放级别。")])]),
               h("div", { class: "grid", style: "margin-top:14px" }, [
                 textField("显示名称", this.state.draft.map.base_name, (value) => (this.state.draft.map.base_name = value)),
                 textField("默认缩放", this.state.draft.map.base_zoom, (value) => (this.state.draft.map.base_zoom = value), { type: "number", min: 3, max: 30 }),
@@ -563,22 +563,22 @@ const App = {
                 h("div", { class: "field full" }, [
                   h("label", "定位"),
                   h("div", { class: "row-actions" }, [
-                    h("button", { class: "btn", type: "button", onClick: this.browserLocation }, "读取浏览器位置"),
+                    h("button", { class: "btn", type: "button", onClick: this.browserLocation }, "使用当前浏览器位置"),
                     h("button", { class: "btn ghost", type: "button", onClick: this.clearBaseLocation }, "清空默认坐标"),
                   ]),
-                  h("div", { class: "micro" }, "浏览器定位能力由当前访问协议和浏览器权限决定。"),
+                  h("div", { class: "micro" }, "能否定位取决于当前访问方式和浏览器授权。"),
                 ]),
               ]),
             ]),
             h("div", { class: "card", id: "settings-aggregate" }, [
-              h("div", { class: "section-head" }, [h("div", [h("h2", "历史聚合"), h("div", { class: "section-copy" }, "按 SN 合并所有基站历史与轨迹，并缓存到 viewer/cfg.db。")])]),
+              h("div", { class: "section-head" }, [h("div", [h("h2", "历史聚合"), h("div", { class: "section-copy" }, "按 SN 合并各子站的历史和轨迹，并把结果缓存到 viewer/cfg.db。")])]),
               h("div", { class: "grid", style: "margin-top:14px" }, [
                 textField("聚合缓存有效期(小时)", this.state.draft.aggregate.cache_ttl_hours, (value) => (this.state.draft.aggregate.cache_ttl_hours = value), { type: "number", min: 1, max: 168 }),
                 h("div", { class: "field full" }, [
                   h("label", "手动维护"),
                   h("div", { class: "row-actions" }, [
-                    h("button", { class: "btn", type: "button", onClick: async () => withLoading("历史聚合数据", "正在读取数据", () => this.loadAggregate(true)) }, "手动聚合"),
-                    h("button", { class: "btn ghost", type: "button", onClick: async () => withLoading("历史聚合缓存", "正在读取数据", () => this.loadAggregate(false)) }, "手动刷新"),
+                    h("button", { class: "btn", type: "button", onClick: async () => withLoading("历史聚合数据", "正在读取数据", () => this.loadAggregate(true)) }, "立即聚合"),
+                    h("button", { class: "btn ghost", type: "button", onClick: async () => withLoading("历史聚合缓存", "正在读取数据", () => this.loadAggregate(false)) }, "查看缓存"),
                     h("button", { class: "btn warn", type: "button", onClick: async () => withLoading("历史聚合缓存", "正在清空缓存", this.clearAggregate) }, "清空缓存"),
                   ]),
                   h("div", { class: "micro" }, this.aggregateMetaText),
@@ -589,10 +589,10 @@ const App = {
           h("div", { class: "stack" }, [
             h("div", { class: "stack-label" }, "访问与许可"),
             h("div", { class: "card access-group", id: "settings-access" }, [
-              h("div", { class: "section-head" }, [h("div", [h("h2", "访问控制"), h("div", { class: "section-copy" }, "Viewer 只保留账号密码登录和 SSO check 登录。")])]),
+              h("div", { class: "section-head" }, [h("div", [h("h2", "访问控制"), h("div", { class: "section-copy" }, "管理 Viewer 的网页登录和 SSO 快捷入口。")])]),
               h("div", { class: "access-subgrid", style: "margin-top:14px" }, [
                 h("div", { class: "access-subcard full" }, [
-                  h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "网页登录"), h("div", { class: "access-subcopy" }, "控制设置页、节点管理页和聚合页的网页登录会话。")])]),
+                  h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "网页登录"), h("div", { class: "access-subcopy" }, "用于设置页、节点页和聚合页的账号密码登录。")])]),
                   h("div", { class: "grid" }, [
                     textField("网页登录账号", this.state.draft.auth.username, (value) => (this.state.draft.auth.username = value)),
                     textField("网页登录密码", this.state.draft.auth.password, (value) => (this.state.draft.auth.password = value), { type: "password", placeholder: "留空即不修改" }),
@@ -600,18 +600,18 @@ const App = {
                   h("div", { class: "checks" }, [checkboxField("auth-enabled", "启用网页登录鉴权", this.state.draft.auth.enabled, (checked) => (this.state.draft.auth.enabled = checked))]),
                 ]),
                 h("div", { class: "access-subcard full" }, [
-                  h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "SSO check 登录"), h("div", { class: "access-subcopy" }, "Viewer 本机登录入口使用 /?check=...。")])]),
+                  h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "SSO check 登录"), h("div", { class: "access-subcopy" }, "本机快捷登录入口，地址格式为 /?check=...。")])]),
                   h("div", { class: "grid" }, [
                     textField("SSO check 密钥", this.state.draft.auth.sso_check, (value) => (this.state.draft.auth.sso_check = value), { type: "password", placeholder: "留空即不修改，至少 12 位", full: true }),
                   ]),
                   h("div", { class: "checks" }, [checkboxField("sso-enabled", "启用 SSO check 登录", this.state.draft.auth.sso_enabled, (checked) => (this.state.draft.auth.sso_enabled = checked))]),
-                  h("div", { class: "micro" }, "至少保留一种可用登录方式，避免锁定自己。"),
+                  h("div", { class: "micro" }, "至少保留一种登录方式，免得把自己锁在外面。"),
                 ]),
               ]),
               h("div", { class: `status${this.state.statuses.settings ? "" : ""}` }, this.state.statuses.settings),
             ]),
             h("div", { class: "card access-group", id: "settings-notify" }, [
-              h("div", { class: "section-head" }, [h("div", [h("h2", "企业微信通知"), h("div", { class: "section-copy" }, "Viewer 可在子站在线/离线变化时发送企业微信机器人通知。")])]),
+              h("div", { class: "section-head" }, [h("div", [h("h2", "企业微信通知"), h("div", { class: "section-copy" }, "子站上下线变化时，可以发企业微信机器人通知。")])]),
               h("div", { class: "grid", style: "margin-top:14px" }, [
                 textField("企业微信机器人 Key 或完整 Webhook URL", this.state.draft.notify.wecom_key, (value) => (this.state.draft.notify.wecom_key = value), { type: "password", placeholder: "留空即不修改", full: true }),
               ]),
@@ -625,7 +625,7 @@ const App = {
               h("div", { class: "status" }, this.state.statuses.notify),
             ]),
             h("div", { class: "card", id: "settings-eula" }, [
-              h("div", { class: "section-head" }, [h("div", [h("h2", "许可协议"), h("div", { class: "section-copy" }, "查看或撤回 Viewer 的 EULA 确认。")])]),
+              h("div", { class: "section-head" }, [h("div", [h("h2", "许可协议"), h("div", { class: "section-copy" }, "查看当前 EULA 状态，或撤回已同意的记录。")])]),
               h("div", { class: "row-actions", style: "margin-top:14px" }, [
                 h("button", { class: "btn", type: "button", onClick: () => (location.href = "/eula?next=/settings") }, "查看 EULA"),
                 h("button", { class: "btn warn", type: "button", disabled: !eula.accepted, onClick: async () => withLoading("许可协议", "正在撤回许可状态", this.revokeEula) }, "撤回同意"),

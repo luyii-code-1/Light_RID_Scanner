@@ -7295,7 +7295,7 @@ Expected function or array of functions, received type ${typeof value}.`
     },
     render() {
       if (!this.rows.length) {
-        return h("div", { class: "empty-state" }, "尚未添加节点。");
+        return h("div", { class: "empty-state" }, "还没有添加节点。");
       }
       return h("div", { class: "node-list-stack" }, [
         h(
@@ -7341,7 +7341,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 { k: "在线", v: safeText(node.online_count, "0") },
                 { k: "状态码", v: safeText(node.status_code, "—") }
               ];
-              meta = `刷新时间 ${fmtTime(node.fetched_at)}`;
+              meta = `最近刷新 ${fmtTime(node.fetched_at)}`;
             } else {
               metrics = [
                 { k: "延迟", v: fmtMs(node.latency_ms) },

@@ -142,6 +142,7 @@ OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid-models.json"
 APP_UPDATE_COMMIT_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
+APP_UPDATE_RELEASE_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/releases/latest"
 MODEL_UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
 HOST_METRICS_DIR_DEFAULT = os.path.join(tempfile.gettempdir(), "light_rid_scanner")
 HOST_METRICS_FILE_DEFAULT = "host_metrics.jsonl"
@@ -287,13 +288,23 @@ CONFIG_UPDATE_CFG: dict = {
 }
 APP_UPDATE_CFG: dict = {
     "enabled": True,
-    "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
+    "release_url": APP_UPDATE_RELEASE_URL_DEFAULT,
 }
 APP_UPDATE_STATE: dict = {
     "running": False,
     "last_check_ts": 0.0,
+    "last_install_ts": 0.0,
+    "latest_tag": "",
     "latest_commit": "",
+    "current_tag": "",
     "current_commit": "",
+    "target_arch": "",
+    "asset_name": "",
+    "asset_url": "",
+    "installing": False,
+    "install_status": "",
+    "install_supported": False,
+    "support_reason": "",
     "update_available": False,
     "last_error": "",
 }
@@ -1346,7 +1357,7 @@ def default_app_config() -> dict:
         },
         "app_update": {
             "enabled": True,
-            "commit_url": APP_UPDATE_COMMIT_URL_DEFAULT,
+            "release_url": APP_UPDATE_RELEASE_URL_DEFAULT,
         },
         "metrics": {
             "enabled": False,
@@ -2009,8 +2020,8 @@ def _settings_view_payload() -> dict:
             },
             "app_update": {
                 "enabled": bool(app_update.get("enabled", True)),
-                "commit_url": str(app_update.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT),
-                "state": _app_update_status_payload(),
+                "release_url": str(app_update.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT),
+                "state": _app_update_status_payload(consume_notice=True),
             },
             "metrics": {
                 "enabled": bool(metrics_cfg.get("enabled")),
@@ -2280,11 +2291,11 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     if p_app_update:
         if "enabled" in p_app_update:
             app_update["enabled"] = bool(p_app_update.get("enabled"))
-        if "commit_url" in p_app_update:
-            url = str(p_app_update.get("commit_url") or "").strip()
+        if "release_url" in p_app_update or "commit_url" in p_app_update:
+            url = str(p_app_update.get("release_url") or p_app_update.get("commit_url") or "").strip()
             if url and not (url.startswith("https://") or url.startswith("http://")):
-                return None, "invalid app_update.commit_url"
-            app_update["commit_url"] = url or APP_UPDATE_COMMIT_URL_DEFAULT
+                return None, "invalid app_update.release_url"
+            app_update["release_url"] = url or APP_UPDATE_RELEASE_URL_DEFAULT
         cfg["app_update"] = _normalize_app_update_cfg({"app_update": app_update})
 
     if p_metrics:
@@ -2618,10 +2629,16 @@ def _normalize_app_update_cfg(cfg: dict | None) -> dict:
                 if k in raw:
                     base[k] = raw.get(k)
     base["enabled"] = bool(base.get("enabled", True))
-    url = str(base.get("commit_url") or APP_UPDATE_COMMIT_URL_DEFAULT).strip()
+    url = str(base.get("release_url") or "").strip()
+    if (not url) and isinstance(cfg, dict):
+        raw = cfg.get("app_update")
+        if isinstance(raw, dict):
+            url = str(raw.get("commit_url") or "").strip()
+    if not url:
+        url = APP_UPDATE_RELEASE_URL_DEFAULT
     if not (url.startswith("https://") or url.startswith("http://")):
-        url = APP_UPDATE_COMMIT_URL_DEFAULT
-    base["commit_url"] = url
+        url = APP_UPDATE_RELEASE_URL_DEFAULT
+    base["release_url"] = url
     return base
 
 def _normalize_metrics_cfg(cfg: dict | None) -> dict:

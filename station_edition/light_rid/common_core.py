@@ -268,6 +268,8 @@ API_CFG: dict = {
 }
 PAGE_API_HEADER = "X-LightRID-Page"
 PAGE_API_HEADER_VALUE = "1"
+UPDATE_PROBE_HEADER = "X-LightRID-Update-Probe"
+UPDATE_PROBE_HEADER_VALUE = "1"
 NOTIFY_CFG: dict = {
     "enabled": False,
     "only_online": True,

@@ -7733,6 +7733,19 @@ def http_server_thread() -> None:
                 self._auth_clear_cookie = True
                 self._redirect("/login")
                 return
+            if path == "/api/update-health":
+                if not _update_probe_header_ok(self.headers):
+                    self._send_json({"ok": False, "error": "probe header required"}, 403)
+                    return
+                now_wall = time.time()
+                self._send_json({
+                    "ok": True,
+                    "time": _api_iso_now(now_wall),
+                    "service": {
+                        "uptime_sec": int(max(0.0, now_wall - APP_START_WALL)),
+                    },
+                }, 200)
+                return
             if _path_uses_api_token(path):
                 if not self._require_public_api(query):
                     return

@@ -1476,6 +1476,10 @@ def _page_api_header_ok(headers) -> bool:
     value = str(headers.get(PAGE_API_HEADER) or "").strip()
     return value == PAGE_API_HEADER_VALUE
 
+def _update_probe_header_ok(headers) -> bool:
+    value = str(headers.get(UPDATE_PROBE_HEADER) or "").strip()
+    return value == UPDATE_PROBE_HEADER_VALUE
+
 def _hw_safe_iface(iface: str) -> str | None:
     name = str(iface or "").strip()
     if not name:

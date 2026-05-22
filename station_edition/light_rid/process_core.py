@@ -1672,7 +1672,7 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
     lock_state = _app_update_read_json(_app_update_lock_path())
     if lock_state:
         status = str(lock_state.get("status") or "")
-        state["installing"] = status not in ("", "completed", "failed")
+        state["installing"] = status not in ("", "completed", "failed", "rolled_back")
         state["install_status"] = status
         state["asset_name"] = str(lock_state.get("asset_name") or state.get("asset_name") or "")
         state["asset_url"] = str(lock_state.get("asset_url") or state.get("asset_url") or "")
@@ -1682,12 +1682,14 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
         state["install_message"] = str(lock_state.get("message") or "")
         state["helper_pid"] = int(lock_state.get("helper_pid") or 0)
         state["backup_path"] = str(lock_state.get("backup_path") or "")
+        state["rolled_back"] = bool(lock_state.get("rolled_back"))
     else:
         state["installing"] = False
         state["install_status"] = ""
         state["install_message"] = ""
         state["helper_pid"] = 0
         state["backup_path"] = ""
+        state["rolled_back"] = False
     state["current_commit"] = current_commit
     state["current_tag"] = current_tag
     state["current_short"] = _short_commit(current_commit)
@@ -1855,7 +1857,131 @@ def _app_update_mark_startup_ready() -> None:
     })
     _log("[INFO] 检测到更新锁，已标记新版本启动成功")
 
-def _run_app_update_helper(plan_path: str) -> int:
+def _app_update_health_url() -> str:
+    return f"http://127.0.0.1:{int(HTTP_PORT)}/api/update-health"
+
+def _app_update_probe_health(timeout: float = 3.0) -> tuple[bool, str]:
+    try:
+        req = urllib.request.Request(
+            _app_update_health_url(),
+            headers={
+                "User-Agent": APP_HTTP_USER_AGENT + " (+update health)",
+                UPDATE_PROBE_HEADER: UPDATE_PROBE_HEADER_VALUE,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=max(1.0, float(timeout or 0.0))) as resp:
+            if int(getattr(resp, "status", 200) or 200) != 200:
+                return False, f"http {getattr(resp, 'status', '?')}"
+            payload = json.loads(resp.read(256 * 1024).decode("utf-8", errors="replace"))
+        if not isinstance(payload, dict):
+            return False, "invalid json payload"
+        if not bool(payload.get("ok")):
+            return False, str(payload.get("error") or "health payload not ok")
+        return True, "ok"
+    except urllib.error.HTTPError as e:
+        return False, f"http {e.code}"
+    except urllib.error.URLError as e:
+        return False, str(getattr(e, "reason", None) or e)
+    except socket.timeout:
+        return False, "timeout"
+    except Exception as e:
+        return False, str(e)
+
+def _app_update_restore_backup(target_path: str, backup_path: str) -> tuple[bool, str]:
+    target_path = os.path.abspath(str(target_path or ""))
+    backup_path = os.path.abspath(str(backup_path or ""))
+    if not target_path or not backup_path:
+        return False, "backup path missing"
+    if not os.path.isfile(backup_path):
+        return False, f"backup not found: {backup_path}"
+    rollback_tmp = target_path + ".rollback"
+    try:
+        shutil.copy2(backup_path, rollback_tmp)
+        try:
+            os.chmod(rollback_tmp, 0o755)
+        except Exception:
+            pass
+        os.replace(rollback_tmp, target_path)
+        try:
+            os.chmod(target_path, 0o755)
+        except Exception:
+            pass
+        return True, backup_path
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            if os.path.exists(rollback_tmp):
+                os.remove(rollback_tmp)
+        except Exception:
+            pass
+
+def _app_update_wait_health(deadline: float, require_activation: bool = False) -> tuple[bool, str]:
+    activated_seen = not require_activation
+    last_error = "waiting for service health"
+    while time.time() < deadline:
+        time.sleep(1.0)
+        lock = _app_update_read_json(_app_update_lock_path())
+        status = str(lock.get("status") or "")
+        if status == "failed":
+            return False, str(lock.get("last_error") or "update helper marked failed")
+        if status == "activated":
+            activated_seen = True
+        ok_health, health_msg = _app_update_probe_health(timeout=2.5)
+        if activated_seen and ok_health:
+            return True, "ok"
+        last_error = health_msg if not ok_health else "waiting for startup activation"
+    return False, last_error
+
+def _app_update_rollback_after_failure(plan: dict, backup_path: str, failure_text: str) -> tuple[bool, str]:
+    target_path = os.path.abspath(str(plan.get("target_path") or ""))
+    latest_tag = str(plan.get("latest_tag") or "")
+    asset_name = str(plan.get("asset_name") or "")
+    _app_update_lock_state({
+        "status": "rollback",
+        "rolled_back": False,
+        "backup_path": backup_path,
+        "last_error": failure_text,
+        "message": "new version health check failed, restoring backup",
+    })
+    _systemctl(["stop", SYSTEMD_SERVICE_NAME], timeout=30)
+    ok_restore, restore_msg = _app_update_restore_backup(target_path, backup_path)
+    if not ok_restore:
+        return False, f"rollback restore failed: {restore_msg}"
+    _app_update_lock_state({
+        "status": "rollback",
+        "rolled_back": False,
+        "backup_path": backup_path,
+        "last_error": failure_text,
+        "message": "backup restored, restarting previous service",
+    })
+    ok_start, out_start, rc_start = _systemctl(["start", SYSTEMD_SERVICE_NAME], timeout=40)
+    if not ok_start:
+        return False, f"rollback start failed: rc={rc_start} {out_start}"
+    ok_health, health_msg = _app_update_wait_health(time.time() + 90.0, require_activation=False)
+    if not ok_health:
+        return False, f"rollback health check failed: {health_msg}"
+    _app_update_lock_state({
+        "status": "rolled_back",
+        "rolled_back": True,
+        "backup_path": backup_path,
+        "last_error": failure_text,
+        "message": "update failed and the previous version has been restored",
+        "rollback_at": time.time(),
+    })
+    _app_update_write_notice({
+        "kind": "warn",
+        "title": "更新已回退",
+        "text": f"更新到 {latest_tag or asset_name or '新版本'} 失败，已自动恢复旧版本。",
+        "tag": latest_tag,
+        "asset_name": asset_name,
+        "backup_path": backup_path,
+        "error": failure_text,
+        "rolled_back": True,
+    })
+    return True, "rolled back"
+
+def _run_app_update_helper_legacy(plan_path: str) -> int:
     plan = _app_update_read_json(str(plan_path or ""))
     if not plan:
         print("update helper plan missing", file=sys.stderr)
@@ -1953,6 +2079,124 @@ def _run_app_update_helper(plan_path: str) -> int:
             "message": str(e),
         })
         print(str(e), file=sys.stderr)
+        return 1
+
+def _run_app_update_helper(plan_path: str) -> int:
+    plan = _app_update_read_json(str(plan_path or ""))
+    if not plan:
+        print("update helper plan missing", file=sys.stderr)
+        return 2
+    lock_path = _app_update_lock_path()
+    stage_dir = str(plan.get("stage_dir") or "")
+    download_path = os.path.abspath(str(plan.get("download_path") or ""))
+    target_path = os.path.abspath(str(plan.get("target_path") or ""))
+    asset_name = str(plan.get("asset_name") or "")
+    latest_tag = str(plan.get("latest_tag") or "")
+    response_grace = max(1, int(plan.get("response_grace_sec") or 2))
+    backup_path = ""
+    try:
+        _app_update_lock_state({
+            "status": "installing",
+            "helper_pid": os.getpid(),
+            "asset_name": asset_name,
+            "asset_url": str(plan.get("asset_url") or ""),
+            "latest_tag": latest_tag,
+            "latest_commit": str(plan.get("latest_commit") or ""),
+            "target_arch": str(plan.get("target_arch") or ""),
+            "target_path": target_path,
+            "message": "update helper is taking over",
+        })
+        time.sleep(response_grace)
+        ok_stop, out_stop, rc_stop = _systemctl(["stop", SYSTEMD_SERVICE_NAME], timeout=40)
+        if not ok_stop:
+            raise RuntimeError(f"failed to stop systemd service: rc={rc_stop} {out_stop}")
+        _app_update_lock_state({"status": "installing", "message": "service stopped, backing up old binary"})
+        if not os.path.isfile(download_path):
+            raise RuntimeError("downloaded release asset is missing")
+        if not os.path.isfile(target_path):
+            raise RuntimeError("installed target is missing, cannot create backup")
+        backup_dir = os.path.join(os.path.dirname(target_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(
+            backup_dir,
+            os.path.basename(target_path) + ".bak_" + time.strftime("%Y%m%d_%H%M%S"),
+        )
+        shutil.copy2(target_path, backup_path)
+        staged_target = target_path + ".new"
+        shutil.copy2(download_path, staged_target)
+        os.chmod(staged_target, 0o755)
+        os.replace(staged_target, target_path)
+        try:
+            os.chmod(target_path, 0o755)
+        except Exception:
+            pass
+        _app_update_lock_state({
+            "status": "starting",
+            "backup_path": backup_path,
+            "message": "new binary installed, restarting service",
+        })
+        ok_start, out_start, rc_start = _systemctl(["start", SYSTEMD_SERVICE_NAME], timeout=40)
+        if not ok_start:
+            raise RuntimeError(f"failed to start systemd service: rc={rc_start} {out_start}")
+        ok_health, health_msg = _app_update_wait_health(time.time() + 120.0, require_activation=True)
+        if not ok_health:
+            raise RuntimeError(f"new version health check failed: {health_msg}")
+        _app_update_write_json(_app_update_current_path(), {
+            "installed_tag": latest_tag,
+            "installed_commit": str(plan.get("latest_commit") or ""),
+            "asset_name": asset_name,
+            "target_arch": str(plan.get("target_arch") or ""),
+            "target_path": target_path,
+            "installed_at": time.time(),
+            "backup_path": backup_path,
+        })
+        _app_update_write_notice({
+            "kind": "ok",
+            "title": "更新完成",
+            "text": f"已升级到 {latest_tag or asset_name or '新版本'}。",
+            "tag": latest_tag,
+            "asset_name": asset_name,
+            "backup_path": backup_path,
+        })
+        _app_update_remove_file(lock_path)
+        try:
+            if stage_dir and os.path.isdir(stage_dir):
+                shutil.rmtree(stage_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return 0
+    except Exception as e:
+        err_text = str(e)
+        rollback_ok = False
+        rollback_msg = ""
+        if backup_path:
+            rollback_ok, rollback_msg = _app_update_rollback_after_failure(plan, backup_path, err_text)
+        if rollback_ok:
+            print(f"{err_text}; rolled back", file=sys.stderr)
+            try:
+                if stage_dir and os.path.isdir(stage_dir):
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+            except Exception:
+                pass
+            return 0
+        final_error = err_text if not rollback_msg else f"{err_text}; rollback failed: {rollback_msg}"
+        _app_update_lock_state({
+            "status": "failed",
+            "rolled_back": False,
+            "backup_path": backup_path,
+            "last_error": final_error,
+            "message": final_error,
+        })
+        _app_update_write_notice({
+            "kind": "warn",
+            "title": "更新失败",
+            "text": final_error,
+            "tag": latest_tag,
+            "asset_name": asset_name,
+            "backup_path": backup_path,
+            "error": final_error,
+        })
+        print(final_error, file=sys.stderr)
         return 1
 
 def _api_meta() -> dict:

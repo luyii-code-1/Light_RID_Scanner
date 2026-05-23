@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import platform
 import shutil
@@ -14,11 +15,24 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS_DIR = ROOT / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
 
-from bump_build import bump_build_info
+
+def _load_bump_build_info():
+    module_path = ROOT / "tools" / "bump_build.py"
+    if not module_path.exists():
+        raise ModuleNotFoundError(f"missing build metadata helper: {module_path}")
+    spec = importlib.util.spec_from_file_location("light_rid_bump_build", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"unable to load build metadata helper: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, "bump_build_info", None)
+    if not callable(func):
+        raise AttributeError(f"bump_build_info not found in {module_path}")
+    return func
+
+
+bump_build_info = _load_bump_build_info()
 
 EDITION_ENTRYPOINTS = {
     "station": ROOT / "station_edition" / "run.py",

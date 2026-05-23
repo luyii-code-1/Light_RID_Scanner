@@ -1,6 +1,7 @@
 {
-  "commit": "5a60c2a",
-  "build": 2,
-  "generated_at": "2026-05-23 17:55:06",
+  "commit": "f364d84",
+  "tag": "v2.4.3a",
+  "build": 5,
+  "generated_at": "2026-05-23 20:43:35",
   "dirty": true
 }

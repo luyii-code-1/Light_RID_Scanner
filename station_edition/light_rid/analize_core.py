@@ -584,42 +584,509 @@ def _dji_vendor_should_skip_legacy_odid(vendor: bytes) -> bool:
     return RID_GB_FF2048_MARKER in vendor or _rid_vendor_is_gb_candidate(vendor)
 
 
+
+GB46750_ITEM_BITS = (0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02)
+
+GB46750_ITEM_LENGTHS: dict[int, int] = {
+    1: 20,   # unique product identification code
+    2: 8,    # real-name registration mark
+    3: 1,    # UAS operation category
+    4: 1,    # UAS classification
+    5: 1,    # remote station position type
+    6: 8,    # remote station longitude|latitude
+    7: 2,    # remote station geodetic altitude
+    8: 8,    # unmanned aircraft longitude|latitude
+    9: 2,    # track angle
+    10: 2,   # ground speed
+    11: 2,   # relative altitude
+    12: 1,   # vertical speed
+    13: 2,   # geodetic altitude
+    14: 2,   # barometric altitude
+    15: 1,   # operational status
+    16: 1,   # coordinate system type
+    17: 1,   # horizontal accuracy
+    18: 1,   # vertical accuracy
+    19: 1,   # speed accuracy
+    20: 6,   # timestamp, Unix ms
+    21: 1,   # timestamp accuracy
+}
+
+GB46750_ITEM_NAMES: dict[int, str] = {
+    1: "unique_product_id",
+    2: "real_name_registration_mark",
+    3: "operation_category",
+    4: "aircraft_classification",
+    5: "remote_station_position_type",
+    6: "remote_station_position",
+    7: "remote_station_altitude",
+    8: "aircraft_position",
+    9: "track_angle",
+    10: "ground_speed",
+    11: "relative_altitude",
+    12: "vertical_speed",
+    13: "geodetic_altitude",
+    14: "barometric_altitude",
+    15: "operational_status",
+    16: "coordinate_system_type",
+    17: "horizontal_accuracy",
+    18: "vertical_accuracy",
+    19: "speed_accuracy",
+    20: "timestamp",
+    21: "timestamp_accuracy",
+}
+
+GB46750_OPERATION_CATEGORY_TEXT = {
+    0: "undefined",
+    1: "open",
+    2: "specific",
+    3: "certified",
+}
+
+GB46750_AIRCRAFT_CLASS_TEXT = {
+    0: "micro",
+    1: "light",
+    2: "small",
+    3: "medium",
+    4: "large",
+}
+
+GB46750_REMOTE_STATION_POSITION_TYPE_TEXT = {
+    0: "takeoff_position",
+    1: "remote_station_position",
+}
+
+GB46750_OPERATIONAL_STATUS_TEXT = {
+    0: "not_reported",
+    1: "ground",
+    2: "airborne",
+    3: "emergency",
+    4: "rid_failure_non_emergency",
+    5: "rid_failure_emergency",
+}
+
+GB46750_COORDINATE_SYSTEM_TEXT = {
+    0: "WGS84",
+    1: "CGCS2000",
+}
+
+GB46750_HORIZONTAL_ACCURACY_TEXT = {
+    0: ">=18.52km_or_unknown",
+    1: "<18.52km",
+    2: "<7.41km",
+    3: "<3.70km",
+    4: "<1852m",
+    5: "<926m",
+    6: "<556m",
+    7: "<185m",
+    8: "<92.6m",
+    9: "<30m",
+    10: "<10m",
+    11: "<3m",
+    12: "<1m",
+}
+
+GB46750_VERTICAL_ACCURACY_TEXT = {
+    0: ">=150m_or_unknown",
+    1: "<150m",
+    2: "<45m",
+    3: "<25m",
+    4: "<10m",
+    5: "<3m",
+    6: "<1m",
+}
+
+GB46750_SPEED_ACCURACY_TEXT = {
+    0: ">=10m/s_or_unknown",
+    1: "<10m/s",
+    2: "<3m/s",
+    3: "<1m/s",
+    4: "<0.3m/s",
+}
+
+GB46750_TIMESTAMP_ACCURACY_TEXT = {
+    0: ">0.5s_or_unknown",
+    1: "<=0.5s",
+    2: "<=0.4s",
+    3: "<=0.3s",
+    4: "<=0.2s",
+    5: "<=0.1s",
+    6: "<=50ms",
+    7: "<=20ms",
+    8: "<=10ms",
+}
+
+
+def _gb46750_version_text(version_raw: int) -> str:
+    try:
+        value = int(version_raw) & 0xFF
+    except Exception:
+        return ""
+    major = (value >> 5) & 0x07
+    minor = value & 0x1F
+    if major == 0:
+        return f"raw_0x{value:02x}"
+    return f"V{major}.{minor}"
+
+
+def _gb46750_decode_identifier(packet: bytes) -> tuple[list[int], list[int], int, list[str]]:
+    warnings: list[str] = []
+    flag_bytes: list[int] = []
+    pos = 3
+    # GB 46750-2025 defines a 3+N byte data identifier. The low bit
+    # is the extension bit, while the upper seven bits select items.
+    while pos < len(packet):
+        flag = int(packet[pos])
+        flag_bytes.append(flag)
+        pos += 1
+        if len(flag_bytes) >= 3 and (flag & 0x01) == 0:
+            break
+        if len(flag_bytes) > 32:
+            warnings.append("GB46750 data identifier is too long")
+            break
+    if len(flag_bytes) < 3:
+        warnings.append("GB46750 data identifier shorter than 3 bytes")
+    present: list[int] = []
+    for byte_index, flag in enumerate(flag_bytes):
+        for bit_index, bit in enumerate(GB46750_ITEM_BITS):
+            if flag & bit:
+                present.append(byte_index * 7 + bit_index + 1)
+    return flag_bytes, present, pos, warnings
+
+
+def _gb46750_decode_lon_lat_raw(
+    raw: bytes,
+    *,
+    role: str,
+    source: str,
+    offset: int | None,
+    coordinate_system: str,
+) -> dict | None:
+    data = bytes(raw or b"")
+    if len(data) != 8:
+        return None
+    if data == b"\x00" * 8 or data == b"\xff" * 8:
+        return None
+    if _coord_raw_bytes_invalid(data[:4]) or _coord_raw_bytes_invalid(data[4:]):
+        return None
+    try:
+        lon_raw = struct.unpack_from("<i", data, 0)[0]
+        lat_raw = struct.unpack_from("<i", data, 4)[0]
+    except Exception:
+        return None
+    if _coord_raw_invalid(lon_raw) or _coord_raw_invalid(lat_raw):
+        return None
+    coord = _rid_coord(
+        lat_raw * 1e-7,
+        lon_raw * 1e-7,
+        role=role,
+        source=source,
+        offset=offset,
+    )
+    if coord is not None:
+        coord["coordinate_system"] = coordinate_system
+    return coord
+
+
+def _gb46750_decode_altitude_u16(raw: bytes, *, base_m: float) -> float | None:
+    data = bytes(raw or b"")
+    if len(data) != 2:
+        return None
+    try:
+        encoded = struct.unpack_from("<H", data, 0)[0]
+    except Exception:
+        return None
+    if encoded == 0:
+        return None
+    return round(float(encoded) * 0.5 - float(base_m), 1)
+
+
+def _gb46750_decode_u16_scaled(raw: bytes, *, scale: float, unknown: int = 0xFFFF) -> float | None:
+    data = bytes(raw or b"")
+    if len(data) != 2:
+        return None
+    try:
+        encoded = struct.unpack_from("<H", data, 0)[0]
+    except Exception:
+        return None
+    if encoded == unknown:
+        return None
+    return round(float(encoded) * float(scale), 3)
+
+
+def _gb46750_decode_vertical_speed(raw: bytes) -> float | None:
+    data = bytes(raw or b"")
+    if len(data) != 1:
+        return None
+    value = int(data[0])
+    if value == 0xFF:
+        return None
+    sign = -1.0 if (value & 0x80) else 1.0
+    magnitude = float(value & 0x7F) * 0.5
+    return round(sign * magnitude, 3)
+
+
+def _gb46750_decode_timestamp(raw: bytes) -> int | None:
+    data = bytes(raw or b"")
+    if len(data) != 6:
+        return None
+    value = int.from_bytes(data, "little", signed=False)
+    return value or None
+
+
+def _gb46750_decode_item(item_id: int, raw: bytes, abs_offset: int | None, coordinate_system: str) -> dict:
+    raw_bytes = bytes(raw or b"")
+    item = {
+        "id": item_id,
+        "name": GB46750_ITEM_NAMES.get(item_id, f"reserved_{item_id:03d}"),
+        "offset": abs_offset,
+        "length": len(raw_bytes),
+        "raw_hex": raw_bytes.hex(),
+    }
+    if item_id in (1, 2):
+        item["value"] = _rid_ascii(raw_bytes)
+    elif item_id in (3, 4, 5, 15, 16, 17, 18, 19, 21):
+        value = int(raw_bytes[0]) if raw_bytes else None
+        item["value"] = value
+        if item_id == 3:
+            item["text"] = GB46750_OPERATION_CATEGORY_TEXT.get(value, "reserved")
+        elif item_id == 4:
+            item["text"] = GB46750_AIRCRAFT_CLASS_TEXT.get(value, "reserved")
+        elif item_id == 5:
+            item["text"] = GB46750_REMOTE_STATION_POSITION_TYPE_TEXT.get(value, "reserved")
+        elif item_id == 15:
+            item["text"] = GB46750_OPERATIONAL_STATUS_TEXT.get(value, "reserved")
+        elif item_id == 16:
+            item["text"] = GB46750_COORDINATE_SYSTEM_TEXT.get(value, "reserved")
+        elif item_id == 17:
+            item["text"] = GB46750_HORIZONTAL_ACCURACY_TEXT.get(value, "reserved")
+        elif item_id == 18:
+            item["text"] = GB46750_VERTICAL_ACCURACY_TEXT.get(value, "reserved")
+        elif item_id == 19:
+            item["text"] = GB46750_SPEED_ACCURACY_TEXT.get(value, "reserved")
+        elif item_id == 21:
+            item["text"] = GB46750_TIMESTAMP_ACCURACY_TEXT.get(value, "reserved")
+    elif item_id == 6:
+        item["coord"] = _gb46750_decode_lon_lat_raw(
+            raw_bytes,
+            role="operator",
+            source="GB46750_ITEM006_REMOTE_STATION_POSITION",
+            offset=abs_offset,
+            coordinate_system=coordinate_system,
+        )
+    elif item_id == 7:
+        item["value_m"] = _gb46750_decode_altitude_u16(raw_bytes, base_m=1000.0)
+    elif item_id == 8:
+        item["coord"] = _gb46750_decode_lon_lat_raw(
+            raw_bytes,
+            role="aircraft",
+            source="GB46750_ITEM008_AIRCRAFT_POSITION",
+            offset=abs_offset,
+            coordinate_system=coordinate_system,
+        )
+    elif item_id == 9:
+        item["value_deg"] = _gb46750_decode_u16_scaled(raw_bytes, scale=0.1)
+    elif item_id == 10:
+        item["value_ms"] = _gb46750_decode_u16_scaled(raw_bytes, scale=0.1)
+    elif item_id == 11:
+        item["value_m"] = _gb46750_decode_altitude_u16(raw_bytes, base_m=9000.0)
+    elif item_id == 12:
+        item["value_ms"] = _gb46750_decode_vertical_speed(raw_bytes)
+    elif item_id == 13:
+        item["value_m"] = _gb46750_decode_altitude_u16(raw_bytes, base_m=1000.0)
+    elif item_id == 14:
+        item["value_m"] = _gb46750_decode_altitude_u16(raw_bytes, base_m=1000.0)
+    elif item_id == 20:
+        item["value_ms"] = _gb46750_decode_timestamp(raw_bytes)
+    return item
+
+
+def _gb46750_standard_packet_result(
+    vendor: bytes,
+    dynamic: int,
+    *,
+    packet_offset: int,
+    ssid_sn: str | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
+    packet = bytes(vendor[packet_offset:])
+    merged_warnings = list(warnings or [])
+    if len(packet) < 6:
+        return _rid_unknown(["GB46750 packet is too short"], body=vendor, sub_format="GB46750_STANDARD_PACKET")
+
+    data_type = int(packet[0])
+    version_raw = int(packet[1])
+    data_len = int(packet[2])
+    flag_bytes, present_ids, content_start, id_warnings = _gb46750_decode_identifier(packet)
+    merged_warnings.extend(id_warnings)
+
+    if data_type != 0xFF:
+        merged_warnings.append(f"GB46750 data type is 0x{data_type:02x}, expected 0xff")
+    if ((version_raw >> 5) & 0x07) != 0x01:
+        merged_warnings.append(f"GB46750 version high bits are not 001: 0x{version_raw:02x}")
+
+    content_end = content_start + data_len
+    if content_start > len(packet):
+        return _rid_unknown(
+            merged_warnings + ["GB46750 content offset exceeds packet length"],
+            body=vendor,
+            sub_format="GB46750_STANDARD_PACKET",
+        )
+    if content_end > len(packet):
+        merged_warnings.append(
+            f"GB46750 data content truncated: need {data_len} bytes, have {max(0, len(packet) - content_start)}"
+        )
+        content_end = len(packet)
+    elif content_end < len(packet):
+        trailing = len(packet) - content_end
+        if trailing:
+            merged_warnings.append(f"GB46750 packet has {trailing} trailing byte(s) after declared data content")
+
+    # Decode coordinate-system first, because coordinate items carry that label.
+    coord_sys_value = 0
+    tmp_pos = 0
+    content = packet[content_start:content_end]
+    for item_id in present_ids:
+        length = GB46750_ITEM_LENGTHS.get(item_id)
+        if length is None:
+            merged_warnings.append(f"GB46750 item {item_id:03d} is not supported; remaining content cannot be decoded")
+            break
+        if tmp_pos + length > len(content):
+            break
+        if item_id == 16:
+            coord_sys_value = int(content[tmp_pos]) if length == 1 else 0
+            break
+        tmp_pos += length
+    coordinate_system = GB46750_COORDINATE_SYSTEM_TEXT.get(coord_sys_value, "UNKNOWN")
+
+    items: dict[int, dict] = {}
+    content_pos = 0
+    for item_id in present_ids:
+        length = GB46750_ITEM_LENGTHS.get(item_id)
+        if length is None:
+            merged_warnings.append(f"GB46750 item {item_id:03d} has no known length; skipped")
+            break
+        if content_pos + length > len(content):
+            merged_warnings.append(
+                f"GB46750 item {item_id:03d} truncated: need {length} byte(s), have {max(0, len(content) - content_pos)}"
+            )
+            break
+        raw_item = content[content_pos:content_pos + length]
+        abs_offset = packet_offset + content_start + content_pos
+        items[item_id] = _gb46750_decode_item(item_id, raw_item, abs_offset, coordinate_system)
+        content_pos += length
+
+    if content_pos < len(content):
+        merged_warnings.append(f"GB46750 data content has {len(content) - content_pos} undecoded byte(s)")
+
+    sn = str(items.get(1, {}).get("value") or "").strip()
+    uas_id = str(items.get(2, {}).get("value") or "").strip()
+
+    if sn and not _dji_vendor_ssid_matches(sn, ssid_sn):
+        merged_warnings.append("SSID RID does not match GB unique product ID")
+    if not sn and ssid_sn:
+        sn = str(ssid_sn or "").strip()
+
+    aircraft = items.get(8, {}).get("coord")
+    operator = items.get(6, {}).get("coord")
+
+    remote_alt = items.get(7, {}).get("value_m")
+    if isinstance(operator, dict):
+        operator["alt"] = remote_alt
+        operator["remote_station_alt_m"] = remote_alt
+        operator["position_type"] = items.get(5, {}).get("value")
+        operator["position_type_text"] = items.get(5, {}).get("text")
+
+    geodetic_alt = items.get(13, {}).get("value_m")
+    barometric_alt = items.get(14, {}).get("value_m")
+    if isinstance(aircraft, dict):
+        aircraft["alt"] = geodetic_alt if geodetic_alt is not None else barometric_alt
+        aircraft["alt_geodetic"] = geodetic_alt
+        aircraft["alt_baro"] = barometric_alt
+        aircraft["relative_alt"] = items.get(11, {}).get("value_m")
+        aircraft["speed_ms"] = items.get(10, {}).get("value_ms")
+        aircraft["vspeed_ms"] = items.get(12, {}).get("value_ms")
+        aircraft["direction_deg"] = items.get(9, {}).get("value_deg")
+        aircraft["operational_status"] = items.get(15, {}).get("value")
+        aircraft["operational_status_text"] = items.get(15, {}).get("text")
+        aircraft["horizontal_accuracy"] = items.get(17, {}).get("value")
+        aircraft["horizontal_accuracy_text"] = items.get(17, {}).get("text")
+        aircraft["vertical_accuracy"] = items.get(18, {}).get("value")
+        aircraft["vertical_accuracy_text"] = items.get(18, {}).get("text")
+        aircraft["speed_accuracy"] = items.get(19, {}).get("value")
+        aircraft["speed_accuracy_text"] = items.get(19, {}).get("text")
+        aircraft["timestamp_ms"] = items.get(20, {}).get("value_ms")
+        aircraft["timestamp_accuracy"] = items.get(21, {}).get("value")
+        aircraft["timestamp_accuracy_text"] = items.get(21, {}).get("text")
+
+    if aircraft is None and 8 in present_ids:
+        merged_warnings.append("GB46750 item 008 aircraft position missing or invalid")
+    if operator is None and 6 in present_ids:
+        merged_warnings.append("GB46750 item 006 remote station position missing or invalid")
+
+    operator_positions = _rid_dedup_coords([operator] if operator else [])
+    raw_coords = _rid_dedup_coords(([aircraft] if aircraft else []) + operator_positions)
+
+    gb_items = {
+        f"{item_id:03d}_{GB46750_ITEM_NAMES.get(item_id, 'unknown')}": value
+        for item_id, value in sorted(items.items())
+    }
+
+    return _rid_result(
+        "GB46750_2025",
+        "GB46750_STANDARD_PACKET",
+        sn=sn,
+        uas_id=uas_id,
+        aircraft_position=aircraft,
+        operator_positions=operator_positions,
+        raw_coords=raw_coords,
+        parse_level="standard_table_1_3",
+        warnings=merged_warnings,
+        body=vendor,
+        extra={
+            "coordinate_system": coordinate_system,
+            "raw_vendor": vendor.hex(),
+            "gb_header": vendor[5:11].hex(" "),
+            "gb_packet_offset": packet_offset,
+            "gb_data_type": data_type,
+            "gb_version_raw": version_raw,
+            "gb_version_text": _gb46750_version_text(version_raw),
+            "gb_data_length": data_len,
+            "gb_identifier": bytes(flag_bytes).hex(" "),
+            "gb_present_items": present_ids,
+            "gb_items": gb_items,
+            "dji_dynamic": dynamic,
+            "dynamic_byte": dynamic,
+            "subtype": dynamic,
+            "marker": RID_GB_FF2048_MARKER.hex(),
+            "operation_category": items.get(3, {}).get("value"),
+            "operation_category_text": items.get(3, {}).get("text"),
+            "aircraft_classification": items.get(4, {}).get("value"),
+            "aircraft_classification_text": items.get(4, {}).get("text"),
+            "remote_station_position_type": items.get(5, {}).get("value"),
+            "remote_station_position_type_text": items.get(5, {}).get("text"),
+            "operational_status": items.get(15, {}).get("value"),
+            "operational_status_text": items.get(15, {}).get("text"),
+            "coord_sys": coord_sys_value,
+            "coord_sys_text": coordinate_system,
+        },
+    )
+
+
 def _gb_ff2048_fixed_offset_result(
     vendor: bytes,
     dynamic: int,
     ssid_sn: str | None = None,
     warnings: list[str] | None = None,
 ) -> dict:
-    sn = _rid_ascii(vendor[11:31]) or (ssid_sn or "")
-    uas_id = _rid_ascii(vendor[31:39])
-    aircraft = _rid_decode_lon_lat_coord(vendor, 42, "aircraft", "gb_ff2048_aircraft")
-    operator = _rid_decode_lon_lat_coord(vendor, 52, "operator", "gb_ff2048_operator")
-    merged_warnings = list(warnings or [])
-    if aircraft is None:
-        merged_warnings.append("GB ff2048 aircraft coordinate missing or invalid")
-    if operator is None:
-        merged_warnings.append("GB ff2048 operator coordinate missing or invalid")
-    operator_positions = _rid_dedup_coords([operator] if operator else [])
-    raw_coords = _rid_dedup_coords(([aircraft] if aircraft else []) + operator_positions)
-    return _rid_result(
-        "GB46750_2025",
-        "GB_FF2048",
-        sn=sn,
-        uas_id=uas_id,
-        aircraft_position=aircraft,
-        operator_positions=operator_positions,
-        raw_coords=raw_coords,
-        parse_level="strict_fixed_offset",
-        warnings=merged_warnings,
-        body=vendor,
-        extra={
-            "raw_vendor": vendor.hex(),
-            "gb_header": vendor[5:11].hex(" "),
-            "dji_dynamic": dynamic,
-            "subtype": dynamic,
-            "dynamic_byte": dynamic,
-            "marker": RID_GB_FF2048_MARKER.hex(),
-        },
+    # Backward-compatible function name. FF2048 packets are GB 46750-2025
+    # standard packets beginning at vendor[5], not dynamic-byte-specific
+    # proprietary fixed layouts.
+    return _gb46750_standard_packet_result(
+        bytes(vendor or b""),
+        int(dynamic),
+        packet_offset=5,
+        ssid_sn=ssid_sn,
+        warnings=warnings,
     )
 
 
@@ -630,64 +1097,13 @@ def _parse_gb_vendor(vendor: bytes, ssid_sn: str | None = None) -> dict:
 
     if _rid_vendor_is_ff2048(vendor):
         dynamic = int(vendor[4])
-        sn = _rid_ascii(vendor[11:31])
-        uas_id = _rid_ascii(vendor[31:39])
-        warnings: list[str] = []
-        if sn and not _dji_vendor_ssid_matches(sn, ssid_sn):
-            warnings.append("SSID RID does not match GB SN")
-        if dynamic == 0x29:
-            aircraft = _rid_decode_lon_lat_coord(vendor, 42, "aircraft", "gb_ff2048_aircraft")
-            operator = _rid_decode_lon_lat_coord(vendor, 52, "operator", "gb_ff2048_operator")
-            if aircraft is None:
-                warnings.append("GB 0x29 aircraft coordinate missing or invalid")
-            operator_positions = _rid_dedup_coords([operator] if operator else [])
-            raw_coords = _rid_dedup_coords(([aircraft] if aircraft else []) + operator_positions)
-            return _rid_result(
-                "GB46750_2025",
-                "FF2048_EXTENDED_COORD_PAIR",
-                sn=sn,
-                uas_id=uas_id,
-                aircraft_position=aircraft,
-                operator_positions=operator_positions,
-                raw_coords=raw_coords,
-                parse_level="strict",
-                warnings=warnings,
-                body=vendor,
-                extra={
-                    "raw_vendor": vendor.hex(),
-                    "gb_header": vendor[5:11].hex(" "),
-                    "dji_dynamic": dynamic,
-                    "subtype": dynamic,
-                    "dynamic_byte": dynamic,
-                    "marker": RID_GB_FF2048_MARKER.hex(),
-                },
-            )
-        if dynamic == 0x2E:
-            operator = _rid_decode_lon_lat_coord(vendor, 42, "operator", "gb_ff2048_operator")
-            if operator is None:
-                warnings.append("GB 0x2e operator coordinate missing or invalid")
-            operator_positions = _rid_dedup_coords([operator] if operator else [])
-            return _rid_result(
-                "GB46750_2025",
-                "FF2048_EXTENDED_SINGLE_OR_OPERATOR_ONLY",
-                sn=sn,
-                uas_id=uas_id,
-                aircraft_position=None,
-                operator_positions=operator_positions,
-                raw_coords=operator_positions,
-                parse_level="strict",
-                warnings=warnings,
-                body=vendor,
-                extra={
-                    "raw_vendor": vendor.hex(),
-                    "gb_header": vendor[5:11].hex(" "),
-                    "dji_dynamic": dynamic,
-                    "subtype": dynamic,
-                    "dynamic_byte": dynamic,
-                    "marker": RID_GB_FF2048_MARKER.hex(),
-                },
-            )
-        return _gb_ff2048_fixed_offset_result(vendor, dynamic, ssid_sn=ssid_sn, warnings=warnings)
+        return _gb46750_standard_packet_result(
+            vendor,
+            dynamic,
+            packet_offset=5,
+            ssid_sn=ssid_sn,
+            warnings=[],
+        )
 
     if _rid_vendor_is_odid_like_gb(vendor):
         sn = _rid_ascii(vendor[10:30])
@@ -869,10 +1285,23 @@ def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
         loc = {
             "lat": aircraft.get("lat"),
             "lon": aircraft.get("lon"),
-            "alt_geodetic": aircraft.get("alt"),
-            "speed_ms": None,
-            "vspeed_ms": None,
-            "direction_deg": None,
+            "alt_geodetic": aircraft.get("alt_geodetic", aircraft.get("alt")),
+            "alt_baro": aircraft.get("alt_baro"),
+            "relative_alt": aircraft.get("relative_alt"),
+            "speed_ms": aircraft.get("speed_ms"),
+            "vspeed_ms": aircraft.get("vspeed_ms"),
+            "direction_deg": aircraft.get("direction_deg"),
+            "operational_status": aircraft.get("operational_status"),
+            "operational_status_text": aircraft.get("operational_status_text"),
+            "horizontal_accuracy": aircraft.get("horizontal_accuracy"),
+            "horizontal_accuracy_text": aircraft.get("horizontal_accuracy_text"),
+            "vertical_accuracy": aircraft.get("vertical_accuracy"),
+            "vertical_accuracy_text": aircraft.get("vertical_accuracy_text"),
+            "speed_accuracy": aircraft.get("speed_accuracy"),
+            "speed_accuracy_text": aircraft.get("speed_accuracy_text"),
+            "timestamp_ms": aircraft.get("timestamp_ms"),
+            "timestamp_accuracy": aircraft.get("timestamp_accuracy"),
+            "timestamp_accuracy_text": aircraft.get("timestamp_accuracy_text"),
         }
     operators = result.get("operator_positions") if isinstance(result.get("operator_positions"), list) else []
     first_op = operators[0] if operators and isinstance(operators[0], dict) else None
@@ -882,10 +1311,11 @@ def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
             "pilot_lat": first_op.get("lat"),
             "pilot_lon": first_op.get("lon"),
             "pilot_alt": first_op.get("alt"),
-            "pilot_loc_type": None,
-            "pilot_loc_type_text": "operator",
+            "pilot_loc_type": first_op.get("position_type"),
+            "pilot_loc_type_text": first_op.get("position_type_text") or "operator",
         }
     fmt = str(result.get("format") or "UNKNOWN")
+    coordinate_system = str(result.get("coordinate_system") or "WGS84")
     metadata = {
         "kind": fmt,
         "format": fmt,
@@ -893,15 +1323,39 @@ def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
         "dji_rid_kind": fmt,
         "sub_format": result.get("sub_format"),
         "parse_level": result.get("parse_level"),
-        "coordinate_system": "WGS84",
-        "coord_sys": 0,
-        "coord_sys_text": "WGS84",
+        "coordinate_system": coordinate_system,
+        "coord_sys": result.get("coord_sys", 0 if coordinate_system == "WGS84" else None),
+        "coord_sys_text": result.get("coord_sys_text", coordinate_system),
         "warnings": result.get("warnings") or [],
         "operator_positions": operators,
         "raw_coords": result.get("raw_coords") or [],
         "aircraft_position": aircraft,
     }
-    for key in ("raw_vendor", "gb_header", "gb_basic_like", "dji_dynamic", "dynamic_byte", "marker"):
+    for key in (
+        "raw_vendor",
+        "gb_header",
+        "gb_basic_like",
+        "gb_packet_offset",
+        "gb_data_type",
+        "gb_version_raw",
+        "gb_version_text",
+        "gb_data_length",
+        "gb_identifier",
+        "gb_present_items",
+        "gb_items",
+        "dji_dynamic",
+        "dynamic_byte",
+        "subtype",
+        "marker",
+        "operation_category",
+        "operation_category_text",
+        "aircraft_classification",
+        "aircraft_classification_text",
+        "remote_station_position_type",
+        "remote_station_position_type_text",
+        "operational_status",
+        "operational_status_text",
+    ):
         if key in result:
             metadata[key] = result.get(key)
     if result.get("uas_id"):

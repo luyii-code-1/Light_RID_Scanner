@@ -27,7 +27,8 @@ jobs:
         run: npm ci
 
       - name: Rebuild frontend bundles
-        run: node frontend/build-rid-home.mjs
+        working-directory: frontend
+        run: node build-rid-home.mjs
 
       - name: Verify generated assets are committed
         shell: bash

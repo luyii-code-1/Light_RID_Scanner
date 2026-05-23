@@ -31,6 +31,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          token: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up Python
@@ -82,7 +83,7 @@ jobs:
       - name: Upload binary to GitHub Release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
         run: |
           set -euxo pipefail
           gh release upload "${RELEASE_TAG}" release-upload/* \
@@ -101,6 +102,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          token: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Show runner info
@@ -146,7 +148,7 @@ jobs:
       - name: Upload binary to GitHub Release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
         run: |
           set -euxo pipefail
           gh release upload "${RELEASE_TAG}" release-upload/* \
@@ -165,6 +167,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          token: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up QEMU
@@ -215,7 +218,7 @@ jobs:
       - name: Upload binary to GitHub Release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
         run: |
           set -euxo pipefail
           gh release upload "${RELEASE_TAG}" release-upload/* \

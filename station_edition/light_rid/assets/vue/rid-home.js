@@ -7170,6 +7170,14 @@ Expected function or array of functions, received type ${typeof value}.`
       event.stopPropagation();
     }
   }
+  function stopPropagationEvent(event) {
+    if (!event) {
+      return;
+    }
+    if (typeof event.stopPropagation === "function") {
+      event.stopPropagation();
+    }
+  }
   function updateSummary(rows) {
     const list = normalizeRows(rows);
     const live = list.filter((row) => row && !row.lost).length;
@@ -7485,7 +7493,7 @@ Expected function or array of functions, received type ${typeof value}.`
                       type: "checkbox",
                       "data-sn": sn,
                       checked: isSelected,
-                      onClick: stopEvent,
+                      onClick: stopPropagationEvent,
                       onChange: (event) => this.toggleRow(row, event.target.checked)
                     }),
                     h("span", {
@@ -7560,14 +7568,25 @@ Expected function or array of functions, received type ${typeof value}.`
   var LiveCardsRoot = {
     setup() {
       const sourceRows = computed2(() => appState.liveRows);
+      const page = computed2(() => appState.page);
       const liveRecentRows = fn("liveRecentRows", (rows2) => normalizeRows(rows2));
       const coordText = fn("coordText", (lat, lon) => lat == null || lon == null ? "N/A" : `${lat}, ${lon}`);
       const homeAuxCoordText = fn("homeAuxCoordText", () => "N/A");
       const firmwareTypeText = fn("firmwareTypeText", () => "N/A");
       const uasIdText = fn("uasIdText", (row) => String(row && row.uas_id || "N/A"));
       const isSnSelected = fn("isSnSelected", () => false);
+      const isHistoryTrackVisible = fn("isHistoryTrackVisible", () => false);
+      const setSnSelected = fn("setSnSelected", () => {
+      });
+      const setHistorySnVisible = fn("setHistorySnVisible", () => {
+      });
+      const focusHistoryAircraft = fn("focusHistoryAircraft", () => {
+      });
+      const showDroneInfoCard = fn("showDroneInfoCard", () => {
+      });
       const fmt = fn("fmt", fmtFallback);
       const fmtAge = fn("fmtAge", (age) => age == null ? "N/A" : String(age));
+      let rowClickTimer = null;
       const rows = computed2(() => {
         const list = normalizeRows(liveRecentRows(sourceRows.value));
         return list.sort((left, right) => {
@@ -7585,7 +7604,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const sn = String(row && row.sn || "");
         return {
           "live-card": true,
-          selected: !!isSnSelected(sn),
+          selected: page.value === "history" ? !!isHistoryTrackVisible(sn) : !!isSnSelected(sn),
           lost: !!row.lost,
           "alarm-zone": !!(window.zoneAlarmSnSet && window.zoneAlarmSnSet[sn])
         };
@@ -7605,8 +7624,45 @@ Expected function or array of functions, received type ${typeof value}.`
         fn("copySn", () => {
         })(sn);
       }
+      function selected(row) {
+        const sn = String(row && row.sn || "");
+        return page.value === "history" ? !!isHistoryTrackVisible(sn) : !!isSnSelected(sn);
+      }
+      function toggleRow(row, checked) {
+        const sn = String(row && row.sn || "");
+        if (!sn) {
+          return;
+        }
+        if (page.value === "history") {
+          setHistorySnVisible(sn, !!checked);
+        } else {
+          setSnSelected(sn, !!checked);
+        }
+      }
+      function onCardClick(row) {
+        const sn = String(row && row.sn || "");
+        if (!sn) {
+          return;
+        }
+        if (rowClickTimer) {
+          clearTimeout(rowClickTimer);
+          rowClickTimer = null;
+        }
+        rowClickTimer = setTimeout(() => {
+          rowClickTimer = null;
+          if (page.value === "history") {
+            focusHistoryAircraft(sn);
+            return;
+          }
+          const item = (window.latestDroneMap || {})[sn];
+          if (item) {
+            showDroneInfoCard(item);
+          }
+        }, 220);
+      }
       return {
         rows,
+        page,
         rowClasses,
         hasAlarm,
         stateClass,
@@ -7617,7 +7673,10 @@ Expected function or array of functions, received type ${typeof value}.`
         uasIdText,
         fmt,
         fmtAge,
+        selected,
         isSnSelected,
+        toggleRow,
+        onCardClick,
         onCopyClick
       };
     },
@@ -7639,18 +7698,21 @@ Expected function or array of functions, received type ${typeof value}.`
             {
               key: sn || `card-${idx}`,
               class: this.rowClasses(row),
-              "data-sn": sn
+              "data-sn": sn,
+              onClick: () => this.onCardClick(row)
             },
             [
               h("div", { class: "live-card-top" }, [
                 h("div", { class: "live-card-title", title }, title),
                 h("div", { class: "live-card-actions" }, [
-                  h("label", { class: "live-card-pick" }, [
+                  h("label", { class: "live-card-pick", onClick: stopPropagationEvent }, [
                     h("input", {
                       class: "sel-sn",
                       type: "checkbox",
                       "data-sn": sn,
-                      checked: this.isSnSelected(sn)
+                      checked: this.selected(row),
+                      onClick: stopPropagationEvent,
+                      onChange: (event) => this.toggleRow(row, event.target.checked)
                     }),
                     h("span", "选中")
                   ]),

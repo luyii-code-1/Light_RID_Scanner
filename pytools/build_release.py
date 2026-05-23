@@ -4,35 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import json
 import os
 import platform
 import shutil
 import struct
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-def _load_bump_build_info():
-    module_path = ROOT / "tools" / "bump_build.py"
-    if not module_path.exists():
-        raise ModuleNotFoundError(f"missing build metadata helper: {module_path}")
-    spec = importlib.util.spec_from_file_location("light_rid_bump_build", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"unable to load build metadata helper: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    func = getattr(module, "bump_build_info", None)
-    if not callable(func):
-        raise AttributeError(f"bump_build_info not found in {module_path}")
-    return func
-
-
-bump_build_info = _load_bump_build_info()
+BUILD_INFO_PATH = ROOT / "rid_build_info.json"
 
 EDITION_ENTRYPOINTS = {
     "station": ROOT / "station_edition" / "run.py",
@@ -132,6 +116,49 @@ def exact_git_tag() -> str:
         pass
     return ""
 
+
+def git_short_head() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short=7", "HEAD"],
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        value = (proc.stdout or "").strip()
+        if proc.returncode == 0 and value:
+            return value
+    except Exception:
+        pass
+    return "local"
+
+
+def git_dirty() -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain"],
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        return bool((proc.stdout or "").strip())
+    except Exception:
+        return False
+
+
+def read_build_info() -> dict:
+    if not BUILD_INFO_PATH.exists():
+        return {}
+    try:
+        data = json.loads(BUILD_INFO_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
 def resolve_release_tag(cli_tag: str | None = None) -> str:
     explicit = str(cli_tag or "").strip()
     if explicit:
@@ -142,8 +169,23 @@ def resolve_release_tag(cli_tag: str | None = None) -> str:
     return exact_git_tag()
 
 def prepare_build_info(*, release_tag: str = "") -> None:
-    used = bump_build_info(tag=(release_tag or None))
-    print(f"build info: {used} (tag={release_tag or '-'})")
+    prev = read_build_info()
+    commit = git_short_head()
+    tag = str(release_tag or "").strip()
+    try:
+        prev_build = int(prev.get("build") or 0)
+    except Exception:
+        prev_build = 0
+    build = prev_build + 1 if str(prev.get("commit") or "").strip() == commit else 1
+    payload = {
+        "commit": commit,
+        "tag": tag,
+        "build": build,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dirty": git_dirty(),
+    }
+    BUILD_INFO_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"build version: commit:{commit}#{build} tag:{tag or '-'}")
 
 
 def build_binary(edition: str, target: str, *, clean: bool = True, release_tag: str = "") -> Path:

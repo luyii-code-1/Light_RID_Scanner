@@ -60,7 +60,8 @@ jobs:
           set -euxo pipefail
           python pytools/build_release.py \
             --edition "${{ matrix.edition }}" \
-            --target "${{ matrix.target }}"
+            --target "${{ matrix.target }}" \
+            --release-tag "${{ env.RELEASE_TAG }}"
           file "release/${{ matrix.edition }}/${{ matrix.target }}"/*
 
       - name: Prepare artifact
@@ -124,7 +125,7 @@ jobs:
               python -c "import os, platform, struct; print(\"python_bits =\", struct.calcsize(\"P\") * 8); print(\"platform_machine =\", platform.machine()); print(\"uname_machine =\", os.uname().machine)"
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
-              python pytools/build_release.py --edition "${{ matrix.edition }}" --target x32
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target x32 --release-tag "${{ env.RELEASE_TAG }}"
               file "release/${{ matrix.edition }}/x32"/*'
 
       - name: Prepare artifact
@@ -193,7 +194,7 @@ jobs:
               python -c "import os, platform, struct; print(\"python_bits =\", struct.calcsize(\"P\") * 8); print(\"platform_machine =\", platform.machine()); print(\"uname_machine =\", os.uname().machine)"
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
-              python pytools/build_release.py --edition "${{ matrix.edition }}" --target armv7
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target armv7 --release-tag "${{ env.RELEASE_TAG }}"
               file "release/${{ matrix.edition }}/armv7"/*'
 
       - name: Prepare artifact

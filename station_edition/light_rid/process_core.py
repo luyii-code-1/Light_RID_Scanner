@@ -1522,13 +1522,23 @@ def _api_iso_now(ts: float | None = None) -> str:
         return ""
 
 def _load_build_info() -> dict:
-    path = _app_file_path(BUILD_INFO_FILE)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    paths: list[str] = [_app_file_path(BUILD_INFO_FILE)]
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        paths.append(os.path.join(str(frozen_root), BUILD_INFO_FILE))
+    seen: set[str] = set()
+    for path in paths:
+        key = os.path.normcase(os.path.abspath(str(path or "")))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            continue
+    return {}
 
 def _app_update_state_dir() -> str:
     if str(platform.system() or "").lower() == "linux":
@@ -2023,6 +2033,21 @@ def _local_app_tag() -> str:
         return tag
     return str(_app_update_read_json(_app_update_current_path()).get("installed_tag") or "").strip()
 
+def _normalize_commit_ref(text: str) -> str:
+    raw = str(text or "").strip().lower()
+    return raw if re.fullmatch(r"[0-9a-f]{7,40}", raw or "") else ""
+
+def _app_update_available(current_tag: str, latest_tag: str, current_commit: str, latest_commit: str) -> bool:
+    cur_tag = str(current_tag or "").strip()
+    new_tag = str(latest_tag or "").strip()
+    if cur_tag and new_tag:
+        return cur_tag != new_tag
+    cur_commit = _normalize_commit_ref(current_commit)
+    new_commit = _normalize_commit_ref(latest_commit)
+    if cur_commit and new_commit:
+        return cur_commit != new_commit
+    return False
+
 def _fallback_private_commit() -> str:
     try:
         path = os.path.abspath(_runtime_entrypoint_path())
@@ -2308,7 +2333,7 @@ def _check_app_update_once(manual: bool = False, auto_apply: bool = False) -> di
         current_commit = _local_app_commit() or _fallback_private_commit()
         support = _app_update_runtime_support()
         asset = _pick_release_asset(release.get("assets") or [], str(support.get("target_arch") or ""))
-        update_available = bool(latest_tag and current_tag and latest_tag != current_tag)
+        update_available = _app_update_available(current_tag, latest_tag, current_commit, latest_commit)
         with app_update_lock:
             APP_UPDATE_STATE.update({
                 "running": False,
@@ -2326,9 +2351,17 @@ def _check_app_update_once(manual: bool = False, auto_apply: bool = False) -> di
                 "last_error": "",
             })
         if update_available:
-            _log(f"[INFO] 检测到程序更新: local_tag={current_tag} latest_tag={latest_tag}")
-        elif latest_tag:
-            _log(f"[INFO] 程序更新检查完成: current_tag={current_tag or '-'} latest_tag={latest_tag}")
+            _log(
+                "[INFO] 检测到程序更新: "
+                f"local_tag={current_tag or '-'} latest_tag={latest_tag or '-'} "
+                f"local_commit={_short_commit(current_commit)} latest_commit={_short_commit(latest_commit)}"
+            )
+        elif latest_tag or latest_commit:
+            _log(
+                "[INFO] 程序更新检查完成: "
+                f"current_tag={current_tag or '-'} latest_tag={latest_tag or '-'} "
+                f"current_commit={_short_commit(current_commit)} latest_commit={_short_commit(latest_commit)}"
+            )
         return {"ok": True, "manual": bool(manual), "state": _app_update_status_payload()}
     except Exception as e:
         with app_update_lock:

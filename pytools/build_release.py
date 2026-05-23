@@ -14,6 +14,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+TOOLS_DIR = ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from bump_build import bump_build_info
 
 EDITION_ENTRYPOINTS = {
     "station": ROOT / "station_edition" / "run.py",
@@ -96,8 +101,38 @@ def validate_target_runtime(target: str) -> None:
                 "Use ubuntu-24.04-arm or an ARM64 machine."
             )
 
+def exact_git_tag() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "describe", "--tags", "--exact-match", "HEAD"],
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        value = (proc.stdout or "").strip()
+        if proc.returncode == 0 and value:
+            return value
+    except Exception:
+        pass
+    return ""
 
-def build_binary(edition: str, target: str, *, clean: bool = True) -> Path:
+def resolve_release_tag(cli_tag: str | None = None) -> str:
+    explicit = str(cli_tag or "").strip()
+    if explicit:
+        return explicit
+    env_tag = str(os.environ.get("RELEASE_TAG") or "").strip()
+    if env_tag:
+        return env_tag
+    return exact_git_tag()
+
+def prepare_build_info(*, release_tag: str = "") -> None:
+    used = bump_build_info(tag=(release_tag or None))
+    print(f"build info: {used} (tag={release_tag or '-'})")
+
+
+def build_binary(edition: str, target: str, *, clean: bool = True, release_tag: str = "") -> Path:
     validate_target_runtime(target)
 
     entry = EDITION_ENTRYPOINTS[edition]
@@ -116,10 +151,13 @@ def build_binary(edition: str, target: str, *, clean: bool = True) -> Path:
         shutil.rmtree(work_dir, ignore_errors=True)
 
     dist_dir.mkdir(parents=True, exist_ok=True)
+    prepare_build_info(release_tag=release_tag)
 
     env = dict(os.environ)
     env["LIGHT_RID_EDITION"] = edition
     env["LIGHT_RID_TARGET"] = target
+    if release_tag:
+        env["RELEASE_TAG"] = release_tag
 
     cmd = [
         sys.executable,
@@ -136,6 +174,8 @@ def build_binary(edition: str, target: str, *, clean: bool = True) -> Path:
             "station_edition/light_rid/resources/rid-models.json",
             "station_edition/light_rid/resources",
         ),
+        "--add-data",
+        data_arg("rid_build_info.json", "."),
         "--distpath",
         str(dist_dir),
         "--workpath",
@@ -192,14 +232,16 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--pi-config", default=str(ROOT / "tools" / "pi.local.json"))
     p.add_argument("--no-restart", action="store_true")
+    p.add_argument("--release-tag", default="", help="release tag to embed into rid_build_info.json")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     target = TARGET_ALIASES.get(args.target, args.target)
+    release_tag = resolve_release_tag(args.release_tag)
 
-    artifact = build_binary(args.edition, target, clean=not args.no_clean)
+    artifact = build_binary(args.edition, target, clean=not args.no_clean, release_tag=release_tag)
     print(f"artifact: {artifact}")
 
     if args.sync_pi:

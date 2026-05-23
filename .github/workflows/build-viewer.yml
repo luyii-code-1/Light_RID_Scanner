@@ -34,10 +34,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout code with CI token
         uses: actions/checkout@v5
+        if: ${{ secrets.CI_REPO_TOKEN != '' }}
         with:
           token: ${{ secrets.CI_REPO_TOKEN }}
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Checkout code with default token
+        uses: actions/checkout@v5
+        if: ${{ secrets.CI_REPO_TOKEN == '' }}
+        with:
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up Python
@@ -86,10 +93,17 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout code
+      - name: Checkout code with CI token
         uses: actions/checkout@v5
+        if: ${{ secrets.CI_REPO_TOKEN != '' }}
         with:
           token: ${{ secrets.CI_REPO_TOKEN }}
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Checkout code with default token
+        uses: actions/checkout@v5
+        if: ${{ secrets.CI_REPO_TOKEN == '' }}
+        with:
           ref: ${{ env.BUILD_REF }}
 
       - name: Show runner info

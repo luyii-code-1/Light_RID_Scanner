@@ -31,7 +31,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          token: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up Python
@@ -99,7 +98,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          token: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Show runner info
@@ -161,7 +159,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          token: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up QEMU

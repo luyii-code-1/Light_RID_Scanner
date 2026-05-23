@@ -1246,7 +1246,7 @@ function renderAppUpdateState(state){
   if(state.install_supported === false && state.support_reason) lines.push('当前环境: ' + String(state.support_reason));
   if(state.asset_name) lines.push('匹配资产: ' + String(state.asset_name));
   if(state.requires_sudo && state.staged_ready && !state.installing) lines.push('安装时会按需询问 sudo 密码。');
-  el.textContent = lines.join(' | ');
+  el.textContent = lines.join('\n');
   if(qs('btn-app-update-check')){
     qs('btn-app-update-check').disabled = !!state.running || !!state.download_running || !!state.installing;
   }

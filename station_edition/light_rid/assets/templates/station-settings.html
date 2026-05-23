@@ -166,6 +166,12 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .api-token-grid .field{min-width:0}
 .api-token-grid input:not([type="checkbox"]),.api-token-grid select,.api-token-create-grid input:not([type="checkbox"]),.api-token-create-grid select{height:38px}
 .model-update-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center}
+.model-update-row>*{min-width:0}
+.app-update-row{grid-template-columns:auto minmax(0,1fr);align-items:start}
+.app-update-row>label{padding-top:2px}
+.app-update-state{margin-top:0;min-width:0;white-space:pre-line;word-break:break-word;overflow-wrap:anywhere;padding:10px 12px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:10px;background:color-mix(in srgb,var(--surface-tonal) 58%,var(--card2))}
+.app-update-row .row-actions,.app-update-row>#app-update-upload-file,.app-update-row>.micro:last-of-type{grid-column:1/-1}
+.app-update-row .row-actions{margin-top:2px}
 .model-editor{display:grid;gap:10px;margin-top:10px}
 .model-editor-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
 .model-editor-toolbar input{height:42px}
@@ -266,7 +272,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
   .zone-layout{grid-template-columns:repeat(3,minmax(0,1fr))}
   .hook-layout .field:last-child,.api-token-create-grid .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
 }
-@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.access-subgrid,.hook-layout,.api-token-head,.api-token-create-grid,.api-token-grid,.policy-grid,.zone-layout,.field-inline,.model-update-row,.model-editor-toolbar,.model-map-row,.sso-link-options{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
+@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.access-subgrid,.hook-layout,.api-token-head,.api-token-create-grid,.api-token-grid,.policy-grid,.zone-layout,.field-inline,.model-update-row,.app-update-row,.model-editor-toolbar,.model-map-row,.sso-link-options{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
 @media (max-width:700px){
   .wrap{width:min(100vw - 12px,1420px);padding:10px 6px 18px}
   .topbar,.draft-bar{gap:10px}
@@ -354,9 +360,9 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
               </div>
               <div class="micro" id="model-update-state">识别库可从默认源或自定义地址同步。</div>
-              <div class="model-update-row" style="margin-top:10px">
+              <div class="model-update-row app-update-row" style="margin-top:10px">
                 <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
-                <div class="micro" id="app-update-state">当前版本与最新版本尚未检查。</div>
+                <div class="micro app-update-state" id="app-update-state">当前版本与最新版本尚未检查。</div>
                 <div class="row-actions">
                   <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
                   <button class="btn ghost" id="btn-app-update-download" type="button">后台下载安装包</button>

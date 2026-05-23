@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 _PAGE_HTML = """<!doctype html><html lang="zh"><head>
@@ -7155,29 +7156,50 @@ async function save(){var body={iface:qs('iface').value,channel:Number(qs('chann
 qs('btn-refresh').addEventListener('click',function(){loadStatus().catch(e=>setStatus(e.message||String(e),true))});qs('btn-custom-bind').addEventListener('click',function(){var p=qs('bind-panel');p.style.display=p.style.display==='none'?'block':'none';renderBindList()});qs('iface').addEventListener('change',renderBindList);qs('btn-save').addEventListener('click',function(){save().catch(e=>setStatus(e.message||String(e),true))});qs('btn-location').addEventListener('click',function(){if(!navigator.geolocation){setStatus('浏览器不支持定位',true);return}navigator.geolocation.getCurrentPosition(function(pos){qs('base-lat').value=String(pos.coords.latitude||'');qs('base-lon').value=String(pos.coords.longitude||'');setStatus('已读取浏览器位置',false)},function(err){setStatus('定位失败: '+(err&&err.message?err.message:err),true)},{enableHighAccuracy:true,timeout:12000,maximumAge:0})});loadStatus().catch(e=>setStatus(e.message||String(e),true));
 </script></body></html>"""
 
-def _station_settings_asset_url() -> str:
-    asset_url = "/assets/vue/station-settings.js"
-    asset_path = os.path.join(os.path.dirname(__file__), "assets", "vue", "station-settings.js")
-    try:
-        st = os.stat(asset_path)
-        return f"{asset_url}?v={int(st.st_mtime)}-{int(st.st_size)}"
-    except OSError:
-        return asset_url
-
-def _station_settings_template_path() -> Path | None:
+def _station_asset_roots() -> list[Path]:
+    roots: list[Path] = []
     base_dir = Path(__file__).resolve().parent
-    candidates = [
-        base_dir / "assets" / "templates" / "station-settings.html",
-        Path.cwd() / "station_edition" / "light_rid" / "assets" / "templates" / "station-settings.html",
-        Path.cwd() / "light_rid" / "assets" / "templates" / "station-settings.html",
-    ]
-    for candidate in candidates:
+    roots.append(base_dir)
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        roots.append(Path(frozen_root) / "station_edition" / "light_rid")
+    roots.append(Path.cwd() / "station_edition" / "light_rid")
+    roots.append(Path.cwd() / "light_rid")
+    unique_roots: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = os.path.normcase(str(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_roots.append(root)
+    return unique_roots
+
+
+def _station_asset_path(*parts: str) -> Path | None:
+    for root in _station_asset_roots():
+        candidate = root.joinpath(*parts)
         try:
             if candidate.is_file():
                 return candidate
         except OSError:
             continue
     return None
+
+
+def _station_settings_asset_url() -> str:
+    asset_url = "/assets/vue/station-settings.js"
+    asset_path = _station_asset_path("assets", "vue", "station-settings.js")
+    if asset_path is None:
+        return asset_url
+    try:
+        st = asset_path.stat()
+        return f"{asset_url}?v={int(st.st_mtime)}-{int(st.st_size)}"
+    except OSError:
+        return asset_url
+
+def _station_settings_template_path() -> Path | None:
+    return _station_asset_path("assets", "templates", "station-settings.html")
 
 def _build_settings_html() -> str:
     template_path = _station_settings_template_path()

@@ -1,15 +1,15 @@
 name: Build Edition Binaries
 
 permissions:
-  contents: write
+  contents: read
 
 on:
-  release:
-    types: [published]
+  push:
+  workflow_dispatch:
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name }}
-  BUILD_REF: ${{ github.event.release.tag_name }}
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+  BUILD_REF: ${{ github.sha }}
 
 jobs:
   linux-native:
@@ -80,15 +80,12 @@ jobs:
           file "$DST"
           ls -lah release-upload
 
-      - name: Upload binary to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
-        run: |
-          set -euxo pipefail
-          gh release upload "${RELEASE_TAG}" release-upload/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: station-linux-${{ matrix.target }}-${{ github.sha }}
+          path: release-upload/*
+          if-no-files-found: error
 
   linux-x32:
     name: ${{ matrix.edition }} linux-x32
@@ -145,15 +142,12 @@ jobs:
           file "$DST"
           ls -lah release-upload
 
-      - name: Upload binary to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
-        run: |
-          set -euxo pipefail
-          gh release upload "${RELEASE_TAG}" release-upload/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: station-linux-x32-${{ github.sha }}
+          path: release-upload/*
+          if-no-files-found: error
 
   linux-armv7:
     name: ${{ matrix.edition }} linux-armv7
@@ -215,12 +209,9 @@ jobs:
           file "$DST"
           ls -lah release-upload
 
-      - name: Upload binary to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
-        run: |
-          set -euxo pipefail
-          gh release upload "${RELEASE_TAG}" release-upload/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: station-linux-armv7-${{ github.sha }}
+          path: release-upload/*
+          if-no-files-found: error

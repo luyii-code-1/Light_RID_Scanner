@@ -1,15 +1,15 @@
 name: Build Viewer Binary
 
 permissions:
-  contents: write
+  contents: read
 
 on:
-  release:
-    types: [published]
+  push:
+  workflow_dispatch:
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name }}
-  BUILD_REF: ${{ github.event.release.tag_name }}
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+  BUILD_REF: ${{ github.sha }}
 
 jobs:
   viewer:
@@ -74,15 +74,12 @@ jobs:
           cp "release/viewer/${{ matrix.target }}"/* release-upload/
           ls -lah release-upload
 
-      - name: Upload binary to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
-        run: |
-          set -euxo pipefail
-          gh release upload "${RELEASE_TAG}" release-upload/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-${{ matrix.target }}-${{ github.sha }}
+          path: release-upload/*
+          if-no-files-found: error
 
   viewer-linux-x32:
     name: viewer x32
@@ -126,12 +123,9 @@ jobs:
           cp "release/viewer/x32"/* release-upload/
           ls -lah release-upload
 
-      - name: Upload binary to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN || github.token }}
-        run: |
-          set -euxo pipefail
-          gh release upload "${RELEASE_TAG}" release-upload/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-x32-${{ github.sha }}
+          path: release-upload/*
+          if-no-files-found: error

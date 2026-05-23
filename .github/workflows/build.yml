@@ -14,6 +14,8 @@ env:
 jobs:
   linux-native:
     name: ${{ matrix.edition }} linux-${{ matrix.target }}
+    env:
+      CI_REPO_TOKEN: ${{ secrets.CI_REPO_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,14 +32,14 @@ jobs:
     steps:
       - name: Checkout code with CI token
         uses: actions/checkout@v5
-        if: ${{ secrets.CI_REPO_TOKEN != '' }}
+        if: ${{ env.CI_REPO_TOKEN != '' }}
         with:
-          token: ${{ secrets.CI_REPO_TOKEN }}
+          token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Checkout code with default token
         uses: actions/checkout@v5
-        if: ${{ secrets.CI_REPO_TOKEN == '' }}
+        if: ${{ env.CI_REPO_TOKEN == '' }}
         with:
           ref: ${{ env.BUILD_REF }}
 
@@ -97,6 +99,8 @@ jobs:
   linux-x32:
     name: ${{ matrix.edition }} linux-x32
     runs-on: ubuntu-24.04
+    env:
+      CI_REPO_TOKEN: ${{ secrets.CI_REPO_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,14 +109,14 @@ jobs:
     steps:
       - name: Checkout code with CI token
         uses: actions/checkout@v5
-        if: ${{ secrets.CI_REPO_TOKEN != '' }}
+        if: ${{ env.CI_REPO_TOKEN != '' }}
         with:
-          token: ${{ secrets.CI_REPO_TOKEN }}
+          token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Checkout code with default token
         uses: actions/checkout@v5
-        if: ${{ secrets.CI_REPO_TOKEN == '' }}
+        if: ${{ env.CI_REPO_TOKEN == '' }}
         with:
           ref: ${{ env.BUILD_REF }}
 
@@ -166,6 +170,8 @@ jobs:
   linux-armv7:
     name: ${{ matrix.edition }} linux-armv7
     runs-on: ubuntu-24.04
+    env:
+      CI_REPO_TOKEN: ${{ secrets.CI_REPO_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -174,14 +180,14 @@ jobs:
     steps:
       - name: Checkout code with CI token
         uses: actions/checkout@v5
-        if: ${{ secrets.CI_REPO_TOKEN != '' }}
+        if: ${{ env.CI_REPO_TOKEN != '' }}
         with:
-          token: ${{ secrets.CI_REPO_TOKEN }}
+          token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
 
       - name: Checkout code with default token
         uses: actions/checkout@v5
-        if: ${{ secrets.CI_REPO_TOKEN == '' }}
+        if: ${{ env.CI_REPO_TOKEN == '' }}
         with:
           ref: ${{ env.BUILD_REF }}
 

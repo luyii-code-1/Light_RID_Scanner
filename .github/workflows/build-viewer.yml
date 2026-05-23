@@ -1,15 +1,17 @@
 name: Build Viewer Binary
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   push:
+  release:
+    types: [published]
   workflow_dispatch:
 
 env:
-  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-  BUILD_REF: ${{ github.sha }}
+  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
+  BUILD_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
 jobs:
   viewer:
@@ -90,6 +92,17 @@ jobs:
           path: release-upload/*
           if-no-files-found: error
 
+      - name: Upload binary to GitHub Release
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CI_REPO_TOKEN || github.token }}
+        run: |
+          set -euxo pipefail
+          gh release upload "${RELEASE_TAG}" release-upload/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
   viewer-linux-x32:
     name: viewer x32
     runs-on: ubuntu-24.04
@@ -147,3 +160,14 @@ jobs:
           name: viewer-x32-${{ github.sha }}
           path: release-upload/*
           if-no-files-found: error
+
+      - name: Upload binary to GitHub Release
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CI_REPO_TOKEN || github.token }}
+        run: |
+          set -euxo pipefail
+          gh release upload "${RELEASE_TAG}" release-upload/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

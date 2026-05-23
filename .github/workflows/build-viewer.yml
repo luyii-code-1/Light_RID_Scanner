@@ -38,17 +38,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
+      - name: Require CI repo token
+        if: ${{ env.CI_REPO_TOKEN == '' }}
+        shell: bash
+        run: |
+          echo "CI_REPO_TOKEN is required for checkout in this repository."
+          exit 1
+
       - name: Checkout code with CI token
         uses: actions/checkout@v5
-        if: ${{ env.CI_REPO_TOKEN != '' }}
         with:
           token: ${{ env.CI_REPO_TOKEN }}
-          ref: ${{ env.BUILD_REF }}
-
-      - name: Checkout code with default token
-        uses: actions/checkout@v5
-        if: ${{ env.CI_REPO_TOKEN == '' }}
-        with:
           ref: ${{ env.BUILD_REF }}
 
       - name: Set up Python
@@ -110,17 +110,17 @@ jobs:
       CI_REPO_TOKEN: ${{ secrets.CI_REPO_TOKEN }}
 
     steps:
+      - name: Require CI repo token
+        if: ${{ env.CI_REPO_TOKEN == '' }}
+        shell: bash
+        run: |
+          echo "CI_REPO_TOKEN is required for checkout in this repository."
+          exit 1
+
       - name: Checkout code with CI token
         uses: actions/checkout@v5
-        if: ${{ env.CI_REPO_TOKEN != '' }}
         with:
           token: ${{ env.CI_REPO_TOKEN }}
-          ref: ${{ env.BUILD_REF }}
-
-      - name: Checkout code with default token
-        uses: actions/checkout@v5
-        if: ${{ env.CI_REPO_TOKEN == '' }}
-        with:
           ref: ${{ env.BUILD_REF }}
 
       - name: Show runner info

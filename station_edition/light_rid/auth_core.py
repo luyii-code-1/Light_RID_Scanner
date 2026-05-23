@@ -200,8 +200,11 @@ def _settings_runtime_payload(limit: int = 180) -> dict:
     aps, aps_seq, aps_total = _ap_snapshot()
     with log_lock:
         event_logs = list(log_buf)[-n:]
+        operation_logs = list(op_buf)[-n:]
         scan_logs = list(scan_buf)[-n:]
+        scan_diff_logs = list(scan_diff_buf)[-n:]
         ap_logs = list(ap_buf)[-n:]
+        system_logs = list(sys_err_buf)[-n:]
     return {
         "ok": True,
         "aps": aps,
@@ -209,8 +212,11 @@ def _settings_runtime_payload(limit: int = 180) -> dict:
         "aps_total": aps_total,
         "metrics": _host_metrics_payload(24 * 3600),
         "event_logs": event_logs,
+        "operation_logs": operation_logs,
         "scan_logs": scan_logs,
+        "scan_diff_logs": scan_diff_logs,
         "ap_logs": ap_logs,
+        "system_logs": system_logs,
     }
 
 def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:
@@ -223,7 +229,9 @@ def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:
         runtime_rows = list(log_buf)[-n:]
         operation_rows = list(op_buf)[-n:]
         scan_rows = list(scan_buf)[-n:]
+        scan_diff_rows = list(scan_diff_buf)[-n:]
         ap_rows = list(ap_buf)[-n:]
+        system_rows = list(sys_err_buf)[-n:]
     if kind in ("op", "ops", "operation", "audit"):
         kind = "operation"
         rows = operation_rows
@@ -233,15 +241,12 @@ def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:
     elif kind in ("ap", "ap_scan"):
         kind = "ap"
         rows = ap_rows
+    elif kind in ("system", "system_error", "error", "errors"):
+        kind = "system"
+        rows = system_rows
     elif kind in ("diff", "scan_diff"):
         kind = "scan_diff"
-        rows = list(difflib.unified_diff(
-            runtime_rows,
-            scan_rows,
-            fromfile="runtime.log",
-            tofile="scan.log",
-            lineterm="",
-        ))[-n:]
+        rows = scan_diff_rows
     else:
         kind = "runtime"
         rows = runtime_rows
@@ -251,7 +256,7 @@ def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:
         "limit": n,
         "count": len(rows),
         "items": rows,
-        "available": ["runtime", "operation", "scan", "scan_diff", "ap"],
+        "available": ["runtime", "operation", "scan", "scan_diff", "ap", "system"],
     }
 
 def _logs_export_bytes(log_type: str = "all", limit: int = 5000) -> tuple[bytes, str, str]:
@@ -260,7 +265,7 @@ def _logs_export_bytes(log_type: str = "all", limit: int = 5000) -> tuple[bytes,
     if kind == "all":
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for name in ("runtime", "operation", "scan", "scan_diff", "ap"):
+            for name in ("runtime", "operation", "scan", "scan_diff", "ap", "system"):
                 snap = _logs_snapshot(name, limit=limit)
                 zf.writestr(f"{name}.log", "\n".join(str(x) for x in snap.get("items") or []) + "\n")
         return buf.getvalue(), f"light-rid-logs-{stamp}.zip", "application/zip"

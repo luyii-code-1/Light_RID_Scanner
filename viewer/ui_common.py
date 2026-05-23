@@ -50,9 +50,9 @@ def station_page(
 .rid-loading-overlay{position:fixed;inset:0;z-index:2600;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(9,15,24,.38);backdrop-filter:blur(12px);pointer-events:auto}
 .rid-loading-overlay.show{display:flex}
 .rid-loading-shell{width:min(460px,calc(100vw - 32px))}
-.rid-loading-box{display:grid;gap:16px;padding:22px 22px 18px;border-radius:16px;border:1px solid color-mix(in srgb,var(--border) 96%,rgba(255,255,255,.42));background:linear-gradient(180deg,color-mix(in srgb,var(--panel2) 92%,rgba(255,255,255,.38)),color-mix(in srgb,var(--card) 96%,rgba(255,255,255,.18)));box-shadow:0 18px 40px rgba(19,42,71,.12);backdrop-filter:blur(14px)}
+.rid-loading-box{display:grid;gap:16px;padding:22px 22px 18px;border-radius:16px;border:1px solid color-mix(in srgb,var(--border) 96%,rgba(255,255,255,.18));background:linear-gradient(180deg,color-mix(in srgb,var(--panel2) 94%,transparent),color-mix(in srgb,var(--card) 98%,transparent));box-shadow:0 18px 40px rgba(0,0,0,.24);backdrop-filter:blur(14px)}
 .rid-loading-head{display:grid;grid-template-columns:48px minmax(0,1fr);gap:14px;align-items:center}
-.rid-loading-spinner{position:relative;width:48px;height:48px;border-radius:14px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--border));background:linear-gradient(180deg,rgba(255,255,255,.46),rgba(255,255,255,.16));display:grid;place-items:center}
+.rid-loading-spinner{position:relative;width:48px;height:48px;border-radius:14px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--border));background:linear-gradient(180deg,color-mix(in srgb,var(--blue) 14%,var(--card2)),color-mix(in srgb,var(--card) 82%,transparent));display:grid;place-items:center}
 .rid-loading-spinner::before{content:"";width:22px;height:22px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 14%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .9s linear infinite}
 .rid-loading-copy-wrap{display:grid;gap:6px}
 .rid-loading-title{font:700 18px/1.14 var(--font-ui);color:var(--txt);letter-spacing:.01em}

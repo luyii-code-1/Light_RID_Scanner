@@ -15,11 +15,20 @@ body.theme-light{
   --bg:#f3f5f8;--bg2:#e8edf3;--card:rgba(255,255,255,.98);--card2:#f7f9fc;--border:rgba(15,23,42,.09);--txt:#162033;
   --muted:#7c889a;--blue:#2f6fed;--green:#1f9d68;--warn:#d95050;--glow:rgba(47,111,237,.12);--soft:rgba(255,255,255,.86);--surface-tonal:#eef4fb
 }
+body.theme-dark{
+  --bg:#0f1724;--bg2:#142033;--card:rgba(18,27,42,.96);--card2:#172336;--border:rgba(148,163,184,.18);--txt:#e7eef9;
+  --muted:#95a6bc;--blue:#6ea8ff;--green:#3bb980;--warn:#ff8d8d;--glow:rgba(110,168,255,.18);--soft:rgba(11,18,28,.88);--surface-tonal:#17283d;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.26);--shadow:0 12px 26px rgba(0,0,0,.28);--shadow-lg:0 18px 40px rgba(0,0,0,.34)
+}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--font-ui)}
 body{min-height:var(--app-vh);background:
   radial-gradient(circle at top left, rgba(255,255,255,.92), rgba(255,255,255,0) 28%),
   radial-gradient(circle at top right, rgba(47,111,237,.08), rgba(47,111,237,0) 24%),
   linear-gradient(180deg,var(--bg),var(--bg2) 30%,var(--bg))}
+body.theme-dark{background:
+  radial-gradient(circle at top left, rgba(84,132,255,.12), rgba(84,132,255,0) 28%),
+  radial-gradient(circle at top right, rgba(59,130,246,.10), rgba(59,130,246,0) 24%),
+  linear-gradient(180deg,var(--bg),var(--bg2) 34%,var(--bg))}
 .wrap{width:min(1420px,calc(100vw - 24px));margin:0 auto;padding:clamp(14px,1.8vw,22px) clamp(10px,1.5vw,18px) 30px}
 .settings-sticky-head{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,color-mix(in srgb,var(--bg) 97%,white),color-mix(in srgb,var(--bg) 90%,transparent));padding-top:clamp(8px,1.2vw,14px);padding-bottom:4px}
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
@@ -350,8 +359,12 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <div class="micro" id="app-update-state">当前版本与最新版本尚未检查。</div>
                 <div class="row-actions">
                   <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
-                  <button class="btn" id="btn-app-update-start" type="button">立即自动更新</button>
+                  <button class="btn ghost" id="btn-app-update-download" type="button">后台下载安装包</button>
+                  <button class="btn ghost" id="btn-app-update-upload" type="button">上传本地安装包</button>
+                  <button class="btn" id="btn-app-update-start" type="button">安装已校验安装包</button>
                 </div>
+                <input id="app-update-upload-file" type="file" hidden>
+                <div class="micro">下载任务会在后台继续；手动上传后会按 GitHub Asset 的 SHA256 自动校验，通过后才能开始安装。</div>
               </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>

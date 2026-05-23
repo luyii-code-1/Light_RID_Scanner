@@ -39,11 +39,23 @@ body.theme-light{
   --warn:#d95050;--muted:#7c889a;
   --shadow-sm:0 1px 2px rgba(15,23,42,.04);--shadow:0 8px 18px rgba(15,23,42,.06);--shadow-lg:0 14px 30px rgba(15,23,42,.10)
 }
+body.theme-dark{
+  --bg:#0f1724;--bg2:#142033;--panel:rgba(18,27,42,.96);--panel2:#172336;--border:rgba(148,163,184,.18);--txt:#e7eef9;
+  --green:#39b980;--yellow:#e2a24a;--dim:#9aacbf;--blue:#6ea8ff;
+  --purple:#8a86ff;--cyan:#58b6ff;--glow:rgba(110,168,255,.18);--soft:rgba(11,18,28,.88);
+  --warn:#ff8d8d;--muted:#95a6bc;--surface-tonal:#17283d;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.26);--shadow:0 12px 24px rgba(0,0,0,.28);--shadow-lg:0 18px 40px rgba(0,0,0,.34)
+}
 body::before{
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
   background:
     radial-gradient(circle at 12% 12%, rgba(255,255,255,.82), rgba(255,255,255,0) 28%),
     radial-gradient(circle at 82% 0%, rgba(104,174,255,.18), rgba(104,174,255,0) 24%);
+}
+body.theme-dark::before{
+  background:
+    radial-gradient(circle at 12% 12%, rgba(110,168,255,.12), rgba(110,168,255,0) 28%),
+    radial-gradient(circle at 82% 0%, rgba(63,131,248,.12), rgba(63,131,248,0) 24%);
 }
 body.theme-light::before{
   background:
@@ -7023,7 +7035,7 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
 @media(max-width:720px){.wrap{width:calc(100vw - 10px);padding:10px 5px}.title{font-size:22px}pre{height:calc(100dvh - 230px);font-size:12px}}
 </style></head><body><div class="wrap">
   <div class="topbar">
-    <div><div class="title">日志</div><div class="meta">查看运行、操作、扫描和扫描差异日志。</div></div>
+    <div><div class="title">日志</div><div class="meta">查看运行、操作、扫描、解析状态 Diff、AP 和系统报错日志。</div></div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
       <button class="btn" id="btn-settings" type="button">设置</button>
@@ -7037,6 +7049,8 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
         <button class="tab" data-type="operation" type="button">操作日志</button>
         <button class="tab" data-type="scan" type="button">扫描日志</button>
         <button class="tab" data-type="scan_diff" type="button">扫描 Diff</button>
+        <button class="tab" data-type="ap" type="button">AP 日志</button>
+        <button class="tab" data-type="system" type="button">系统报错</button>
       </div>
       <div class="actions">
         <input id="limit" type="number" min="20" max="5000" value="500" title="行数">
@@ -7051,7 +7065,6 @@ body.theme-light pre{background:#fbfbfb;color:#24292f}
 </div>
 <script>
 function qs(id){return document.getElementById(id)}
-function enc(v){return String(v==null?'':v)}
 function pageHeaders(extra){var h={'X-LightRID-Page':'1'}; if(extra){Object.keys(extra).forEach(function(k){h[k]=extra[k]})} return h}
 function apiUrl(path){return new URL(path, location.origin).toString()}
 var authRedirecting=false;
@@ -7068,7 +7081,7 @@ async function loadLogs(){
   if(authExpired(r,d)){redirectLogin();throw new Error('login required')}
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   qs('log-view').textContent=(d.items||[]).join('\\n') || '(empty)';
-  qs('status').textContent=String(d.type||currentType)+' · '+String(d.count||0)+' 行';
+  qs('status').textContent=String(d.type||currentType)+' | '+String(d.count||0)+' lines';
 }
 function setType(t){
   currentType=t||'runtime';
@@ -7306,6 +7319,18 @@ def http_server_thread() -> None:
             except Exception:
                 return {}
             return obj if isinstance(obj, dict) else {}
+
+        def _read_binary_upload_info(self) -> tuple[str, int]:
+            raw_name = str(self.headers.get(APP_UPDATE_UPLOAD_NAME_HEADER) or "").strip()
+            try:
+                file_name = unquote(raw_name) if raw_name else ""
+            except Exception:
+                file_name = raw_name
+            try:
+                n = int(self.headers.get("Content-Length", "0") or "0")
+            except Exception:
+                n = 0
+            return file_name, max(0, n)
 
         def _auth_fail(self):
             self.send_response(401)
@@ -8699,6 +8724,28 @@ def http_server_thread() -> None:
                 self._read_json_body()
                 rsp = _check_app_update_once(manual=True)
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/settings/app-update/download":
+                self._read_json_body()
+                rsp = _start_app_update_download(manual=True)
+                _op_log("app-update-download", str(rsp.get("error") or rsp.get("message") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/settings/app-update/upload":
+                file_name, body_len = self._read_binary_upload_info()
+                if not file_name:
+                    self._send_json({"ok": False, "error": "upload file name missing"}, 400)
+                    return
+                try:
+                    meta = _accept_uploaded_app_update_package(file_name, self.rfile, body_len)
+                    rsp = {
+                        "ok": True,
+                        "message": f"{meta.get('asset_name') or file_name} 已上传并通过 SHA256 校验。",
+                        "state": _app_update_status_payload(),
+                    }
+                    _op_log("app-update-upload", str(meta.get("asset_name") or file_name), ip=_client_ip_from_handler(self), ok=True)
+                    self._send_json(rsp, 200)
+                except Exception as e:
+                    _op_log("app-update-upload", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e), "state": _app_update_status_payload()}, 400)
             elif path == "/api/settings/app-update/start":
                 body = self._read_json_body()
                 if not bool(body.get("confirm")):
@@ -8707,7 +8754,7 @@ def http_server_thread() -> None:
                 rsp = _start_app_update_install(manual=True, sudo_password=_sudo_password_from_body(body))
                 _op_log("app-update-start", str(rsp.get("error") or rsp.get("message") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 code = 200 if rsp.get("ok") else 500
-                if (not rsp.get("ok")) and ("root" in str(rsp.get("error") or "") or "sudo" in str(rsp.get("error") or "") or "权限" in str(rsp.get("error") or "")):
+                if (not rsp.get("ok")) and (bool(rsp.get("need_sudo")) or "root" in str(rsp.get("error") or "") or "sudo" in str(rsp.get("error") or "") or "权限" in str(rsp.get("error") or "")):
                     code = 403
                 self._send_json(rsp, code)
             elif path == "/api/network-bindings/save":
@@ -9021,3 +9068,4 @@ def http_server_thread() -> None:
 # -----------------------------------------------------------------------------
 # parse_frame
 # -----------------------------------------------------------------------------
+

@@ -7,6 +7,155 @@ def _snap(e: dict) -> dict:
     if CHANGE_ON_PL:   s["pl_sig"] = e.get("pl_sig")
     return s
 
+SCAN_DIFF_FIELDS = (
+    "sn", "src_mac", "id_type", "uas_id", "model", "scan_type", "firmware_type",
+    "capture_type", "ssid", "rid_format", "dji_rid_kind", "sub_format",
+    "parse_level", "parse_note", "coordinate_system", "warnings",
+    "last_ch", "ch_assumed", "rssi", "pl_sig",
+    "lat", "lon", "alt", "speed", "vspeed",
+    "pilot_lat", "pilot_lon", "pilot_alt",
+    "home_lat", "home_lon", "aux_lat", "aux_lon",
+    "pos_a_lat", "pos_a_lon", "pos_b_lat", "pos_b_lon",
+    "operator_positions", "raw_coords", "raw_packets_count",
+)
+SCAN_DIFF_LABELS = {
+    "scan_type": "scan",
+    "firmware_type": "firmware",
+    "capture_type": "capture",
+    "rid_format": "format",
+    "dji_rid_kind": "dji_kind",
+    "sub_format": "sub_format",
+    "parse_level": "parse_level",
+    "parse_note": "parse_note",
+    "coordinate_system": "coord_sys",
+    "last_ch": "channel",
+    "ch_assumed": "channel_assumed",
+    "pilot_lat": "pilot_lat",
+    "pilot_lon": "pilot_lon",
+    "pilot_alt": "pilot_alt",
+    "raw_packets_count": "raw_packets",
+    "operator_positions": "operators",
+    "raw_coords": "raw_coords",
+}
+
+def _scan_diff_round(value):
+    try:
+        if value is None:
+            return None
+        return round(float(value), 7)
+    except Exception:
+        return value
+
+def _scan_diff_position_digest(items) -> tuple[str, ...]:
+    out: list[str] = []
+    for item in list(items or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or item.get("source") or "?").strip() or "?"
+        lat = _fmt(_scan_diff_round(item.get("lat")), ".6f")
+        lon = _fmt(_scan_diff_round(item.get("lon")), ".6f")
+        alt = _fmt(item.get("alt"), ".1f", "m")
+        out.append(f"{role}@{lat},{lon},{alt}")
+    return tuple(out)
+
+def _scan_diff_state_snapshot(entry: dict | None) -> dict:
+    if not isinstance(entry, dict):
+        return {}
+    snap = {
+        "warnings": tuple(str(x) for x in (entry.get("warnings") or []) if str(x)),
+        "operator_positions": _scan_diff_position_digest(entry.get("operator_positions")),
+        "raw_coords": _scan_diff_position_digest(entry.get("raw_coords")),
+        "raw_packets_count": len(list(entry.get("raw_packets") or [])),
+    }
+    for key in SCAN_DIFF_FIELDS:
+        if key in snap:
+            continue
+        value = entry.get(key)
+        if key in (
+            "lat", "lon", "alt", "speed", "vspeed",
+            "pilot_lat", "pilot_lon", "pilot_alt",
+            "home_lat", "home_lon", "aux_lat", "aux_lon",
+            "pos_a_lat", "pos_a_lon", "pos_b_lat", "pos_b_lon",
+        ):
+            value = _scan_diff_round(value)
+        elif key == "parse_note":
+            value = str(value or "").strip()[:240]
+        elif key in ("scan_type", "firmware_type", "capture_type", "ssid", "rid_format", "dji_rid_kind", "sub_format", "parse_level", "coordinate_system", "sn", "src_mac", "id_type", "uas_id", "model"):
+            value = str(value or "").strip()
+        snap[key] = value
+    return snap
+
+def _scan_diff_format_value(value) -> str:
+    if value in (None, "", (), [], {}):
+        return "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+    if isinstance(value, tuple):
+        return "; ".join(_scan_diff_format_value(x) for x in value) or "-"
+    return str(value)
+
+def _scan_diff_change_lines(before: dict, after: dict, limit: int = 18) -> list[str]:
+    keys = [key for key in SCAN_DIFF_FIELDS if before.get(key) != after.get(key)]
+    lines: list[str] = []
+    for key in keys[:limit]:
+        label = SCAN_DIFF_LABELS.get(key, key)
+        lines.append(f"  ~ {label}: {_scan_diff_format_value(before.get(key))} -> {_scan_diff_format_value(after.get(key))}")
+    extra = len(keys) - limit
+    if extra > 0:
+        lines.append(f"  ... {extra} more fields changed")
+    return lines
+
+def _scan_diff_header(after: dict) -> str:
+    return (
+        f"[SCAN_DIFF] sn={after.get('sn') or '-'} uas={after.get('uas_id') or '-'} "
+        f"model={after.get('model') or '-'} scan={after.get('scan_type') or '-'} fw={after.get('firmware_type') or '-'}"
+    )
+
+def _scan_diff_summary_lines(after: dict) -> list[str]:
+    lines = [
+        "  parser: "
+        f"format={after.get('rid_format') or after.get('dji_rid_kind') or '-'} "
+        f"sub={after.get('sub_format') or '-'} "
+        f"level={after.get('parse_level') or '-'} "
+        f"coord={after.get('coordinate_system') or '-'}",
+        "  radio: "
+        f"capture={after.get('capture_type') or '-'} "
+        f"ch={_scan_diff_format_value(after.get('last_ch'))}{'~' if after.get('ch_assumed') else ''} "
+        f"rssi={_scan_diff_format_value(after.get('rssi'))} "
+        f"pl={_scan_diff_format_value(after.get('pl_sig'))} "
+        f"raw_packets={_scan_diff_format_value(after.get('raw_packets_count'))}",
+        "  aircraft: "
+        f"lat={_scan_diff_format_value(after.get('lat'))} "
+        f"lon={_scan_diff_format_value(after.get('lon'))} "
+        f"alt={_scan_diff_format_value(after.get('alt'))} "
+        f"spd={_scan_diff_format_value(after.get('speed'))} "
+        f"vspd={_scan_diff_format_value(after.get('vspeed'))}",
+        "  operator: "
+        f"pilot={_scan_diff_format_value(after.get('pilot_lat'))},{_scan_diff_format_value(after.get('pilot_lon'))},{_scan_diff_format_value(after.get('pilot_alt'))} "
+        f"roles={_scan_diff_format_value(after.get('operator_positions'))}",
+    ]
+    note = str(after.get("parse_note") or "").strip()
+    if note:
+        lines.append(f"  note: {note}")
+    warnings = after.get("warnings") or ()
+    if warnings:
+        lines.append(f"  warnings: {_scan_diff_format_value(warnings)}")
+    return lines
+
+def _build_scan_diff_entry(before: dict, after: dict, *, reason: str) -> str:
+    title = _scan_diff_header(after)
+    lines = [f"{title} reason={reason}"]
+    lines.extend(_scan_diff_summary_lines(after))
+    change_lines = _scan_diff_change_lines(before, after)
+    if change_lines:
+        lines.append("  changes:")
+        lines.extend(change_lines)
+    else:
+        lines.append("  changes: (none)")
+    return "\n".join(lines)
+
 NEW_FW_DETAIL_KEYS = (
     "kind", "format", "rid_format", "dji_rid_kind", "sub_format",
     "parse_level", "confidence", "coordinate_system", "warnings", "parse_note", "raw_vendor",
@@ -784,6 +933,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
     model = _resolve_model_name(sn, scan_type_key, None)
     now   = time.monotonic()
     now_wall = time.time()
+    scan_diff_entry = ""
 
     with state_lock:
         # MAC -> SN migration
@@ -796,6 +946,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             else:
                 history_table[sn] = history_table.pop(mac_key)
                 history_table[sn]["sn"] = sn
+        prev_scan_state = _scan_diff_state_snapshot(state_table.get(sn))
 
         created = False
         if sn not in state_table:
@@ -1036,12 +1187,19 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
             e["_dirty"]         = False
             e["_dirty_keys"]    = set()
 
+        next_scan_state = _scan_diff_state_snapshot(e)
+        if created or was_lost or prev_scan_state != next_scan_state:
+            diff_reason = "first" if created else ("reonline" if was_lost else "changed")
+            scan_diff_entry = _build_scan_diff_entry(prev_scan_state, next_scan_state, reason=diff_reason)
+
     if notify_payload is not None and notify_event_title:
         _notification_add(_notify_online_text(notify_payload, notify_event_title, now_wall), "ok", "rid")
         queue_online_notification(notify_payload, notify_event_title, now_wall=now_wall)
     if zone_notify_payload is not None and zone_notify_names:
         _notification_add(_notify_zone_alarm_text(zone_notify_payload, zone_notify_names, now_wall), "warn", "rid")
         queue_zone_alarm_notification(zone_notify_payload, zone_notify_names, now_wall=now_wall)
+    if scan_diff_entry:
+        _scan_diff(scan_diff_entry)
 
 def _emit_log(e: dict, changed_keys: set, reason: str) -> None:
     sn    = str(e.get("sn",""))
@@ -1386,6 +1544,12 @@ def _app_update_notice_path() -> str:
 def _app_update_current_path() -> str:
     return os.path.join(_app_update_state_dir(), "current.json")
 
+def _app_update_download_state_path() -> str:
+    return os.path.join(_app_update_state_dir(), "download.json")
+
+def _app_update_staged_meta_path() -> str:
+    return os.path.join(_app_update_state_dir(), "staged.json")
+
 def _app_update_stage_root() -> str:
     return os.path.join(tempfile.gettempdir(), "light_rid_app_update_stage")
 
@@ -1431,6 +1595,380 @@ def _app_update_pop_notice() -> dict:
     if data:
         _app_update_remove_file(path)
     return data
+
+def _app_update_persist_download_state(payload: dict) -> dict:
+    merged = dict(payload if isinstance(payload, dict) else {})
+    merged["updated_at"] = time.time()
+    _app_update_write_json(_app_update_download_state_path(), merged)
+    return merged
+
+def _app_update_download_state() -> dict:
+    return _app_update_read_json(_app_update_download_state_path())
+
+def _app_update_update_runtime_state(payload: dict) -> None:
+    if not isinstance(payload, dict):
+        return
+    with app_update_lock:
+        APP_UPDATE_STATE.update(payload)
+
+def _app_update_set_download_state(**payload) -> dict:
+    state = _app_update_download_state()
+    state.update(payload)
+    persisted = _app_update_persist_download_state(state)
+    runtime = {
+        "download_running": bool(persisted.get("running")),
+        "download_status": str(persisted.get("status") or ""),
+        "download_message": str(persisted.get("message") or ""),
+        "downloaded_bytes": int(persisted.get("downloaded_bytes") or 0),
+        "download_total_bytes": int(persisted.get("download_total_bytes") or 0),
+        "download_percent": float(persisted.get("download_percent") or 0.0),
+        "last_error": str(persisted.get("last_error") or ""),
+    }
+    _app_update_update_runtime_state(runtime)
+    return persisted
+
+def _app_update_stage_meta() -> dict:
+    return _app_update_read_json(_app_update_staged_meta_path())
+
+def _app_update_write_stage_meta(payload: dict) -> dict:
+    merged = dict(payload if isinstance(payload, dict) else {})
+    merged["updated_at"] = time.time()
+    _app_update_write_json(_app_update_staged_meta_path(), merged)
+    _app_update_update_runtime_state({
+        "staged_ready": bool(merged.get("ready")),
+        "staged_source": str(merged.get("source") or ""),
+        "staged_tag": str(merged.get("latest_tag") or ""),
+        "staged_asset_name": str(merged.get("asset_name") or ""),
+        "staged_sha256": str(merged.get("sha256") or ""),
+        "staged_expected_sha256": str(merged.get("expected_sha256") or ""),
+        "staged_verified": bool(merged.get("verified")),
+        "staged_size": int(merged.get("size") or 0),
+    })
+    return merged
+
+def _app_update_clear_stage_meta(remove_file: bool = True) -> None:
+    if remove_file:
+        _app_update_remove_file(_app_update_staged_meta_path())
+    _app_update_update_runtime_state({
+        "staged_ready": False,
+        "staged_source": "",
+        "staged_tag": "",
+        "staged_asset_name": "",
+        "staged_sha256": "",
+        "staged_expected_sha256": "",
+        "staged_verified": False,
+        "staged_size": 0,
+    })
+
+def _app_update_requires_sudo() -> bool:
+    try:
+        return hasattr(os, "geteuid") and int(os.geteuid()) != 0
+    except Exception:
+        return False
+
+def _app_update_normalize_digest(text: str) -> str:
+    raw = str(text or "").strip().lower()
+    if raw.startswith("sha256:"):
+        raw = raw.split(":", 1)[1].strip()
+    return raw if re.fullmatch(r"[0-9a-f]{64}", raw or "") else ""
+
+def _app_update_file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+def _app_update_safe_filename(name: str) -> str:
+    base = os.path.basename(str(name or "").strip())
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", base)[:160]
+    if not safe or safe in (".", ".."):
+        raise ValueError("invalid file name")
+    return safe
+
+def _app_update_prepare_stage_dir(prefix: str) -> str:
+    root = _app_update_ensure_dir(_app_update_stage_root())
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_prefix = re.sub(r"[^0-9A-Za-z._-]+", "_", str(prefix or "pkg"))[:40] or "pkg"
+    return tempfile.mkdtemp(prefix=f"{safe_prefix}_{stamp}_", dir=root)
+
+def _app_update_cleanup_stage_meta(meta: dict | None) -> None:
+    if not isinstance(meta, dict):
+        return
+    try:
+        file_path = os.path.abspath(str(meta.get("file_path") or ""))
+        stage_dir = os.path.abspath(str(meta.get("stage_dir") or ""))
+        if file_path and os.path.isfile(file_path):
+            os.remove(file_path)
+        if stage_dir and os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+def _app_update_valid_stage_meta() -> dict:
+    meta = _app_update_stage_meta()
+    if not meta:
+        return {}
+    file_path = os.path.abspath(str(meta.get("file_path") or ""))
+    if not file_path or not os.path.isfile(file_path):
+        _app_update_clear_stage_meta(remove_file=True)
+        return {}
+    return meta
+
+def _app_update_register_staged_package(
+    *,
+    source: str,
+    file_path: str,
+    stage_dir: str,
+    release: dict,
+    asset: dict,
+    sha256_hex: str,
+    size: int,
+) -> dict:
+    previous = _app_update_valid_stage_meta()
+    if previous:
+        _app_update_cleanup_stage_meta(previous)
+    meta = {
+        "ready": True,
+        "source": str(source or ""),
+        "file_path": os.path.abspath(str(file_path or "")),
+        "stage_dir": os.path.abspath(str(stage_dir or "")),
+        "latest_tag": str((release or {}).get("tag_name") or ""),
+        "latest_commit": str((release or {}).get("target_commitish") or ""),
+        "asset_name": str((asset or {}).get("name") or ""),
+        "asset_url": str((asset or {}).get("url") or ""),
+        "expected_sha256": _app_update_normalize_digest((asset or {}).get("digest") or ""),
+        "sha256": _app_update_normalize_digest(sha256_hex or ""),
+        "verified": True,
+        "size": int(size or 0),
+        "prepared_at": time.time(),
+    }
+    return _app_update_write_stage_meta(meta)
+
+def _app_update_stage_install_plan(stage_meta: dict, state: dict, manual: bool) -> dict:
+    return {
+        "version": 1,
+        "requested_at": time.time(),
+        "requested_by": "manual" if manual else "auto",
+        "latest_tag": str(stage_meta.get("latest_tag") or ""),
+        "latest_commit": str(stage_meta.get("latest_commit") or ""),
+        "current_tag": str((state or {}).get("current_tag") or ""),
+        "current_commit": str((state or {}).get("current_commit") or ""),
+        "target_arch": str((state or {}).get("target_arch") or ""),
+        "target_path": str(_app_update_runtime_support().get("target_path") or ""),
+        "asset_name": str(stage_meta.get("asset_name") or ""),
+        "asset_url": str(stage_meta.get("asset_url") or ""),
+        "download_path": os.path.abspath(str(stage_meta.get("file_path") or "")),
+        "stage_dir": os.path.abspath(str(stage_meta.get("stage_dir") or "")),
+        "response_grace_sec": 2,
+        "package_source": str(stage_meta.get("source") or ""),
+        "package_sha256": str(stage_meta.get("sha256") or ""),
+        "package_expected_sha256": str(stage_meta.get("expected_sha256") or ""),
+    }
+
+def _app_update_download_worker(release_url: str) -> None:
+    stage_dir = ""
+    download_path = ""
+    try:
+        release = _fetch_latest_release(release_url)
+        support = _app_update_runtime_support()
+        asset = _pick_release_asset(release.get("assets") or [], str(support.get("target_arch") or ""))
+        if not asset:
+            raise RuntimeError("latest release has no matching asset for this architecture")
+        digest = _app_update_normalize_digest(asset.get("digest") or "")
+        if not digest:
+            raise RuntimeError("GitHub release asset digest is missing")
+        stage_dir = _app_update_prepare_stage_dir(str(release.get("tag_name") or "download"))
+        download_path = os.path.join(stage_dir, str(asset.get("name") or "package.bin"))
+        total_size = int(asset.get("size") or 0)
+        _app_update_set_download_state(
+            running=True,
+            status="downloading",
+            message=f"downloading {asset.get('name') or 'package'}",
+            downloaded_bytes=0,
+            download_total_bytes=total_size,
+            download_percent=0.0,
+            latest_tag=str(release.get("tag_name") or ""),
+            asset_name=str(asset.get("name") or ""),
+            last_error="",
+        )
+        req = urllib.request.Request(
+            str(asset.get("url") or ""),
+            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
+        )
+        h = hashlib.sha256()
+        downloaded = 0
+        last_update = 0.0
+        with urllib.request.urlopen(req, timeout=30) as resp, open(download_path, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 512)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                downloaded += len(chunk)
+                now = time.time()
+                if (now - last_update) >= 0.5:
+                    percent = (downloaded * 100.0 / total_size) if total_size > 0 else 0.0
+                    _app_update_set_download_state(
+                        running=True,
+                        status="downloading",
+                        message=f"downloading {asset.get('name') or 'package'}",
+                        downloaded_bytes=downloaded,
+                        download_total_bytes=total_size,
+                        download_percent=percent,
+                        latest_tag=str(release.get("tag_name") or ""),
+                        asset_name=str(asset.get("name") or ""),
+                        last_error="",
+                    )
+                    last_update = now
+        actual_digest = h.hexdigest().lower()
+        if actual_digest != digest:
+            raise RuntimeError("downloaded package SHA256 does not match GitHub asset digest")
+        meta = _app_update_register_staged_package(
+            source="download",
+            file_path=download_path,
+            stage_dir=stage_dir,
+            release=release,
+            asset=asset,
+            sha256_hex=actual_digest,
+            size=os.path.getsize(download_path),
+        )
+        _app_update_set_download_state(
+            running=False,
+            status="completed",
+            message=f"downloaded and verified {meta.get('asset_name') or 'package'}",
+            downloaded_bytes=int(meta.get("size") or 0),
+            download_total_bytes=int(meta.get("size") or 0),
+            download_percent=100.0,
+            latest_tag=str(meta.get("latest_tag") or ""),
+            asset_name=str(meta.get("asset_name") or ""),
+            last_error="",
+        )
+        _app_update_write_notice({
+            "kind": "ok",
+            "title": "安装包已就绪",
+            "text": f"{meta.get('asset_name') or '安装包'} 已下载并通过 SHA256 校验，可开始更新。",
+            "tag": str(meta.get("latest_tag") or ""),
+            "asset_name": str(meta.get("asset_name") or ""),
+        })
+    except Exception as e:
+        _app_update_set_download_state(
+            running=False,
+            status="failed",
+            message=str(e),
+            last_error=str(e),
+        )
+        try:
+            if download_path and os.path.isfile(download_path):
+                os.remove(download_path)
+            if stage_dir and os.path.isdir(stage_dir):
+                shutil.rmtree(stage_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+def _start_app_update_download(manual: bool = False) -> dict:
+    state = _app_update_status_payload()
+    if bool(state.get("download_running")):
+        return {"ok": False, "error": "下载任务已经在运行", "state": state}
+    if bool(state.get("installing")):
+        return {"ok": False, "error": "更新安装流程正在运行", "state": state}
+    if not bool(state.get("install_supported")):
+        return {"ok": False, "error": str(state.get("support_reason") or "当前运行模式不支持自动更新"), "state": state}
+    if not bool(state.get("update_available")):
+        check_rsp = _check_app_update_once(manual=manual, auto_apply=False)
+        state = dict(check_rsp.get("state") or {})
+        if not check_rsp.get("ok"):
+            return check_rsp
+        if not bool(state.get("update_available")):
+            return {"ok": False, "error": "当前没有可下载的新版本", "state": state}
+    _app_update_clear_stage_meta(remove_file=True)
+    release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    _app_update_set_download_state(
+        running=True,
+        status="queued",
+        message="download task queued",
+        downloaded_bytes=0,
+        download_total_bytes=0,
+        download_percent=0.0,
+        latest_tag=str(state.get("latest_tag") or ""),
+        asset_name=str(state.get("asset_name") or ""),
+        last_error="",
+    )
+    Thread(target=lambda: _app_update_download_worker(release_url), daemon=True).start()
+    return {
+        "ok": True,
+        "message": "下载任务已开始，离开页面后仍会继续。",
+        "state": _app_update_status_payload(),
+    }
+
+def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes: int) -> dict:
+    safe_name = _app_update_safe_filename(file_name)
+    if int(total_bytes or 0) <= 0:
+        raise ValueError("empty upload")
+    if int(total_bytes) > APP_UPDATE_MAX_BYTES:
+        raise ValueError(f"upload too large (>{APP_UPDATE_MAX_BYTES} bytes)")
+    release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    release = _fetch_latest_release(release_url)
+    asset = _find_release_asset_by_name(release.get("assets") or [], safe_name)
+    if not asset:
+        raise ValueError("uploaded file name does not match any asset in the latest GitHub release")
+    digest = _app_update_normalize_digest(asset.get("digest") or "")
+    if not digest:
+        raise ValueError("GitHub release asset digest is missing")
+    stage_dir = _app_update_prepare_stage_dir(str(release.get("tag_name") or "upload"))
+    file_path = os.path.join(stage_dir, safe_name)
+    h = hashlib.sha256()
+    written = 0
+    try:
+        with open(file_path, "wb") as f:
+            remain = int(total_bytes)
+            while remain > 0:
+                chunk = body_stream.read(min(1024 * 512, remain))
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                written += len(chunk)
+                remain -= len(chunk)
+        if written != int(total_bytes):
+            raise ValueError("upload truncated before all bytes were received")
+        actual_digest = h.hexdigest().lower()
+        if actual_digest != digest:
+            raise ValueError("uploaded package SHA256 does not match GitHub asset digest")
+        meta = _app_update_register_staged_package(
+            source="upload",
+            file_path=file_path,
+            stage_dir=stage_dir,
+            release=release,
+            asset=asset,
+            sha256_hex=actual_digest,
+            size=written,
+        )
+        _app_update_set_download_state(
+            running=False,
+            status="uploaded",
+            message=f"uploaded and verified {meta.get('asset_name') or safe_name}",
+            downloaded_bytes=written,
+            download_total_bytes=written,
+            download_percent=100.0,
+            latest_tag=str(meta.get("latest_tag") or ""),
+            asset_name=str(meta.get("asset_name") or ""),
+            last_error="",
+        )
+        return meta
+    except Exception:
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+            if os.path.isdir(stage_dir):
+                shutil.rmtree(stage_dir, ignore_errors=True)
+        except Exception:
+            pass
+        raise
 
 def _local_git_tag() -> str:
     repo = _app_root_dir()
@@ -1594,6 +2132,7 @@ def _pick_release_asset(assets: list[dict], target_arch: str) -> dict:
             "url": url,
             "size": int(item.get("size") or 0),
             "content_type": str(item.get("content_type") or "").strip(),
+            "digest": _app_update_normalize_digest(item.get("digest") or ""),
         })
     for candidate in expected:
         for item in normalized:
@@ -1603,6 +2142,30 @@ def _pick_release_asset(assets: list[dict], target_arch: str) -> dict:
         for item in normalized:
             if item["name"].endswith(candidate):
                 return item
+    return {}
+
+def _find_release_asset_by_name(assets: list[dict], file_name: str) -> dict:
+    safe_name = str(file_name or "").strip()
+    if not safe_name:
+        return {}
+    normalized: list[dict] = []
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        url = str(item.get("browser_download_url") or item.get("url") or "").strip()
+        if not name:
+            continue
+        normalized.append({
+            "name": name,
+            "url": url,
+            "size": int(item.get("size") or 0),
+            "content_type": str(item.get("content_type") or "").strip(),
+            "digest": _app_update_normalize_digest(item.get("digest") or ""),
+        })
+    for item in normalized:
+        if item["name"] == safe_name:
+            return item
     return {}
 
 def _app_update_download_asset(asset: dict, latest_tag: str) -> tuple[str, str]:
@@ -1670,6 +2233,8 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
         state = dict(APP_UPDATE_STATE)
     support = _app_update_runtime_support()
     lock_state = _app_update_read_json(_app_update_lock_path())
+    download_state = _app_update_download_state()
+    stage_meta = _app_update_valid_stage_meta()
     if lock_state:
         status = str(lock_state.get("status") or "")
         state["installing"] = status not in ("", "completed", "failed", "rolled_back")
@@ -1690,6 +2255,23 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
         state["helper_pid"] = 0
         state["backup_path"] = ""
         state["rolled_back"] = False
+    state["download_running"] = bool(download_state.get("running"))
+    state["download_status"] = str(download_state.get("status") or state.get("download_status") or "")
+    state["download_message"] = str(download_state.get("message") or state.get("download_message") or "")
+    state["downloaded_bytes"] = int(download_state.get("downloaded_bytes") or 0)
+    state["download_total_bytes"] = int(download_state.get("download_total_bytes") or 0)
+    state["download_percent"] = float(download_state.get("download_percent") or 0.0)
+    if download_state.get("last_error"):
+        state["last_error"] = str(download_state.get("last_error") or state.get("last_error") or "")
+    state["staged_ready"] = bool(stage_meta.get("ready"))
+    state["staged_source"] = str(stage_meta.get("source") or "")
+    state["staged_tag"] = str(stage_meta.get("latest_tag") or "")
+    state["staged_asset_name"] = str(stage_meta.get("asset_name") or "")
+    state["staged_sha256"] = str(stage_meta.get("sha256") or "")
+    state["staged_expected_sha256"] = str(stage_meta.get("expected_sha256") or "")
+    state["staged_verified"] = bool(stage_meta.get("verified"))
+    state["staged_size"] = int(stage_meta.get("size") or 0)
+    state["requires_sudo"] = _app_update_requires_sudo()
     state["current_commit"] = current_commit
     state["current_tag"] = current_tag
     state["current_short"] = _short_commit(current_commit)
@@ -1705,6 +2287,7 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
     return state
 
 def _check_app_update_once(manual: bool = False, auto_apply: bool = False) -> dict:
+    _ = auto_apply
     if not manual and not bool(APP_UPDATE_CFG.get("enabled", True)):
         return {"ok": True, "skipped": True, "state": _app_update_status_payload()}
     with app_update_lock:
@@ -1746,14 +2329,6 @@ def _check_app_update_once(manual: bool = False, auto_apply: bool = False) -> di
             _log(f"[INFO] 检测到程序更新: local_tag={current_tag} latest_tag={latest_tag}")
         elif latest_tag:
             _log(f"[INFO] 程序更新检查完成: current_tag={current_tag or '-'} latest_tag={latest_tag}")
-        rsp = {"ok": True, "manual": bool(manual), "state": _app_update_status_payload()}
-        if auto_apply and update_available and bool(support.get("supported")):
-            return _start_app_update_install(manual=False, sudo_password=None)
-        return rsp
-        if update_available:
-            _log(f"[INFO] 检测到程序更新: local={local_commit[:12]} remote={remote_commit[:12]}")
-        elif remote_commit:
-            _log(f"[INFO] 程序更新检查完成: local={local_commit[:12]} remote={remote_commit[:12]}")
         return {"ok": True, "manual": bool(manual), "state": _app_update_status_payload()}
     except Exception as e:
         with app_update_lock:
@@ -1768,38 +2343,20 @@ def _check_app_update_once(manual: bool = False, auto_apply: bool = False) -> di
         return {"ok": False, "error": str(e), "state": _app_update_status_payload()}
 
 def _start_app_update_install(*, manual: bool = False, sudo_password: str | None = None) -> dict:
-    check_rsp = _check_app_update_once(manual=manual, auto_apply=False)
-    if not check_rsp.get("ok"):
-        return check_rsp
-    state = dict(check_rsp.get("state") or {})
+    state = _app_update_status_payload()
     if bool(state.get("installing")):
-        return {"ok": False, "error": "更新进程已在运行。", "state": state}
+        return {"ok": False, "error": "更新流程已经在运行", "state": state}
     if not bool(state.get("install_supported")):
-        return {"ok": False, "error": str(state.get("support_reason") or "当前运行模式不支持自动更新。"), "state": state}
-    if not bool(state.get("update_available")):
-        return {"ok": False, "error": "当前已是最新 Tag，或本地 Tag 无法比较。", "state": state}
-    release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
-    release = _fetch_latest_release(release_url)
-    asset = _pick_release_asset(release.get("assets") or [], str(state.get("target_arch") or ""))
-    if not asset:
-        return {"ok": False, "error": "最新 Release 中没有匹配当前架构的资产。", "state": _app_update_status_payload()}
-    stage_dir, download_path = _app_update_download_asset(asset, str(release.get("tag_name") or ""))
-    plan = {
-        "version": 1,
-        "requested_at": time.time(),
-        "requested_by": "manual" if manual else "auto",
-        "latest_tag": str(release.get("tag_name") or ""),
-        "latest_commit": str(release.get("target_commitish") or ""),
-        "current_tag": str(state.get("current_tag") or ""),
-        "current_commit": str(state.get("current_commit") or ""),
-        "target_arch": str(state.get("target_arch") or ""),
-        "target_path": str(_app_update_runtime_support().get("target_path") or ""),
-        "asset_name": str(asset.get("name") or ""),
-        "asset_url": str(asset.get("url") or ""),
-        "download_path": download_path,
-        "stage_dir": stage_dir,
-        "response_grace_sec": 2,
-    }
+        return {"ok": False, "error": str(state.get("support_reason") or "当前运行模式不支持自动更新"), "state": state}
+    if bool(state.get("download_running")):
+        return {"ok": False, "error": "安装包仍在下载中，请等待校验完成", "state": state}
+    stage_meta = _app_update_valid_stage_meta()
+    if not stage_meta or not bool(stage_meta.get("ready")):
+        return {"ok": False, "error": "请先下载最新安装包，或手动上传并通过 SHA256 校验", "state": _app_update_status_payload()}
+    if _app_update_requires_sudo() and not str(sudo_password or "").strip():
+        return {"ok": False, "error": "sudo required", "need_sudo": True, "state": _app_update_status_payload()}
+    stage_dir = os.path.abspath(str(stage_meta.get("stage_dir") or ""))
+    plan = _app_update_stage_install_plan(stage_meta, state, manual)
     plan_path = os.path.join(stage_dir, "plan.json")
     _app_update_write_json(plan_path, plan)
     _app_update_lock_state({
@@ -1812,8 +2369,8 @@ def _start_app_update_install(*, manual: bool = False, sudo_password: str | None
         "asset_name": plan["asset_name"],
         "asset_url": plan["asset_url"],
         "stage_dir": stage_dir,
-        "download_path": download_path,
-        "message": "更新进程已创建，等待接管 systemd 服务。",
+        "download_path": plan["download_path"],
+        "message": "已准备安装已校验的安装包，等待更新进程接管 systemd 服务。",
     })
     ok, helper_ref = _app_update_spawn_helper(plan_path, sudo_password=sudo_password)
     if not ok:
@@ -1822,10 +2379,11 @@ def _start_app_update_install(*, manual: bool = False, sudo_password: str | None
     with app_update_lock:
         APP_UPDATE_STATE["installing"] = True
         APP_UPDATE_STATE["install_status"] = "scheduled"
-        APP_UPDATE_STATE["asset_name"] = str(asset.get("name") or "")
-        APP_UPDATE_STATE["asset_url"] = str(asset.get("url") or "")
-        APP_UPDATE_STATE["latest_tag"] = str(release.get("tag_name") or "")
-        APP_UPDATE_STATE["latest_commit"] = str(release.get("target_commitish") or "")
+        APP_UPDATE_STATE["asset_name"] = str(stage_meta.get("asset_name") or "")
+        APP_UPDATE_STATE["asset_url"] = str(stage_meta.get("asset_url") or "")
+        APP_UPDATE_STATE["latest_tag"] = str(stage_meta.get("latest_tag") or "")
+        APP_UPDATE_STATE["latest_commit"] = str(stage_meta.get("latest_commit") or "")
+        APP_UPDATE_STATE["last_install_ts"] = time.time()
     _op_log("app-update-start", f"tag={plan['latest_tag']} asset={plan['asset_name']} helper={helper_ref}", ok=True)
     return {
         "ok": True,
@@ -1836,7 +2394,7 @@ def _start_app_update_install(*, manual: bool = False, sudo_password: str | None
     }
 
 def start_app_update_check() -> None:
-    Thread(target=lambda: _check_app_update_once(auto_apply=True), daemon=True).start()
+    Thread(target=lambda: _check_app_update_once(auto_apply=False), daemon=True).start()
 
 def _app_update_mark_startup_ready() -> None:
     lock = _app_update_read_json(_app_update_lock_path())
@@ -2250,11 +2808,12 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "GET", "path": "/api/settings/export/scan-data", "desc": "Export scan data"},
         {"method": "POST", "path": "/api/settings/import/settings", "desc": "Import settings file"},
         {"method": "POST", "path": "/api/settings/import/scan-data", "desc": "Import scan data"},
-        {"method": "GET", "path": "/api/logs/view?type=runtime|operation|scan|scan_diff|ap", "desc": "Built-in page log viewer"},
-        {"method": "GET", "path": "/api/logs/export?type=all|runtime|operation|scan|scan_diff|ap", "desc": "Built-in page log export"},
+        {"method": "GET", "path": "/api/logs/view?type=runtime|operation|scan|scan_diff|ap|system", "desc": "Built-in page log viewer"},
+        {"method": "GET", "path": "/api/logs/export?type=all|runtime|operation|scan|scan_diff|ap|system", "desc": "Built-in page log export"},
         {"method": "POST", "path": "/api/v1/history/clear", "desc": "Clear history cache"},
         {"method": "POST", "path": "/api/v1/history/delete", "desc": "Delete one history item"},
         {"method": "POST", "path": "/api/v1/tracks/clear", "desc": "Clear tracks"},
         {"method": "POST", "path": "/api/v1/config/reload", "desc": "Reload config file"},
     ]
+
 

@@ -21,6 +21,9 @@ var modelMapPath = '';
 var settingsState = {visualLoaded:false, rawLoaded:false, rawUnlocked:false, rawRoot:'', rawTree:null, rawSelectedPath:'', rawSelectedRel:'', channelUseDefault:true, channelEditing:false, visualInitial:null, visualDirty:false, dirtyCards:{}, authConfigured:false, networkBindings:null, interfaceItems:[]};
 var metricsState = {window:'12h', zoom:1, panSec:0, hover:null, drag:null, chartMeta:{}, items:[]};
 var visualCheckboxSaveTimer = null;
+var appUpdatePollTimer = null;
+var appUpdatePollFailures = 0;
+var appUpdateState = {};
 var SETTINGS_DRAFT_SECTIONS = [
   {key:'capture', label:'采集'},
   {key:'map', label:'地图与基站'},
@@ -421,6 +424,12 @@ async function postJson(url, body){
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
 }
+async function requestJson(url, opts){
+  var r = await fetch(apiUrl(url), opts || {});
+  var d = await r.json().catch(()=>({}));
+  if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
+  return {response:r, data:d};
+}
 async function reidentifyRecentHistoryPackets(){
   setStatus('status-data-transfer', '正在重新识别所有飞机最近保存的 100 个数据包...', false);
   var data = await postJson('/api/settings/history/reidentify-recent', {limit:100});
@@ -809,9 +818,12 @@ function renderSettingsRuntime(data){
   var log = qs('settings-runtime-log');
   if(log){
     var lines = [];
-    if(Array.isArray(data.ap_logs) && data.ap_logs.length) lines = lines.concat(['[AP]'], data.ap_logs);
-    if(Array.isArray(data.event_logs) && data.event_logs.length) lines = lines.concat(['', '[EVENT]'], data.event_logs);
-    if(Array.isArray(data.scan_logs) && data.scan_logs.length) lines = lines.concat(['', '[SCAN]'], data.scan_logs);
+    if(Array.isArray(data.system_logs) && data.system_logs.length) lines = lines.concat(['[SYSTEM]'], data.system_logs);
+    if(Array.isArray(data.ap_logs) && data.ap_logs.length) lines = lines.concat(lines.length ? ['', '[AP]'] : ['[AP]'], data.ap_logs);
+    if(Array.isArray(data.operation_logs) && data.operation_logs.length) lines = lines.concat(lines.length ? ['', '[OPERATION]'] : ['[OPERATION]'], data.operation_logs);
+    if(Array.isArray(data.event_logs) && data.event_logs.length) lines = lines.concat(lines.length ? ['', '[EVENT]'] : ['[EVENT]'], data.event_logs);
+    if(Array.isArray(data.scan_diff_logs) && data.scan_diff_logs.length) lines = lines.concat(lines.length ? ['', '[SCAN_DIFF]'] : ['[SCAN_DIFF]'], data.scan_diff_logs);
+    if(Array.isArray(data.scan_logs) && data.scan_logs.length) lines = lines.concat(lines.length ? ['', '[SCAN]'] : ['[SCAN]'], data.scan_logs);
     log.value = lines.join('\n');
   }
   setStatus('status-runtime', 'AP ' + String((data.aps || []).length || 0) + '/' + String(data.aps_total || 0), false);
@@ -1200,31 +1212,82 @@ async function updateModelsNow(){
   }
 }
 function renderAppUpdateState(state){
+  appUpdateState = Object.assign({}, state || {});
   var el = qs('app-update-state');
   if(!el) return;
-  state = state || {};
+  state = appUpdateState;
   var currentTag = String(state.current_tag || '').trim();
   var latestTag = String(state.latest_tag || '').trim();
   var currentCommit = state.current_short || (state.current_commit ? String(state.current_commit).slice(0, 12) : '');
   var latestCommit = state.latest_short || (state.latest_commit ? String(state.latest_commit).slice(0, 12) : '');
+  var stagedAsset = String(state.staged_asset_name || state.asset_name || '').trim();
+  var stagedSha = String(state.staged_sha256 || '').trim();
+  var stagedSource = state.staged_source === 'upload' ? '手动上传' : (state.staged_source === 'download' ? '后台下载' : '');
+  var percent = Number(state.download_percent || 0);
   var lines = ['当前 Tag: ' + (currentTag || '未知')];
   lines.push('最新 Tag: ' + (latestTag || '尚未检查'));
   lines.push('当前 commit: ' + (currentCommit || '未知'));
   if(latestCommit) lines.push('Release commit: ' + latestCommit);
   if(state.target_arch) lines.push('架构: ' + String(state.target_arch));
-  if(state.running) lines.push('正在检查版本...');
-  else if(state.installing) lines.push('更新状态: ' + String(state.install_message || state.install_status || '进行中'));
-  else if(state.last_error) lines.push('检查/更新失败: ' + String(state.last_error));
-  else if(state.checked) lines.push(state.update_available ? '发现新版本，可直接执行自动更新。' : '当前已是检查到的最新版本。');
-  else lines.push('启用后会检查 GitHub Release，并在满足条件时执行自动更新。');
+  if(state.running) lines.push('正在检查 GitHub Release…');
+  else if(state.download_running){
+    lines.push('后台下载中: ' + (stagedAsset || latestTag || '安装包') + (percent > 0 ? (' ' + percent.toFixed(percent >= 10 ? 0 : 1) + '%') : ''));
+    if(Number(state.download_total_bytes || 0) > 0){
+      lines.push('进度: ' + formatBytes(state.downloaded_bytes || 0) + ' / ' + formatBytes(state.download_total_bytes || 0));
+    }
+  }else if(state.installing) lines.push('更新状态: ' + String(state.install_message || state.install_status || '进行中'));
+  else if(state.staged_ready){
+    lines.push('安装包已就绪: ' + (stagedAsset || '已校验安装包'));
+    if(stagedSource) lines.push('来源: ' + stagedSource);
+    if(stagedSha) lines.push('SHA256: ' + stagedSha.slice(0, 12) + '…');
+  }else if(state.last_error) lines.push('检查/更新失败: ' + String(state.last_error));
+  else if(state.checked) lines.push(state.update_available ? '发现新版本，先下载或上传安装包，校验通过后再安装。' : '当前已是检查到的最新版本。');
+  else lines.push('启用后会自动检查 GitHub Release；下载、上传和安装都需要手动确认。');
   if(state.install_supported === false && state.support_reason) lines.push('当前环境: ' + String(state.support_reason));
   if(state.asset_name) lines.push('匹配资产: ' + String(state.asset_name));
+  if(state.requires_sudo && state.staged_ready && !state.installing) lines.push('安装时会按需询问 sudo 密码。');
   el.textContent = lines.join(' | ');
+  if(qs('btn-app-update-check')){
+    qs('btn-app-update-check').disabled = !!state.running || !!state.download_running || !!state.installing;
+  }
+  if(qs('btn-app-update-download')){
+    qs('btn-app-update-download').disabled = !!state.running || !!state.download_running || !!state.installing || !state.update_available || state.install_supported === false;
+  }
+  if(qs('btn-app-update-upload')){
+    qs('btn-app-update-upload').disabled = !!state.running || !!state.download_running || !!state.installing;
+  }
   if(qs('btn-app-update-start')){
-    qs('btn-app-update-start').disabled = !!state.running || !!state.installing || !state.update_available || state.install_supported === false;
+    qs('btn-app-update-start').disabled = !!state.running || !!state.download_running || !!state.installing || !state.staged_ready || state.install_supported === false;
   }
   if(state.completion_notice && state.completion_notice.text){
-    showNotice(String(state.completion_notice.text), 'ok', 5200);
+    showNotice(String(state.completion_notice.text), state.completion_notice.kind === 'warn' ? 'warn' : 'ok', 5200);
+  }
+  if(!(state.running || state.download_running || state.installing)){
+    appUpdatePollFailures = 0;
+  }
+  if(appUpdatePollTimer){
+    window.clearTimeout(appUpdatePollTimer);
+    appUpdatePollTimer = null;
+  }
+  if(state.running || state.download_running || state.installing){
+    appUpdatePollTimer = window.setTimeout(function(){
+      getJson('/api/settings/view').then(function(data){
+        appUpdatePollFailures = 0;
+        var nextState = (((data || {}).visual || {}).app_update || {}).state || {};
+        renderAppUpdateState(nextState);
+      }).catch(function(e){
+        if(state.installing){
+          appUpdatePollFailures += 1;
+          if(appUpdatePollFailures < 40){
+            appUpdatePollTimer = window.setTimeout(function(){ renderAppUpdateState(appUpdateState); }, 3000);
+            return;
+          }
+          setStatus('status-visual', '更新进程已启动，但暂时无法重新连回服务。请稍后手动刷新页面确认结果。', true);
+          return;
+        }
+        setStatus('status-visual', e.message || e, true);
+      });
+    }, state.installing ? 3000 : 1500);
   }
 }
 async function checkAppVersionNow(){
@@ -1241,41 +1304,93 @@ async function checkAppVersionNow(){
     if(btn) btn.disabled = false;
   }
 }
-function pollAppUpdateAfterRestart(){
-  var attempts = 0;
-  function tick(){
-    attempts += 1;
-    getJson('/api/settings/view').then(function(data){
-      var state = (((data || {}).visual || {}).app_update || {}).state || {};
-      renderAppUpdateState(state);
-      if(state.completion_notice && state.completion_notice.text){
-        setStatus('status-visual', String(state.completion_notice.text), false);
-        return;
-      }
-      if(attempts < 25){
-        setTimeout(tick, 2000);
-      }
-    }).catch(function(){
-      if(attempts < 25) setTimeout(tick, 2000);
-    });
+async function downloadAppUpdateNow(){
+  var btn = qs('btn-app-update-download');
+  try{
+    if(btn) btn.disabled = true;
+    setStatus('status-visual', '正在启动后台下载任务...', false);
+    const data = await postJson('/api/settings/app-update/download', {});
+    renderAppUpdateState((data && data.state) || {});
+    setStatus('status-visual', (data && data.message) || '安装包后台下载已开始。', false);
+    showNotice((data && data.message) || '安装包后台下载已开始。', 'ok', 3200);
+  }catch(e){
+    if(e && e.state) renderAppUpdateState(e.state);
+    setStatus('status-visual', '后台下载失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 4200);
+  }finally{
+    if(btn) btn.disabled = false;
   }
-  setTimeout(tick, 7000);
+}
+function triggerAppUpdateUpload(){
+  var input = qs('app-update-upload-file');
+  if(input) input.click();
+}
+async function uploadAppUpdatePackage(file){
+  if(!file) return;
+  var btn = qs('btn-app-update-upload');
+  var input = qs('app-update-upload-file');
+  try{
+    if(btn) btn.disabled = true;
+    setStatus('status-visual', '正在上传并校验安装包 SHA256...', false);
+    const rsp = await requestJson('/api/settings/app-update/upload', {
+      method:'POST',
+      headers:pageHeaders({
+        'Content-Type':'application/octet-stream',
+        'X-LightRID-Upload-Name': encodeURIComponent(String(file.name || 'package.bin'))
+      }),
+      body:file
+    });
+    if(!rsp.response.ok || rsp.data.ok === false){
+      var err = new Error((rsp.data && rsp.data.error) || ('HTTP ' + rsp.response.status));
+      err.state = rsp.data && rsp.data.state;
+      throw err;
+    }
+    renderAppUpdateState((rsp.data && rsp.data.state) || {});
+    setStatus('status-visual', (rsp.data && rsp.data.message) || '安装包已上传并通过校验。', false);
+    showNotice((rsp.data && rsp.data.message) || '安装包已上传并通过校验。', 'ok', 3600);
+  }catch(e){
+    if(e && e.state) renderAppUpdateState(e.state);
+    setStatus('status-visual', '上传失败: ' + (e.message || e), true);
+    showNotice(e.message || e, 'warn', 4800);
+  }finally{
+    if(input) input.value = '';
+    if(btn) btn.disabled = false;
+  }
 }
 async function startAppUpdateNow(){
-  if(!confirm('将下载最新 GitHub Release 的当前架构资产，并自动停止服务、备份旧文件、替换新文件后重新启动。继续吗？')) return;
+  if(!appUpdateState.staged_ready){
+    showNotice('请先下载或上传安装包，并等待 SHA256 校验通过。', 'warn', 3600);
+    return;
+  }
+  var targetName = String(appUpdateState.staged_asset_name || appUpdateState.asset_name || '安装包');
+  if(!confirm('将安装已通过 SHA256 校验的安装包：' + targetName + '。更新期间服务会短暂重启，是否继续？')) return;
   var btn = qs('btn-app-update-start');
   try{
     if(btn) btn.disabled = true;
-    setStatus('status-visual', '正在准备自动更新...', false);
-    renderAppUpdateState({installing:true, install_status:'preparing'});
-    const body = await privilegedBody({confirm:true}, '自动更新需要停止/启动 systemd 并替换已安装文件。请输入 sudo 密码；密码只用于本次更新，不会保存。');
-    const data = await postJson('/api/settings/app-update/start', body);
+    setStatus('status-visual', '正在准备安装已校验安装包...', false);
+    renderAppUpdateState(Object.assign({}, appUpdateState, {installing:true, install_status:'preparing'}));
+    var rsp = await requestJson('/api/settings/app-update/start', {
+      method:'POST',
+      headers:pageHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({confirm:true})
+    });
+    var data = rsp.data || {};
+    if(!rsp.response.ok || data.ok === false){
+      if(rsp.response.status === 403 && data.need_sudo){
+        var body = await privilegedBody({confirm:true}, '安装已校验安装包需要停止/启动 systemd 并替换已安装文件。请输入 sudo 密码；密码只用于本次更新，不会保存。');
+        data = await postJson('/api/settings/app-update/start', body);
+      }else{
+        var err = new Error((data && data.error) || ('HTTP ' + rsp.response.status));
+        err.state = data && data.state;
+        throw err;
+      }
+    }
     renderAppUpdateState((data && data.state) || {});
     setStatus('status-visual', (data && data.message) || '更新进程已启动，服务将短暂重启。', false);
     showNotice((data && data.message) || '更新进程已启动。', 'ok', 4200);
-    if(data && data.restart_expected) pollAppUpdateAfterRestart();
   }catch(e){
-    setStatus('status-visual', '自动更新失败: ' + (e.message || e), true);
+    if(e && e.state) renderAppUpdateState(e.state);
+    setStatus('status-visual', '安装更新失败: ' + (e.message || e), true);
     showNotice(e.message || e, 'warn', 4800);
   }finally{
     if(btn) btn.disabled = false;
@@ -2547,7 +2662,16 @@ function bindModelEditorActions(){
   on('model-map-modal', 'click', function(ev){ if(ev.target === qs('model-map-modal')) qs('model-map-modal').classList.remove('show'); });
   on('btn-model-update-now', 'click', updateModelsNow);
   on('btn-app-update-check', 'click', checkAppVersionNow);
+  on('btn-app-update-download', 'click', downloadAppUpdateNow);
+  on('btn-app-update-upload', 'click', triggerAppUpdateUpload);
   on('btn-app-update-start', 'click', startAppUpdateNow);
+  on('app-update-upload-file', 'change', function(ev){
+    var file = ev && ev.target && ev.target.files && ev.target.files[0];
+    uploadAppUpdatePackage(file).catch(function(e){
+      setStatus('status-visual', e.message || e, true);
+      showNotice(e.message || e, 'warn', 4800);
+    });
+  });
   on('btn-model-map-add', 'click', function(){ addModelMapRow('', ''); });
   on('btn-model-map-save', 'click', saveModelEditor);
   on('model-map-search', 'input', function(){ syncModelRowsFromInputs(); renderModelMapRows(); });

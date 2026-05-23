@@ -26,6 +26,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -178,6 +180,8 @@ log_buf:  deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Normal logs (LOST/INFO/etc
 scan_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Full scan logs (with debug frame info)
 ap_buf:   deque[str] = deque(maxlen=500)            # AP scan logs (for HTTP page)
 op_buf:   deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Web/admin/security operation audit log
+scan_diff_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)  # Structured scan state diff log
+sys_err_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)    # System/runtime error log
 ap_seq:   int = 0
 ap_table: dict[str, dict] = {}
 ap_list_seq: int = 0
@@ -270,6 +274,8 @@ PAGE_API_HEADER = "X-LightRID-Page"
 PAGE_API_HEADER_VALUE = "1"
 UPDATE_PROBE_HEADER = "X-LightRID-Update-Probe"
 UPDATE_PROBE_HEADER_VALUE = "1"
+APP_UPDATE_UPLOAD_NAME_HEADER = "X-LightRID-Upload-Name"
+APP_UPDATE_MAX_BYTES = 512 * 1024 * 1024
 NOTIFY_CFG: dict = {
     "enabled": False,
     "only_online": True,
@@ -309,6 +315,21 @@ APP_UPDATE_STATE: dict = {
     "support_reason": "",
     "update_available": False,
     "last_error": "",
+    "download_running": False,
+    "download_status": "",
+    "download_message": "",
+    "downloaded_bytes": 0,
+    "download_total_bytes": 0,
+    "download_percent": 0.0,
+    "staged_ready": False,
+    "staged_source": "",
+    "staged_tag": "",
+    "staged_asset_name": "",
+    "staged_sha256": "",
+    "staged_expected_sha256": "",
+    "staged_verified": False,
+    "staged_size": 0,
+    "requires_sudo": False,
 }
 MODEL_UPDATE_STATE: dict = {
     "running": False,
@@ -432,12 +453,90 @@ def _pad(s: str, w: int) -> str:
 # -----------------------------------------------------------------------------
 # 日志
 # -----------------------------------------------------------------------------
+def _system_error_append(scope: str, text: str) -> None:
+    safe_scope = re.sub(r"[\r\n\t]+", " ", str(scope or "system")).strip()[:96] or "system"
+    safe_text = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not safe_text:
+        return
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [{safe_scope}] {safe_text}"
+    with log_lock:
+        sys_err_buf.append(line)
+
+def _system_error_log(scope: str, detail: str, *, exc=None, include_trace: bool = False) -> None:
+    parts = [str(detail or "").strip() or "system error"]
+    exc_info = exc if exc is not None else sys.exc_info()
+    if include_trace and exc_info and exc_info[0]:
+        try:
+            trace_text = "".join(traceback.format_exception(exc_info[0], exc_info[1], exc_info[2])).strip()
+        except Exception:
+            trace_text = ""
+        if trace_text:
+            parts.append(trace_text)
+    _system_error_append(scope, "\n".join(x for x in parts if x))
+
+class _SystemErrorLogHandler(logging.Handler):
+    def emit(self, record) -> None:
+        try:
+            msg = self.format(record) or record.getMessage()
+            _system_error_log(
+                f"logging:{record.name}",
+                f"{record.levelname}: {msg}",
+                exc=record.exc_info if record.exc_info else None,
+                include_trace=bool(record.exc_info),
+            )
+        except Exception:
+            pass
+
+def _install_system_error_hooks() -> None:
+    if globals().get("_SYSTEM_ERROR_HOOKS_READY"):
+        return
+    globals()["_SYSTEM_ERROR_HOOKS_READY"] = True
+
+    prev_excepthook = getattr(sys, "excepthook", None)
+    def _codex_excepthook(exc_type, exc_value, exc_tb):
+        _system_error_log(
+            "uncaught",
+            f"{getattr(exc_type, '__name__', 'Exception')}: {exc_value}",
+            exc=(exc_type, exc_value, exc_tb),
+            include_trace=True,
+        )
+        if callable(prev_excepthook):
+            try:
+                prev_excepthook(exc_type, exc_value, exc_tb)
+            except Exception:
+                pass
+    sys.excepthook = _codex_excepthook
+
+    if hasattr(threading, "excepthook"):
+        prev_thread_hook = getattr(threading, "excepthook", None)
+        def _codex_thread_excepthook(args):
+            _system_error_log(
+                f"thread:{getattr(getattr(args, 'thread', None), 'name', '-')}",
+                f"{getattr(getattr(args, 'exc_type', None), '__name__', 'Exception')}: {getattr(args, 'exc_value', '')}",
+                exc=(getattr(args, "exc_type", None), getattr(args, "exc_value", None), getattr(args, "exc_traceback", None)),
+                include_trace=True,
+            )
+            if callable(prev_thread_hook):
+                try:
+                    prev_thread_hook(args)
+                except Exception:
+                    pass
+        threading.excepthook = _codex_thread_excepthook
+
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if isinstance(existing, _SystemErrorLogHandler):
+            return
+    root.addHandler(_SystemErrorLogHandler(level=logging.ERROR))
+
 def _log(msg: str) -> None:
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     with log_lock:
         log_buf.append(line)
         scan_buf.append(line)   # Mirror normal logs into scan stream
+    if any(tag in str(msg or "") for tag in ("[WARN]", "[ERROR]", "[FATAL]")):
+        _system_error_append("runtime", str(msg or ""))
     if NO_TUI:
         print(line, flush=True)
 
@@ -447,6 +546,13 @@ def _scan(msg: str) -> None:
     line = f"[{ts}] {msg}"
     with log_lock:
         scan_buf.append(line)
+
+def _scan_diff(msg: str) -> None:
+    text = str(msg or "").strip()
+    if not text:
+        return
+    with log_lock:
+        scan_diff_buf.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}")
 
 def _op_log(action: str, detail: str = "", *, actor: str = "-", ip: str = "-", ok: bool = True) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -460,6 +566,10 @@ def _op_log(action: str, detail: str = "", *, actor: str = "-", ip: str = "-", o
     line = f"[{ts}] [{status}] action={safe_action} actor={safe_actor} ip={safe_ip} {safe_detail}".rstrip()
     with log_lock:
         op_buf.append(line)
+    if not ok:
+        _system_error_append(f"operation:{safe_action}", f"actor={safe_actor} ip={safe_ip} {safe_detail or '(empty detail)'}")
+
+_install_system_error_hooks()
 
 def _client_ip_from_handler(handler) -> str:
     try:

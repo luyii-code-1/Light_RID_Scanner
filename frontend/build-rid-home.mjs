@@ -12,6 +12,7 @@ await mkdir(outDir, { recursive: true });
 
 for (const entry of ["rid-home", "nodes-center", "viewer-settings", "station-settings"]) {
   await build({
+    absWorkingDir: __dirname,
     entryPoints: [path.join(__dirname, "src", `${entry}.js`)],
     bundle: true,
     format: "iife",

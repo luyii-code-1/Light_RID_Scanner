@@ -1,5 +1,5 @@
 (() => {
-  // frontend/src/station-settings.js
+  // src/station-settings.js
   function qs(id) {
     return document.getElementById(id);
   }

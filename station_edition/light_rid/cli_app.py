@@ -385,8 +385,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
     parser.add_argument("--model-map", default=os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT))
-    parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-                        help="history cache file (default history-cache.json)")
+    parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_LEGACY_DEFAULT),
+                        help="legacy history json path used only for migration into rid_storage.db")
     parser.add_argument("--no-tui",   action="store_true", default=True, help="禁用 TUI，纯文本输出")
     parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
@@ -562,8 +562,8 @@ def main() -> None:
     parser.add_argument("--change-on-rssi",    action="store_true")
     parser.add_argument("--change-on-payload", action="store_true")
     parser.add_argument("--model-map", default=os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT))
-    parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
-                        help="history cache file (default: history-cache.json)")
+    parser.add_argument("--history-file", default=os.path.join(os.getcwd(), HISTORY_STORE_LEGACY_DEFAULT),
+                        help="legacy history json path used only for migration into rid_storage.db")
     parser.add_argument("--no-tui",   action="store_true", default=True, help="禁用 TUI，纯文本输出")
     parser.add_argument("--tui",      action="store_false", dest="no_tui", help="启用 TUI")
     parser.add_argument("--debug",    action="store_true", help="write all raw frames into scan log")
@@ -579,16 +579,18 @@ def main() -> None:
     APP_CONFIG_PATH = cfg_path
     APP_CONFIG_PATH_IS_DEFAULT = (cfg_path == os.path.abspath(os.path.join(os.getcwd(), CONFIG_FILE_DEFAULT))) if cfg_path else True
     APP_CONFIG_PATH_LOCKED = any(str(t).split("=", 1)[0] == "--config" for t in sys.argv[1:])
-    hist_path = os.path.abspath(str(args.history_file)) if args.history_file else None
+    legacy_hist_path = os.path.abspath(str(args.history_file)) if args.history_file else None
     model_path = os.path.abspath(str(args.model_map)) if args.model_map else None
+    hist_path = _history_store_default_path(cfg_path)
     _ensure_runtime_json_files(cfg_path, hist_path, config_locked=APP_CONFIG_PATH_LOCKED)
     APP_CONFIG = load_app_config(cfg_path)
     if not _eula_accepted():
         _log(f"[INFO] EULA pending: open /eula to accept ({_eula_set_path()})")
     apply_config_to_args(parser, args, APP_CONFIG)
-    hist_path = os.path.abspath(str(args.history_file)) if args.history_file else None
+    legacy_hist_path = os.path.abspath(str(args.history_file)) if args.history_file else legacy_hist_path
     model_path = os.path.abspath(str(args.model_map)) if args.model_map else None
     _ensure_runtime_json_files(None, hist_path, config_locked=True)
+    _history_set_legacy_source_paths([legacy_hist_path])
 
     PRINT_INTERVAL  = max(0.2, float(args.time))
     MIN_GAP         = max(0.0, float(args.min_gap))
@@ -599,7 +601,7 @@ def main() -> None:
     NO_TUI          = bool(args.no_tui)
     DEBUG_MODE      = bool(args.debug)
     SCAN_WIFI_FAST  = bool(args.scan_wifi_fast)
-    HISTORY_STORE_PATH = os.path.abspath(str(args.history_file)) if args.history_file else None
+    HISTORY_STORE_PATH = hist_path
 
     # Redirect Python logging to `scan_buf` instead of `stderr` (avoids TUI swallow).
     class BufHandler(logging.Handler):

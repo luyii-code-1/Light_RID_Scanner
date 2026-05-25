@@ -483,6 +483,21 @@ def parse_rid_payload(
         model_hint=model_hint,
     )
 
+
+def parse_rid_payloads(
+    data: bytes,
+    mode: str | None = "auto",
+    *,
+    ssid_sn: str | None = None,
+    model_hint: str | None = None,
+) -> dict:
+    return _analize_core.parse_rid_payloads(
+        data,
+        mode,
+        ssid_sn=ssid_sn,
+        model_hint=model_hint,
+    )
+
 def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
     return _analize_core.rid_parse_result_to_decoded(result)
 

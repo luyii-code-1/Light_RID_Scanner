@@ -21,6 +21,7 @@ import secrets
 import shlex
 import shutil
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -118,8 +119,9 @@ SSID_SN_RE          = re.compile(r"\bRID-([A-Za-z0-9]{4,64})\b")
 LOG_BUF_SIZE = 4000   # Log ring buffer size
 TUI_REFRESH  = 0.5    # Forced TUI refresh interval (seconds)
 CONFIG_FILE_DEFAULT = "config.json"
-HISTORY_STORE_DEFAULT = "history-cache.json"
-HISTORY_RAW_PACKET_LIMIT = 100
+HISTORY_STORE_DEFAULT = "rid_storage.db"
+HISTORY_STORE_LEGACY_DEFAULT = "history-cache.json"
+HISTORY_STORE_LEGACY_ALT_DEFAULT = "rid_history_cache.json"
 HISTORY_RAW_PACKET_SNAPSHOT_LIMIT = 3
 MODEL_MAP_FILE_DEFAULT = "rid-models.json"
 MODEL_MAP_LEGACY_FILE = "rid_models.json"
@@ -133,10 +135,13 @@ HISTORY_SAVE_INTERVAL = 5.0
 HTTP_JSON_MAX_BYTES = 1024 * 1024
 API_NAME = "Light RID Scanner API"
 API_VERSION = "v1"
-APP_RELEASE_VERSION = "2.0"
+APP_RELEASE_VERSION = "2.4.6"
 APP_HTTP_USER_AGENT = f"LightRIDScanner/{APP_RELEASE_VERSION}"
 APP_SERVER_HEADER = f"LightRID/{APP_RELEASE_VERSION}"
 BUILD_INFO_FILE = "rid_build_info.json"
+HISTORY_STORAGE_SCHEMA_VERSION = 1
+HISTORY_STORAGE_EXPORT_VERSION = 4
+HISTORY_STORAGE_UPGRADE_TARGET = "v2.4.6"
 EULA_SET_FILE = "EULA.set"
 EULA_MARKDOWN_FILE = "EULA.md"
 EULA_URL = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/EULA.md"
@@ -162,7 +167,9 @@ SNIFF_WORKER_HARD_GRACE_SEC = 8.0
 SNIFF_WORKER_JOIN_GRACE_SEC = 2.0
 SNIFF_RESTART_AFTER_FAILS = 5
 WIFI_FAST_OUI_PREFIX = "0c:9a:e6"
-TRACK_MAX_POINTS = 12000
+TRACK_MAX_POINTS = 10000
+TRACK_STORE_POINTS_MIN = 10
+TRACK_STORE_POINTS_MAX = 200000
 TRACK_MIN_INTERVAL_SEC = 0.8
 TRACK_ANOMALY_MAX_METERS = 50_000.0
 NO_IFACE_DEGRADE_HINT = "未检测到已绑定的无线网卡，已进入降级运行。请打开设置或 OOBE 完成网卡配置。"
@@ -191,9 +198,13 @@ security_rate_lock = Lock()
 security_rate_state: dict[str, dict] = {}
 
 HISTORY_STORE_PATH: str | None = None
+HISTORY_LEGACY_SOURCE_PATHS: list[str] = []
 history_persist_dirty: bool = False
 history_persist_last_save_wall: float = 0.0
 history_io_lock = Lock()
+history_db_lock = Lock()
+history_db_conn = None
+history_db_path: str | None = None
 
 APP_CONFIG: dict = {}
 APP_CONFIG_PATH: str | None = None
@@ -764,6 +775,16 @@ def _history_mark_dirty() -> None:
     global history_persist_dirty
     history_persist_dirty = True
 
+def _track_store_points_limit() -> int:
+    basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+    if not isinstance(basic, dict):
+        basic = {}
+    try:
+        limit = int(float(basic.get("track_points_limit", TRACK_MAX_POINTS)))
+    except Exception:
+        limit = TRACK_MAX_POINTS
+    return max(TRACK_STORE_POINTS_MIN, min(limit, TRACK_STORE_POINTS_MAX))
+
 def _fmt_age_compact(sec: float | int | None) -> str:
     if sec is None:
         return "-"
@@ -802,8 +823,289 @@ def _sanitize_track(raw) -> list[dict]:
             "ts": ts,
         })
     out.sort(key=lambda x: (x.get("ts") or 0.0))
-    if len(out) > TRACK_MAX_POINTS:
-        out = out[-TRACK_MAX_POINTS:]
+    limit = _track_store_points_limit()
+    if len(out) > limit:
+        out = out[-limit:]
+    return out
+
+
+def _sanitize_track_samples(raw) -> list[dict]:
+    out: list[dict] = []
+    if not isinstance(raw, list):
+        return out
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        try:
+            lat = float(it.get("lat"))
+            lon = float(it.get("lon"))
+        except Exception:
+            continue
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            continue
+        ts_ms = it.get("timestamp_ms")
+        recv_ms = it.get("receive_time_ms")
+        try:
+            ts_ms = int(ts_ms) if ts_ms is not None else None
+        except Exception:
+            ts_ms = None
+        try:
+            recv_ms = int(recv_ms) if recv_ms is not None else None
+        except Exception:
+            recv_ms = None
+        out.append({
+            "sample_type": str(it.get("sample_type") or it.get("track_type") or "aircraft"),
+            "track_type": str(it.get("track_type") or it.get("sample_type") or "aircraft"),
+            "sn": str(it.get("sn") or "") or None,
+            "uas_id": str(it.get("uas_id") or "") or None,
+            "lat": round(lat, 7),
+            "lon": round(lon, 7),
+            "alt": it.get("alt"),
+            "timestamp_ms": ts_ms,
+            "receive_time_ms": recv_ms,
+            "packet_hash": str(it.get("packet_hash") or "") or None,
+            "source": str(it.get("source") or ""),
+            "coordinate_system": str(it.get("coordinate_system") or "WGS84"),
+        })
+    out.sort(key=lambda x: (
+        int(x.get("timestamp_ms") or 0),
+        int(x.get("receive_time_ms") or 0),
+    ))
+    limit = _track_store_points_limit()
+    if len(out) > limit:
+        out = out[-limit:]
+    return out
+
+
+def _empty_track_store() -> dict:
+    return {
+        "aircraft": [],
+        "operator": [],
+        "last_aircraft": None,
+        "last_operator": None,
+    }
+
+
+def _track_store_counts(raw) -> dict[str, int]:
+    store = _sanitize_tracks(raw)
+    return {
+        "aircraft": len(store.get("aircraft") or []),
+        "operator": len(store.get("operator") or []),
+    }
+
+
+def _track_store_set_sequence(store: dict, track_type: str, seq: list[dict]) -> None:
+    if not isinstance(store, dict):
+        return
+    clean = _sanitize_track_samples(seq)
+    store[track_type] = clean
+    store[f"last_{track_type}"] = dict(clean[-1]) if clean else None
+
+
+def _track_store_build_sequence(raw, track_type: str, default_source: str) -> list[dict]:
+    seq_store = _empty_track_store()
+    if not isinstance(raw, list):
+        return []
+    for point in raw:
+        if not isinstance(point, dict):
+            continue
+        item_track_type = str(point.get("track_type") or point.get("sample_type") or track_type).strip().lower() or track_type
+        if item_track_type not in ("aircraft", "operator"):
+            item_track_type = track_type
+        sample = {
+            "sample_type": item_track_type,
+            "track_type": item_track_type,
+            "sn": point.get("sn"),
+            "uas_id": point.get("uas_id"),
+            "lat": point.get("lat"),
+            "lon": point.get("lon"),
+            "alt": point.get("alt"),
+            "timestamp_ms": point.get("timestamp_ms"),
+            "receive_time_ms": point.get("receive_time_ms"),
+            "packet_hash": point.get("packet_hash"),
+            "source": point.get("source") or default_source,
+            "coordinate_system": point.get("coordinate_system") or "WGS84",
+        }
+        if sample["timestamp_ms"] is None and sample["receive_time_ms"] is None and point.get("ts") is not None:
+            try:
+                sample["receive_time_ms"] = int(float(point.get("ts")) * 1000.0)
+            except Exception:
+                sample["receive_time_ms"] = None
+        _track_store_append_sample(seq_store, sample)
+    return list(seq_store.get(track_type) or [])
+
+
+def _sanitize_tracks(raw) -> dict:
+    store = _empty_track_store()
+    if isinstance(raw, dict):
+        nested = raw.get("tracks")
+        if isinstance(nested, dict) and nested is not raw:
+            nested_store = _sanitize_tracks(nested)
+            _track_store_set_sequence(store, "aircraft", list(nested_store.get("aircraft") or []))
+            _track_store_set_sequence(store, "operator", list(nested_store.get("operator") or []))
+
+        for key, track_type, source_name in (
+            ("aircraft", "aircraft", "legacy_aircraft"),
+            ("operator", "operator", "legacy_operator"),
+            ("track", "aircraft", "legacy_track"),
+            ("history", "aircraft", "legacy_history"),
+            ("path", "aircraft", "legacy_path"),
+        ):
+            seq = _track_store_build_sequence(raw.get(key), track_type, source_name)
+            if len(seq) > len(store.get(track_type) or []):
+                _track_store_set_sequence(store, track_type, seq)
+
+        if not store["aircraft"] and isinstance(raw.get("last_aircraft"), dict):
+            items = _sanitize_track_samples([raw.get("last_aircraft")])
+            if items:
+                _track_store_set_sequence(store, "aircraft", items)
+        if not store["operator"] and isinstance(raw.get("last_operator"), dict):
+            items = _sanitize_track_samples([raw.get("last_operator")])
+            if items:
+                _track_store_set_sequence(store, "operator", items)
+    elif isinstance(raw, list):
+        _track_store_set_sequence(store, "aircraft", _track_store_build_sequence(raw, "aircraft", "legacy_track"))
+    if store["aircraft"] and not store["last_aircraft"]:
+        store["last_aircraft"] = dict(store["aircraft"][-1])
+    if store["operator"] and not store["last_operator"]:
+        store["last_operator"] = dict(store["operator"][-1])
+    return store
+
+
+def _track_store_append_sample(store: dict, sample: dict) -> bool:
+    if not isinstance(store, dict) or not isinstance(sample, dict):
+        return False
+    track_type = str(sample.get("track_type") or sample.get("sample_type") or "aircraft").strip() or "aircraft"
+    if track_type not in ("aircraft", "operator"):
+        return False
+    items = _sanitize_track_samples([sample])
+    if not items:
+        return False
+    item = items[0]
+    seq = _sanitize_track_samples(list(store.get(track_type) or []))
+    item_key = _track_sample_dedup_key(item)
+    if seq:
+        last = seq[-1]
+        if _track_sample_dedup_key(last) == item_key:
+            if (item.get("receive_time_ms") or 0) >= (last.get("receive_time_ms") or 0):
+                seq[-1] = item
+                store[track_type] = seq
+                store[f"last_{track_type}"] = dict(item)
+                return True
+            return False
+        if (
+            abs(float(last.get("lat") or 0.0) - float(item["lat"])) < 1e-7
+            and abs(float(last.get("lon") or 0.0) - float(item["lon"])) < 1e-7
+            and (last.get("timestamp_ms") == item.get("timestamp_ms") or item.get("timestamp_ms") is None)
+        ):
+            if (item.get("receive_time_ms") or 0) >= (last.get("receive_time_ms") or 0):
+                seq[-1] = item
+                store[track_type] = seq
+                store[f"last_{track_type}"] = dict(item)
+                return True
+            return False
+    seq.append(item)
+    limit = _track_store_points_limit()
+    if len(seq) > limit:
+        seq = seq[-limit:]
+    store[track_type] = seq
+    store[f"last_{track_type}"] = dict(item)
+    return True
+
+
+def _track_sample_dedup_key(sample: dict | None) -> str:
+    if not isinstance(sample, dict):
+        return ""
+    identity = str(sample.get("sn") or sample.get("uas_id") or "")
+    track_type = str(sample.get("track_type") or sample.get("sample_type") or "aircraft")
+    lat = sample.get("lat")
+    lon = sample.get("lon")
+    ts_ms = sample.get("timestamp_ms")
+    recv_ms = sample.get("receive_time_ms")
+    packet_hash = str(sample.get("packet_hash") or "")
+    packet_or_recv = packet_hash
+    if not packet_or_recv and recv_ms is not None:
+        packet_or_recv = str(int(recv_ms))
+    return "|".join([
+        identity,
+        track_type,
+        str(round(float(lat), 7) if lat is not None else ""),
+        str(round(float(lon), 7) if lon is not None else ""),
+        str(int(ts_ms) if ts_ms is not None else ""),
+        packet_or_recv,
+    ])
+
+
+def _track_store_from_import_payload(
+    payload: dict | None,
+    *,
+    sn: str | None = None,
+    uas_id: str | None = None,
+) -> tuple[dict, list[dict]]:
+    store = _empty_track_store()
+    payload = payload if isinstance(payload, dict) else {}
+
+    def append_import_list(raw_items, track_type: str) -> None:
+        if not isinstance(raw_items, list):
+            return
+        for point in raw_items:
+            if not isinstance(point, dict):
+                continue
+            sample = {
+                "sample_type": track_type,
+                "track_type": track_type,
+                "sn": sn or point.get("sn"),
+                "uas_id": uas_id or point.get("uas_id"),
+                "lat": point.get("lat"),
+                "lon": point.get("lon"),
+                "alt": point.get("alt"),
+                "timestamp_ms": point.get("timestamp_ms"),
+                "receive_time_ms": point.get("receive_time_ms"),
+                "packet_hash": point.get("packet_hash"),
+                "source": point.get("source") or f"import_{track_type}",
+                "coordinate_system": point.get("coordinate_system") or "WGS84",
+            }
+            if sample["timestamp_ms"] is None and point.get("ts") is not None:
+                try:
+                    sample["receive_time_ms"] = int(float(point.get("ts")) * 1000.0)
+                except Exception:
+                    sample["receive_time_ms"] = sample.get("receive_time_ms")
+            _track_store_append_sample(store, sample)
+
+    if isinstance(payload.get("track"), list):
+        append_import_list(payload.get("track"), "aircraft")
+    append_import_list(payload.get("aircraft"), "aircraft")
+    append_import_list(payload.get("operator"), "operator")
+    return store, _track_store_primary(store, "aircraft")
+
+
+def _track_store_primary(store: dict, track_type: str = "aircraft") -> list[dict]:
+    clean = _sanitize_tracks(store)
+    seq = clean.get(track_type) if isinstance(clean, dict) else []
+    out: list[dict] = []
+    for item in list(seq or []):
+        try:
+            ts_ms = item.get("timestamp_ms")
+            recv_ms = item.get("receive_time_ms")
+            ts = None
+            if ts_ms is not None:
+                ts = float(ts_ms) / 1000.0
+            elif recv_ms is not None:
+                ts = float(recv_ms) / 1000.0
+            if ts is None or ts <= 0:
+                continue
+            out.append({
+                "lat": round(float(item.get("lat")), 7),
+                "lon": round(float(item.get("lon")), 7),
+                "ts": ts,
+                "alt": item.get("alt"),
+                "track_type": str(item.get("track_type") or track_type),
+                "sample_type": str(item.get("sample_type") or track_type),
+                "source": str(item.get("source") or ""),
+                "coordinate_system": str(item.get("coordinate_system") or "WGS84"),
+            })
+        except Exception:
+            continue
     return out
 
 def _track_append_point(entry: dict, lat: float, lon: float, wall_ts: float) -> bool:
@@ -833,8 +1135,9 @@ def _track_append_point(entry: dict, lat: float, lon: float, wall_ts: float) -> 
         "lon": round(float(lon), 7),
         "ts": float(wall_ts),
     })
-    if len(tr) > TRACK_MAX_POINTS:
-        tr = tr[-TRACK_MAX_POINTS:]
+    limit = _track_store_points_limit()
+    if len(tr) > limit:
+        tr = tr[-limit:]
     entry["track"] = tr
     entry["track_updated_wall_ts"] = float(wall_ts)
     return True
@@ -856,8 +1159,13 @@ def _track_query_value(query: dict | None, key: str) -> str:
         return ""
 
 def _track_for_query(raw, query: dict | None = None, firmware_type: str | None = None) -> list[dict]:
+    track_type = _track_query_value(query, "track_type").strip().lower() or "aircraft"
+    if isinstance(raw, dict):
+        base_track = _track_store_primary(raw, track_type if track_type in ("aircraft", "operator") else "aircraft")
+    else:
+        base_track = _sanitize_track(raw or [])
     # Always normalize stored points before applying request-level trimming.
-    track = _track_points_for_display(_sanitize_track(raw or []), firmware_type=firmware_type)
+    track = _track_points_for_display(base_track, firmware_type=firmware_type)
     if not isinstance(query, dict):
         return track
     try:
@@ -873,15 +1181,387 @@ def _track_for_query(raw, query: dict | None = None, firmware_type: str | None =
     except Exception:
         limit = 0
     if limit > 0:
-        limit = max(10, min(limit, TRACK_MAX_POINTS))
+        limit = max(TRACK_STORE_POINTS_MIN, min(limit, _track_store_points_limit()))
         track = track[-limit:]
     return track
 
-def _history_disk_items_locked() -> list[dict]:
+def _history_store_default_path(config_path: str | None = None) -> str:
+    base_dir = os.getcwd()
+    raw_cfg = str(config_path or APP_CONFIG_PATH or "").strip()
+    if raw_cfg:
+        try:
+            base_dir = os.path.dirname(os.path.abspath(raw_cfg)) or base_dir
+        except Exception:
+            base_dir = os.getcwd()
+    return os.path.abspath(os.path.join(base_dir, HISTORY_STORE_DEFAULT))
+
+def _history_set_legacy_source_paths(paths) -> None:
+    global HISTORY_LEGACY_SOURCE_PATHS
+    next_paths: list[str] = []
+    seen: set[str] = set()
+    for raw in list(paths or []):
+        try:
+            path = os.path.abspath(str(raw or "").strip())
+        except Exception:
+            continue
+        if not path:
+            continue
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        next_paths.append(path)
+    HISTORY_LEGACY_SOURCE_PATHS = next_paths
+
+def _history_legacy_source_candidates(path: str | None = None) -> list[str]:
+    db_path = os.path.abspath(str(path or HISTORY_STORE_PATH or _history_store_default_path()))
+    base_dir = os.path.dirname(db_path) or os.getcwd()
+    out: list[str] = []
+    seen: set[str] = {os.path.normcase(db_path)}
+    for raw in list(HISTORY_LEGACY_SOURCE_PATHS or []) + [
+        os.path.join(base_dir, HISTORY_STORE_LEGACY_DEFAULT),
+        os.path.join(base_dir, HISTORY_STORE_LEGACY_ALT_DEFAULT),
+    ]:
+        try:
+            candidate = os.path.abspath(str(raw or "").strip())
+        except Exception:
+            continue
+        if not candidate:
+            continue
+        key = os.path.normcase(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+def _history_parse_wall_ts_text(ts_text: str, fallback: float | None = None) -> float:
+    text = str(ts_text or "").strip()
+    if text and text != "-":
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+            try:
+                return float(time.mktime(time.strptime(text, fmt)))
+            except Exception:
+                pass
+        try:
+            return float(text)
+        except Exception:
+            pass
+    try:
+        return float(fallback or 0.0)
+    except Exception:
+        return 0.0
+
+def _history_hex_text_to_bytes(raw_hex: str) -> bytes:
+    text = str(raw_hex or "")
+    if "..." in text:
+        text = text.split("...", 1)[0]
+    pairs = re.findall(r"(?i)(?<![0-9a-f])([0-9a-f]{2})(?![0-9a-f])", text)
+    if not pairs:
+        compact = re.sub(r"(?i)[^0-9a-f]", "", text)
+        if len(compact) >= 2:
+            if len(compact) % 2:
+                compact = compact[:-1]
+            pairs = [compact[i:i + 2] for i in range(0, len(compact), 2)]
+    if not pairs:
+        return b""
+    return bytes(int(p, 16) for p in pairs)
+
+def _history_db_close_locked() -> None:
+    global history_db_conn, history_db_path
+    if history_db_conn is not None:
+        try:
+            history_db_conn.close()
+        except Exception:
+            pass
+    history_db_conn = None
+    history_db_path = None
+
+def _history_db_conn(path: str | None = None):
+    global history_db_conn, history_db_path
+    db_path = os.path.abspath(str(path or HISTORY_STORE_PATH or _history_store_default_path()))
+    with history_db_lock:
+        current = os.path.abspath(str(history_db_path or "")) if history_db_path else ""
+        if history_db_conn is not None and current == db_path:
+            return history_db_conn
+        _history_db_close_locked()
+        parent = os.path.dirname(db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        history_db_conn = conn
+        history_db_path = db_path
+        return conn
+
+def _history_storage_init(path: str | None = None) -> str:
+    db_path = os.path.abspath(str(path or HISTORY_STORE_PATH or _history_store_default_path()))
+    conn = _history_db_conn(db_path)
+    with history_db_lock:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_packets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sn TEXT NOT NULL,
+                capture_wall_ts REAL NOT NULL DEFAULT 0,
+                capture_time_text TEXT,
+                capture_type TEXT,
+                firmware_type TEXT,
+                uas_id TEXT,
+                payload BLOB,
+                hex_text TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_packets_sn_ts ON raw_packets(sn, capture_wall_ts, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_packets_ts ON raw_packets(capture_wall_ts, id)")
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("schema_version", str(HISTORY_STORAGE_SCHEMA_VERSION)),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
+            ("summary_json", json.dumps({"version": HISTORY_STORAGE_EXPORT_VERSION, "items": []}, ensure_ascii=False, separators=(",", ":"))),
+        )
+    return db_path
+
+def _history_storage_read_summary(path: str | None = None) -> dict:
+    _history_storage_init(path)
+    conn = _history_db_conn(path)
+    with history_db_lock:
+        row = conn.execute("SELECT value FROM meta WHERE key='summary_json'").fetchone()
+    raw = ""
+    if row is not None:
+        try:
+            raw = str(row["value"] or "")
+        except Exception:
+            raw = str(row[0] or "")
+    if not raw:
+        return {"version": HISTORY_STORAGE_EXPORT_VERSION, "items": []}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {"version": HISTORY_STORAGE_EXPORT_VERSION, "items": []}
+    if not isinstance(payload, dict):
+        return {"version": HISTORY_STORAGE_EXPORT_VERSION, "items": []}
+    items = payload.get("items")
+    if not isinstance(items, list):
+        payload["items"] = []
+    return payload
+
+def _history_storage_write_summary(payload: dict, path: str | None = None) -> bool:
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    try:
+        raw = json.dumps(payload if isinstance(payload, dict) else {"version": HISTORY_STORAGE_EXPORT_VERSION, "items": []}, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        raw = json.dumps({"version": HISTORY_STORAGE_EXPORT_VERSION, "items": []}, ensure_ascii=False, separators=(",", ":"))
+    with history_db_lock:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("summary_json", raw),
+        )
+    return True
+
+def _history_storage_packet_row_to_dict(row) -> dict:
+    if row is None:
+        return {}
+    payload = row["payload"] if isinstance(row, sqlite3.Row) else row[6]
+    hex_text = row["hex_text"] if isinstance(row, sqlite3.Row) else row[7]
+    raw_hex = ""
+    if isinstance(payload, (bytes, bytearray)) and payload:
+        raw_hex = bytes(payload).hex()
+    elif hex_text not in (None, ""):
+        raw_hex = str(hex_text)
+    ts_text = row["capture_time_text"] if isinstance(row, sqlite3.Row) else row[2]
+    capture_wall_ts = row["capture_wall_ts"] if isinstance(row, sqlite3.Row) else row[1]
+    return {
+        "ts": str(ts_text or _fmt_wall_ts(float(capture_wall_ts or 0.0))),
+        "capture_type": str((row["capture_type"] if isinstance(row, sqlite3.Row) else row[3]) or ""),
+        "firmware_type": str((row["firmware_type"] if isinstance(row, sqlite3.Row) else row[4]) or ""),
+        "uas_id": str((row["uas_id"] if isinstance(row, sqlite3.Row) else row[5]) or ""),
+        "hex": raw_hex,
+    }
+
+def _history_storage_fetch_raw_packets(sn: str | None = None, limit: int | None = None, *, newest_first: bool = False, path: str | None = None) -> list[dict]:
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    clauses = []
+    args: list = []
+    target_sn = str(sn or "").strip()
+    if target_sn:
+        clauses.append("sn = ?")
+        args.append(target_sn)
+    order = "ORDER BY capture_wall_ts DESC, id DESC" if newest_first else "ORDER BY capture_wall_ts ASC, id ASC"
+    sql = (
+        "SELECT sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text "
+        "FROM raw_packets "
+        + (("WHERE " + " AND ".join(clauses) + " ") if clauses else "")
+        + order
+    )
+    if limit is not None and int(limit) > 0:
+        sql += " LIMIT ?"
+        args.append(int(limit))
+    with history_db_lock:
+        rows = conn.execute(sql, args).fetchall()
+    out = [_history_storage_packet_row_to_dict(row) for row in rows]
+    if newest_first:
+        out.reverse()
+    return out
+
+def _history_storage_append_raw_packet(sn: str, raw: dict, path: str | None = None) -> bool:
+    target_sn = str(sn or "").strip()
+    if not target_sn or not isinstance(raw, dict):
+        return False
+    raw_hex = str(raw.get("hex") or "").strip()
+    if not raw_hex:
+        return False
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    payload = _history_hex_text_to_bytes(raw_hex)
+    capture_wall_ts = _history_parse_wall_ts_text(str(raw.get("ts") or ""), raw.get("_wall_ts"))
+    with history_db_lock:
+        conn.execute(
+            """
+            INSERT INTO raw_packets(sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_sn,
+                float(capture_wall_ts or 0.0),
+                str(raw.get("ts") or _fmt_wall_ts(float(capture_wall_ts or 0.0))),
+                str(raw.get("capture_type") or ""),
+                str(raw.get("firmware_type") or ""),
+                str(raw.get("uas_id") or ""),
+                sqlite3.Binary(payload) if payload else None,
+                None if payload else raw_hex,
+            ),
+        )
+    return True
+
+def _history_storage_delete_sn(sn: str, path: str | None = None) -> None:
+    target_sn = str(sn or "").strip()
+    if not target_sn:
+        return
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    with history_db_lock:
+        conn.execute("DELETE FROM raw_packets WHERE sn = ?", (target_sn,))
+
+def _history_storage_reassign_sn(old_sn: str, new_sn: str, path: str | None = None) -> None:
+    old_key = str(old_sn or "").strip()
+    new_key = str(new_sn or "").strip()
+    if not old_key or not new_key or old_key == new_key:
+        return
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    with history_db_lock:
+        conn.execute("UPDATE raw_packets SET sn = ? WHERE sn = ?", (new_key, old_key))
+
+def _history_storage_clear_raw_packets(path: str | None = None) -> None:
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    with history_db_lock:
+        conn.execute("DELETE FROM raw_packets")
+
+def _history_storage_notice(message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    try:
+        _notification_add(text, "warn", "server")
+    except Exception:
+        pass
+
+def _history_storage_normalize_import_item(raw: dict) -> dict:
+    item = dict(raw if isinstance(raw, dict) else {})
+    item["tracks"] = _empty_track_store()
+    item["track"] = []
+    packets = list(item.get("raw_packets") or [])
+    if packets:
+        item["raw_packets"] = packets[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:]
+    return item
+
+def _history_storage_migrate_legacy_json(db_path: str) -> tuple[bool, str]:
+    conn = _history_db_conn(db_path)
+    with history_db_lock:
+        row = conn.execute("SELECT value FROM meta WHERE key='legacy_migration_done'").fetchone()
+    if row is not None:
+        done_value = ""
+        try:
+            done_value = str(row["value"] or "")
+        except Exception:
+            done_value = str(row[0] or "")
+        if done_value:
+            return False, ""
+    summary = _history_storage_read_summary(db_path)
+    items = summary.get("items") if isinstance(summary, dict) else []
+    if isinstance(items, list) and items:
+        return False, ""
+    source_path = ""
+    for candidate in _history_legacy_source_candidates(db_path):
+        if os.path.exists(candidate):
+            source_path = candidate
+            break
+    if not source_path:
+        return False, ""
+    try:
+        with open(source_path, "r", encoding="utf-8") as f:
+            legacy = json.load(f)
+        legacy_items = legacy.get("items") if isinstance(legacy, dict) else legacy
+        if not isinstance(legacy_items, list):
+            return False, ""
+        normalized_items: list[dict] = []
+        _history_storage_clear_raw_packets(db_path)
+        for raw in legacy_items:
+            if not isinstance(raw, dict):
+                continue
+            item = _history_storage_normalize_import_item(raw)
+            sn = str(item.get("sn") or "").strip()
+            if not sn:
+                continue
+            fallback_ts = item.get("last_capture_wall_ts") or item.get("last_seen_wall_ts") or time.time()
+            for packet in list(raw.get("raw_packets") or []):
+                if not isinstance(packet, dict):
+                    continue
+                packet_copy = dict(packet)
+                packet_copy.setdefault("_wall_ts", fallback_ts)
+                _history_storage_append_raw_packet(sn, packet_copy, db_path)
+            normalized_items.append(item)
+        payload = {
+            "version": HISTORY_STORAGE_EXPORT_VERSION,
+            "store_version": HISTORY_STORAGE_EXPORT_VERSION,
+            "saved_at": time.time(),
+            "migrated_from": source_path,
+            "items": normalized_items,
+        }
+        _history_storage_write_summary(payload, db_path)
+        with history_db_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                ("legacy_migration_done", source_path or "done"),
+            )
+        return True, source_path
+    except Exception as exc:
+        _log(f"[WARN] history storage migration failed: {exc}")
+        return False, source_path
+
+def _history_disk_items_locked(*, include_all_raw_packets: bool = True) -> list[dict]:
     items: list[dict] = []
     for sn, e in history_table.items():
         if not sn:
             continue
+        raw_packets = (
+            _history_storage_fetch_raw_packets(sn, path=HISTORY_STORE_PATH)
+            if include_all_raw_packets and HISTORY_STORE_PATH
+            else list(e.get("raw_packets") or [])[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:]
+        )
         items.append({
             "sn": sn,
             "src_mac": e.get("src_mac"),
@@ -935,13 +1615,14 @@ def _history_disk_items_locked() -> list[dict]:
             "operator_positions": e.get("operator_positions"),
             "raw_coords": e.get("raw_coords"),
             "aircraft_position": e.get("aircraft_position"),
+            "tracks": _empty_track_store(),
             "marker_offset": e.get("marker_offset"),
             "capture_type": e.get("capture_type"),
             "firmware_type": _firmware_type_key(e.get("firmware_type")),
             "last_capture_wall_ts": e.get("last_capture_wall_ts"),
-            "raw_packets": list(e.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:],
+            "raw_packets": raw_packets,
             "scan_type": _scan_type_key(e.get("scan_type")),
-            "track": _sanitize_track(e.get("track") or []),
+            "track": [],
             "track_updated_wall_ts": e.get("track_updated_wall_ts"),
             "first_seen_wall_ts": e.get("first_seen_wall_ts"),
             "last_seen_wall_ts": e.get("last_seen_wall_ts"),
@@ -958,18 +1639,18 @@ def load_history_store(path: str | None) -> None:
     if not path:
         return
     try:
-        if not os.path.exists(path):
-            return
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        items = obj.get("items") if isinstance(obj, dict) else obj
+        db_path = _history_storage_init(path)
+        migrated, migrated_from = _history_storage_migrate_legacy_json(db_path)
+        obj = _history_storage_read_summary(db_path)
+        items = obj.get("items") if isinstance(obj, dict) else []
         if not isinstance(items, list):
-            _log(f"[WARN] history cache format invalid: {path}")
+            _log(f"[WARN] history storage summary invalid: {db_path}")
             return
         loaded = 0
         repaired_model = 0
-        compat_dirty = False
+        compat_dirty = bool(migrated)
         with state_lock:
+            history_table.clear()
             for raw in items:
                 if not isinstance(raw, dict):
                     continue
@@ -991,8 +1672,13 @@ def load_history_store(path: str | None) -> None:
                 if new_model != (old_model if old_model else "N/A"):
                     h["model"] = new_model
                     repaired_model += 1
-                h["raw_packets"] = list(h.get("raw_packets") or [])[-HISTORY_RAW_PACKET_LIMIT:]
-                h["track"] = _sanitize_track(h.get("track") or [])
+                raw_packets = list(raw.get("raw_packets") or [])
+                if not raw_packets and db_path:
+                    raw_packets = _history_storage_fetch_raw_packets(sn, HISTORY_RAW_PACKET_SNAPSHOT_LIMIT, newest_first=True, path=db_path)
+                h["raw_packets"] = list(raw_packets or [])[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:]
+                h["tracks"] = _empty_track_store()
+                h["track"] = []
+                h["track_updated_wall_ts"] = None
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
                 # Monotonic timestamps are process-local; keep them unset until new packets arrive.
                 h.setdefault("first_seen_ts", None)
@@ -1001,15 +1687,21 @@ def load_history_store(path: str | None) -> None:
                 loaded += 1
             history_persist_dirty = False
             history_persist_last_save_wall = time.time()
-        _log(f"[INFO] history cache loaded: {path} ({loaded} items)")
+        _log(f"[INFO] history storage loaded: {db_path} ({loaded} items)")
         if repaired_model or compat_dirty:
             _history_mark_dirty()
         if compat_dirty:
-            _log("[INFO] history cache upgraded for firmware/UAS fields")
+            if migrated:
+                _history_storage_notice(
+                    f"检测到旧扫描缓存，已升级到数据库 {os.path.basename(db_path)}。自 {HISTORY_STORAGE_UPGRADE_TARGET} 起仅保留列表最后点位，不再保留历史轨迹，HEX 已迁入数据库。"
+                )
+                _log(f"[INFO] history storage migrated from legacy json: {migrated_from}")
+            else:
+                _log("[INFO] history storage summary upgraded for compatibility fields")
         if repaired_model:
             _log(f"[INFO] history model repaired from SN map: {repaired_model}")
     except Exception as e:
-        _log(f"[WARN] history cache load failed: {e}")
+        _log(f"[WARN] history storage load failed: {e}")
 
 def save_history_store(force: bool = False) -> bool:
     global history_persist_dirty, history_persist_last_save_wall
@@ -1025,31 +1717,21 @@ def save_history_store(force: bool = False) -> bool:
             if not force and (not history_persist_dirty or (now_wall - history_persist_last_save_wall) < HISTORY_SAVE_INTERVAL):
                 return False
             payload = {
-                "version": 3,
+                "version": HISTORY_STORAGE_EXPORT_VERSION,
+                "store_version": HISTORY_STORAGE_EXPORT_VERSION,
                 "saved_at": now_wall,
-                "items": _history_disk_items_locked(),
+                "items": _history_disk_items_locked(include_all_raw_packets=False),
             }
             history_persist_dirty = False
-        tmp_path = path + ".tmp"
         try:
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
-            os.replace(tmp_path, path)
+            _history_storage_write_summary(payload, path)
             history_persist_last_save_wall = now_wall
             return True
         except Exception:
             with state_lock:
                 history_persist_dirty = True
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
             if force:
-                _log(f"[WARN] history cache save failed: {path}")
+                _log(f"[WARN] history storage save failed: {path}")
             return False
 
 def history_persist_loop() -> None:
@@ -1072,18 +1754,34 @@ def clear_history_store(delete_file: bool = True) -> tuple[int, bool]:
             history_persist_last_save_wall = time.time()
         if delete_file and path:
             try:
-                if os.path.exists(path):
-                    os.remove(path)
+                abs_path = os.path.abspath(path)
+                with history_db_lock:
+                    if history_db_path and os.path.abspath(str(history_db_path)) == abs_path:
+                        _history_db_close_locked()
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
                     removed_file = True
             except Exception as e:
-                _log(f"[WARN] history cache file delete failed: {e}")
+                _log(f"[WARN] history storage file delete failed: {e}")
             try:
-                tmp_path = path + ".tmp"
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                for suffix in ("-wal", "-shm"):
+                    aux_path = os.path.abspath(path) + suffix
+                    if os.path.exists(aux_path):
+                        os.remove(aux_path)
             except Exception:
                 pass
-    _log(f"[INFO] history cache cleared: {cleared}" + (f" (deleted file {path})" if removed_file else ""))
+        else:
+            try:
+                _history_storage_clear_raw_packets(path)
+                _history_storage_write_summary({
+                    "version": HISTORY_STORAGE_EXPORT_VERSION,
+                    "store_version": HISTORY_STORAGE_EXPORT_VERSION,
+                    "saved_at": time.time(),
+                    "items": [],
+                }, path)
+            except Exception as e:
+                _log(f"[WARN] history storage clear failed: {e}")
+    _log(f"[INFO] history storage cleared: {cleared}" + (f" (deleted file {path})" if removed_file else ""))
     return cleared, removed_file
 
 def delete_history_item(sn: str) -> bool:
@@ -1099,6 +1797,15 @@ def delete_history_item(sn: str) -> bool:
         if sn in state_table:
             state_table.pop(sn, None)
             removed = True
+    if removed:
+        try:
+            _history_storage_delete_sn(sn, HISTORY_STORE_PATH)
+        except Exception:
+            pass
+        try:
+            save_history_store(force=True)
+        except Exception:
+            pass
     return removed
 
 def clear_track_store(sn: str | None = None) -> int:
@@ -1152,7 +1859,7 @@ HISTORY_DETAIL_KEYS = (
     "operator_positions","raw_coords","aircraft_position","marker_offset",
     "rssi","move_dir","ssid",
     "capture_type","firmware_type","last_capture_wall_ts","raw_packets",
-    "scan_type","track","track_updated_wall_ts",
+    "scan_type","tracks","track","track_updated_wall_ts",
     "first_seen_wall_ts","last_seen_wall_ts",
     "notify_first_online_sent","notify_last_wall_ts",
     "last_online_duration_sec",
@@ -1172,23 +1879,23 @@ def _history_apply_raw_locked(raw: dict) -> tuple[bool, bool]:
     is_new = old is None
     h = dict(old) if isinstance(old, dict) else {"sn": sn}
     h["sn"] = sn
+    imported_raw_packets = [dict(x) for x in list(raw.get("raw_packets") or []) if isinstance(x, dict)]
     for k in HISTORY_DETAIL_KEYS:
         if k not in raw:
             continue
         if k == "raw_packets":
-            h[k] = list(raw.get(k) or [])[-HISTORY_RAW_PACKET_LIMIT:]
+            h[k] = imported_raw_packets[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:]
+        elif k in ("tracks", "track"):
+            continue
         else:
             h[k] = raw.get(k)
     h["scan_type"] = _scan_type_key(h.get("scan_type"))
     h["firmware_type"] = _firmware_type_key(h.get("firmware_type"))
     h["uas_id"] = _uas_id_clean(h.get("uas_id"))
     h["model"] = _resolve_model_name(sn, h.get("scan_type"), h.get("model"))
-    h["track"] = _sanitize_track(h.get("track") or [])
-    if h.get("track") and h.get("track_updated_wall_ts") is None:
-        try:
-            h["track_updated_wall_ts"] = float(h["track"][-1].get("ts") or time.time())
-        except Exception:
-            h["track_updated_wall_ts"] = time.time()
+    h["tracks"] = _empty_track_store()
+    h["track"] = []
+    h["track_updated_wall_ts"] = None
     try:
         h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total", h.get("pkt_count_total", 0)) or 0))
     except Exception:
@@ -1196,6 +1903,12 @@ def _history_apply_raw_locked(raw: dict) -> tuple[bool, bool]:
     # Monotonic timestamps are process-local; keep them unset unless produced at runtime.
     h.setdefault("first_seen_ts", None)
     h.setdefault("last_seen_ts", None)
+    if imported_raw_packets:
+        fallback_ts = h.get("last_capture_wall_ts") or h.get("last_seen_wall_ts") or time.time()
+        for packet in imported_raw_packets:
+            packet_copy = dict(packet)
+            packet_copy.setdefault("_wall_ts", fallback_ts)
+            _history_storage_append_raw_packet(sn, packet_copy, HISTORY_STORE_PATH)
     history_table[sn] = h
     return True, is_new
 
@@ -1344,13 +2057,13 @@ def _scan_data_file_info(path: str | None = None) -> dict:
 
 def _scan_data_export_payload() -> dict:
     with state_lock:
-        items = _history_disk_items_locked()
+        items = _history_disk_items_locked(include_all_raw_packets=True)
     file_info = _scan_data_file_info()
     return {
         "ok": True,
         "kind": "scan_data",
         "version": 1,
-        "store_version": 3,
+        "store_version": HISTORY_STORAGE_EXPORT_VERSION,
         "exported_at": time.time(),
         "data_file": file_info.get("path") or HISTORY_STORE_PATH or "",
         "data_file_info": file_info,
@@ -1409,11 +2122,12 @@ def default_app_config() -> dict:
             "time": DEFAULT_PRINT_INTERVAL,
             "min_gap": DEFAULT_MIN_GAP,
             "lost_timeout": DEFAULT_LOST_TIMEOUT,
+            "track_points_limit": TRACK_MAX_POINTS,
             "rssi_delta": 3,
             "change_on_rssi": False,
             "change_on_payload": False,
             "model_map": os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT),
-            "history_file": os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT),
+            "history_file": _history_store_default_path(),
             "no_tui": True,
             "debug": False,
         },
@@ -1536,9 +2250,11 @@ def _ensure_runtime_json_files(config_path: str | None, history_path: str | None
     if config_path and (not os.path.exists(config_path)) and (not config_locked):
         _write_json_file(config_path, {})
         _log(f"[INFO] config file created: {config_path}")
-    if history_path and not os.path.exists(history_path):
-        _write_json_file(history_path, {"version": 3, "items": []})
-        _log(f"[INFO] history cache created: {history_path}")
+    if history_path:
+        created = not os.path.exists(history_path)
+        _history_storage_init(history_path)
+        if created:
+            _log(f"[INFO] history storage created: {history_path}")
 
 def _apply_portable_defaults(cfg: dict) -> dict:
     if not _portable_edition_enabled():
@@ -2041,7 +2757,8 @@ def _settings_view_payload() -> dict:
     host["current_channel"] = int(current_channel or channel_effective or 6)
     host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
     host["ifaces"] = interfaces
-    scan_data_file = _scan_data_file_info(HISTORY_STORE_PATH or str(basic.get("history_file") or ""))
+    fixed_history_path = HISTORY_STORE_PATH or _history_store_default_path(APP_CONFIG_PATH)
+    scan_data_file = _scan_data_file_info(fixed_history_path)
     api_tokens_public = _api_tokens_public(api_prepared)
     return {
         "ok": True,
@@ -2064,12 +2781,13 @@ def _settings_view_payload() -> dict:
                 "time": basic.get("time", DEFAULT_PRINT_INTERVAL),
                 "min_gap": basic.get("min_gap", DEFAULT_MIN_GAP),
                 "lost_timeout": basic.get("lost_timeout", basic.get("offline_timeout", DEFAULT_LOST_TIMEOUT)),
+                "track_points_limit": _track_store_points_limit(),
                 "rssi_delta": basic.get("rssi_delta", 3),
                 "change_on_rssi": bool(basic.get("change_on_rssi")),
                 "change_on_payload": bool(basic.get("change_on_payload")),
                 "debug": bool(basic.get("debug")),
                 "model_map": str(basic.get("model_map") or os.path.join(os.getcwd(), MODEL_MAP_FILE_DEFAULT)),
-                "history_file": str(basic.get("history_file") or os.path.join(os.getcwd(), HISTORY_STORE_DEFAULT)),
+                "history_file": fixed_history_path,
             },
             "notify": {
                 "enabled": bool(notify_norm.get("enabled")),
@@ -2208,6 +2926,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
         ("time", DEFAULT_PRINT_INTERVAL),
         ("min_gap", DEFAULT_MIN_GAP),
         ("lost_timeout", DEFAULT_LOST_TIMEOUT),
+        ("track_points_limit", TRACK_MAX_POINTS),
         ("dwell_2g", DWELL_2G_DEFAULT),
         ("dwell_5g", DWELL_5G_DEFAULT),
         ("settle", SETTLE_DEFAULT),
@@ -2219,16 +2938,18 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
                 basic[k] = max(0.0, float(p_basic.get(k)))
             except Exception:
                 return {"ok": False, "error": f"invalid {k}"}
-            if k not in ("time", "min_gap"):
+            if k == "track_points_limit":
+                basic[k] = max(TRACK_STORE_POINTS_MIN, min(int(round(float(basic[k]))), TRACK_STORE_POINTS_MAX))
+            elif k not in ("time", "min_gap"):
                 basic[k] = int(round(float(basic[k])))
     if "rssi_delta" in p_basic:
         try:
             basic["rssi_delta"] = max(1, int(p_basic.get("rssi_delta")))
         except Exception:
             return {"ok": False, "error": "invalid rssi_delta"}
-    for k in ("model_map", "history_file"):
-        if k in p_basic:
-            basic[k] = str(p_basic.get(k) or "").strip()
+    if "model_map" in p_basic:
+        basic["model_map"] = str(p_basic.get("model_map") or "").strip()
+    basic["history_file"] = HISTORY_STORE_PATH or _history_store_default_path(APP_CONFIG_PATH)
 
     for k in ("enabled", "notify_reonline"):
         if k in p_notify:

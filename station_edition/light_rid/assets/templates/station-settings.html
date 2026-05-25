@@ -247,7 +247,7 @@ details.advanced summary{cursor:pointer;font:600 14px/1.2 var(--font-ui);letter-
 .network-bind-module .network-bind-copy{font-size:12px;line-height:1.55;color:var(--muted)}
 .network-bind-module .network-bind-body{display:grid;gap:12px;margin-top:14px}
 .split-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
-.modal-mask{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
+.modal-mask{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;padding:20px;z-index:120}
 .modal-mask.show{display:flex}
 .modal-card{width:min(480px,100%);border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:16px;background:var(--card);padding:20px;box-shadow:var(--shadow)}
 .modal-card.wide{width:min(900px,100%)}
@@ -356,6 +356,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
               <div class="micro" id="channel-hint" style="display:none"></div>
             </div>
             <div class="field"><label>飞机离线判定(s)</label><input id="cfg-lost-timeout" type="number" min="3" max="3600" step="1"></div>
+            <div class="field"><label>轨迹保存量（点）</label><input id="cfg-track-points-limit" type="number" min="10" max="200000" step="1"><div class="micro">仅影响当前运行期轨迹显示和相关批量处理范围，数据库中的 HEX 会完整保留。</div></div>
             <div class="field full"><label>机型识别库</label><input id="cfg-model-map" type="text"></div>
             <div style="display:none">
               <input id="cfg-time" type="number" step="0.1">
@@ -386,7 +387,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
               </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
-            <div class="field full"><label>扫描数据文件</label><input id="cfg-history-file" type="text"></div>
+            <div class="field full"><label>扫描数据库(固定)</label><input id="cfg-history-file" type="text" readonly disabled></div>
           </div>
           <div class="checks" style="margin-top:14px">
             <label><input id="cfg-heal" type="checkbox"> 自愈恢复</label>

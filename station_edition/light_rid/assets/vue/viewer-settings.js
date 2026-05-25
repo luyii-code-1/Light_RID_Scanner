@@ -1,5 +1,5 @@
 (() => {
-  // node_modules/@vue/shared/dist/shared.esm-bundler.js
+  // frontend/node_modules/@vue/shared/dist/shared.esm-bundler.js
   // @__NO_SIDE_EFFECTS__
   function makeMap(str) {
     const map2 = /* @__PURE__ */ Object.create(null);
@@ -205,7 +205,7 @@
     return String(a) === String(b);
   }
 
-  // node_modules/@vue/reactivity/dist/reactivity.esm-bundler.js
+  // frontend/node_modules/@vue/reactivity/dist/reactivity.esm-bundler.js
   function warn(msg, ...args) {
     console.warn(`[Vue warn] ${msg}`, ...args);
   }
@@ -1659,7 +1659,7 @@
     return cRef;
   }
 
-  // node_modules/@vue/runtime-core/dist/runtime-core.esm-bundler.js
+  // frontend/node_modules/@vue/runtime-core/dist/runtime-core.esm-bundler.js
   var stack = [];
   function pushWarningContext(vnode) {
     stack.push(vnode);
@@ -6564,7 +6564,7 @@ Component that was made reactive: `,
   var version = "3.5.34";
   var warn2 = true ? warn$1 : NOOP;
 
-  // node_modules/@vue/runtime-dom/dist/runtime-dom.esm-bundler.js
+  // frontend/node_modules/@vue/runtime-dom/dist/runtime-dom.esm-bundler.js
   var policy = void 0;
   var tt = typeof window !== "undefined" && window.trustedTypes;
   if (tt) {
@@ -7102,7 +7102,7 @@ Expected function or array of functions, received type ${typeof value}.`
     return container;
   }
 
-  // node_modules/vue/dist/vue.runtime.esm-bundler.js
+  // frontend/node_modules/vue/dist/vue.runtime.esm-bundler.js
   function initDev() {
     {
       initCustomFormatter();
@@ -7112,7 +7112,7 @@ Expected function or array of functions, received type ${typeof value}.`
     initDev();
   }
 
-  // src/viewer-settings.js
+  // frontend/src/viewer-settings.js
   function apiHeaders(extra) {
     const base = { "X-LightRID-Page": "1" };
     return Object.assign(base, extra || {});

@@ -830,6 +830,26 @@ var suppressNextDroneNotifications = false;
 var replayState = {sn:null,snList:[],points:[],min:null,max:null,start:null,end:null,cursor:null,startIndex:0,endIndex:null,cursorIndex:null,playing:false,speed:1,timer:null,userRange:false};
 var replayMarkers = {};
 var replayUiSig = '';
+function normalizeTrackCacheEntry(value){
+  if(Array.isArray(value)){
+    return {aircraft:value.slice(), operator:[]};
+  }
+  value = value && typeof value === 'object' ? value : {};
+  return {
+    aircraft: Array.isArray(value.aircraft) ? value.aircraft.slice() : [],
+    operator: Array.isArray(value.operator) ? value.operator.slice() : []
+  };
+}
+function trackCacheList(sn, trackType){
+  var entry = normalizeTrackCacheEntry(trackCache[String(sn || '')]);
+  return String(trackType || 'aircraft') === 'operator' ? entry.operator : entry.aircraft;
+}
+function mergeTrackCachePayload(payload){
+  if(payload && payload.tracks && typeof payload.tracks === 'object'){
+    return normalizeTrackCacheEntry(payload.tracks);
+  }
+  return normalizeTrackCacheEntry(payload ? payload.track : null);
+}
 var HL_FADE_IN_MS = 0;
 var HL_HOLD_MS = 0;
 var HL_FADE_OUT_MS = 2000;
@@ -1201,20 +1221,23 @@ async function ensureTrackLoaded(sn, force){
   trackLoading[sn] = true;
   try{
     var data = await getJson(trackFetchUrl(sn));
-    var tr = Array.isArray(data.track) ? data.track : [];
-    trackCache[sn] = tr;
+    var cacheEntry = mergeTrackCachePayload(data);
+    var tr = cacheEntry.aircraft;
+    trackCache[sn] = cacheEntry;
     trackFetchMeta[sn] = {
       ts: Date.now(),
       scope: scope,
       total: Number(data.count_total || data.count || tr.length || 0),
-      shown: Number(tr.length || 0)
+      shown: Number(tr.length || 0),
+      aircraft: Number(cacheEntry.aircraft.length || 0),
+      operator: Number(cacheEntry.operator.length || 0)
     };
     if(currentAppPage() === 'history' && isHistoryTrackVisible(sn)){
       if(replaySyncPaused) renderReplayFrame();
       else updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
   }catch(_e){
-    if(!trackCache[sn]) trackCache[sn] = [];
+    if(!trackCache[sn]) trackCache[sn] = {aircraft:[], operator:[]};
   }finally{
     delete trackLoading[sn];
   }
@@ -2129,11 +2152,13 @@ async function toolsImportSingleTrackFromFile(file){
     if(!payload.sn){
       throw new Error('文件内无 SN，且当前未选择飞机');
     }
-    if(!Array.isArray(payload.track)){
+    var hasLegacyTrack = Array.isArray(payload.track);
+    var hasDualTrack = Array.isArray(payload.aircraft) || Array.isArray(payload.operator);
+    if(!hasLegacyTrack && !hasDualTrack){
       throw new Error('文件内缺少 track 数组');
     }
     var data = await postJson('/api/tools/import/track', {payload: payload});
-    trackCache[payload.sn] = payload.track.slice();
+    trackCache[payload.sn] = normalizeTrackCacheEntry(payload.tracks || payload);
     delete trackFetchMeta[payload.sn];
     delete trackLineSig[payload.sn];
     ensureTrackLoaded(payload.sn, true);
@@ -2809,7 +2834,7 @@ function buildExtraUi(){
   if(qs('btn-adv-close')) qs('btn-adv-close').addEventListener('click', closeAdvModal);
   if(qs('btn-restart-once')) qs('btn-restart-once').addEventListener('click', function(){ restartProgram(false); });
   if(qs('btn-restart-save')) qs('btn-restart-save').addEventListener('click', function(){ restartProgram(true); });
-  if(qs('btn-config-load')) qs('btn-config-load').addEventListener('click', loadConfigEditor);
+  if(qs('btn-config-load')) qs('btn-config-load').addEventListener('click', loadConfigEditorLegacy);
   if(qs('btn-config-save')) qs('btn-config-save').addEventListener('click', saveConfigEditor);
   if(qs('btn-history-delete')) qs('btn-history-delete').addEventListener('click', deleteHistoryBySelect);
   if(qs('btn-track-clear-one')) qs('btn-track-clear-one').addEventListener('click', clearTrackBySelect);
@@ -2908,7 +2933,7 @@ function buildExtraUi(){
     webNotifyEnabled = true;
   }
   updateNotifyButton();
-  loadConfigEditor();
+  primeConfigEditorStatus();
   loadIfaceOptions(false);
   syncTrackPrefsUi();
   setFreezeState(false);
@@ -3255,7 +3280,7 @@ async function clearTrackBySelect(){
   if(st) st.textContent = '清空中...';
   try{
     var data = await postJson('/api/tracks/clear', {sn: sn});
-    trackCache[sn] = [];
+    trackCache[sn] = {aircraft:[], operator:[]};
     delete trackFetchMeta[sn];
     delete trackLineSig[sn];
     if(st) st.textContent = '已清空轨迹: ' + sn + '（影响' + Number(data.affected || 0) + '架）';
@@ -3345,6 +3370,31 @@ async function saveConfigEditor(){
   }catch(e){
     if(st) st.textContent = '保存失败: ' + ((e && e.message) ? e.message : e);
     showBanner('配置保存失败', 'warn', 4200);
+  }
+}
+
+function primeConfigEditorStatus(){
+  var st = qs('config-editor-status');
+  if(!st) return;
+  st.textContent = '原始配置改为手动读取。如需编辑，请先到 Settings / 原始配置 验证密码。';
+}
+
+async function loadConfigEditorLegacy(){
+  var ta = qs('config-editor');
+  var st = qs('config-editor-status');
+  if(!ta) return;
+  if(st) st.textContent = '读取中...';
+  try{
+    var data = await getJson('/api/config');
+    ta.value = String(data.text || '');
+    if(st) st.textContent = '已读取: ' + String(data.path || '-');
+  }catch(e){
+    var msg = ((e && e.message) ? e.message : e);
+    if(String(msg || '').indexOf('raw config unlock required') >= 0){
+      if(st) st.textContent = '请先到 Settings / 原始配置 验证密码，然后再读取这里的配置。';
+      return;
+    }
+    if(st) st.textContent = '读取失败: ' + msg;
   }
 }
 
@@ -3790,7 +3840,7 @@ function onData(d){
     var e = latestDroneMap[sn];
     if(e){
       var tm = trackFetchMeta[sn] || {};
-      var cachedTotal = Number(tm.total || (trackCache[sn] || []).length || 0);
+      var cachedTotal = Number(tm.total || trackCacheList(sn, 'aircraft').length || 0);
       if(Number(e.track_count || 0) === cachedTotal) return;
       if(currentAppPage() === 'history' || (Date.now() - Number(tm.ts || 0)) >= TRACK_FORCE_RELOAD_MS){
         ensureTrackLoaded(sn, true);
@@ -4206,6 +4256,25 @@ function fmtReplayTime(ts){
     return '-';
   }
 }
+function replayTrackPointsForSn(sn){
+  var points = [];
+  ['aircraft','operator'].forEach(function(trackType){
+    trackCacheList(sn, trackType).forEach(function(point, idx){
+      var p = Object.assign({}, point || {});
+      p.track_type = String(p.track_type || trackType);
+      p.sample_type = String(p.sample_type || trackType);
+      p._source_index = idx;
+      points.push(p);
+    });
+  });
+  points.sort(function(a, b){
+    var at = Number(_trackTsSec(a) || 0);
+    var bt = Number(_trackTsSec(b) || 0);
+    if(at !== bt) return at - bt;
+    return Number(a._source_index || 0) - Number(b._source_index || 0);
+  });
+  return points;
+}
 function collectHistoryTrackBounds(){
   var selected = historyVisibleSnList(latestDroneRows);
   var minTs = null;
@@ -4213,7 +4282,7 @@ function collectHistoryTrackBounds(){
   var loadedCount = 0;
   var pointCount = 0;
   selected.forEach(function(sn){
-    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    var tr = replayTrackPointsForSn(sn);
     if(tr.length) loadedCount += 1;
     for(var i=0;i<tr.length;i++){
       var ts = _trackTsSec(tr[i]);
@@ -4296,7 +4365,7 @@ function replayBuildPoints(){
   var points = [];
   var loadedCount = 0;
   selected.forEach(function(sn){
-    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    var tr = replayTrackPointsForSn(sn);
     if(tr.length) loadedCount += 1;
     for(var i=0;i<tr.length;i++){
       var p = tr[i] || {};
@@ -4379,7 +4448,7 @@ function replayCandidateList(){
   rows.forEach(function(e){
     var sn = String((e && e.sn) || '');
     if(!sn || seen[sn] || !selectedSet[sn]) return;
-    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
+    var tr = replayTrackPointsForSn(sn);
     if(!tr.length) return;
     seen[sn] = true;
     out.push({sn:sn, count:tr.length, label:sn + ' · ' + tr.length + ' 点'});
@@ -4717,20 +4786,41 @@ function replayRowsAtCursor(){
   (Array.isArray(replayState.snList) ? replayState.snList : []).forEach(function(sn){
     sn = String(sn || '');
     if(!sn || !selectedSet[sn]) return;
-    var tr = Array.isArray(trackCache[sn]) ? trackCache[sn] : [];
     var point = null;
-    for(var i=0;i<tr.length;i++){
-      var p = tr[i] || {};
+    var aircraftPoint = null;
+    var operatorPoint = null;
+    replayTrackPointsForSn(sn).forEach(function(p){
       var ts = _trackTsSec(p);
-      if(ts == null || ts > end) continue;
-      if(!validMapCoord(p.lat, p.lon)) continue;
+      if(ts == null || ts > end || !validMapCoord(p.lat, p.lon)) return;
       point = p;
-    }
+      if(String(p.track_type || p.sample_type || 'aircraft') === 'operator') operatorPoint = p;
+      else aircraftPoint = p;
+    });
     if(!point) return;
     var row = rowsBySn[sn] || {sn:sn};
     row = Object.assign({}, row);
-    row.lat = Number(point.lat);
-    row.lon = Number(point.lon);
+    if(aircraftPoint){
+      row.lat = Number(aircraftPoint.lat);
+      row.lon = Number(aircraftPoint.lon);
+      row.aircraft_position = {
+        lat:Number(aircraftPoint.lat),
+        lon:Number(aircraftPoint.lon),
+        alt:aircraftPoint.alt,
+        source:String(aircraftPoint.source || 'replay_aircraft'),
+        role:'aircraft'
+      };
+    }
+    if(operatorPoint){
+      row.operator_positions = [{
+        lat:Number(operatorPoint.lat),
+        lon:Number(operatorPoint.lon),
+        alt:operatorPoint.alt,
+        source:String(operatorPoint.source || 'replay_operator'),
+        role:'operator'
+      }];
+      row.pilot_lat = Number(operatorPoint.lat);
+      row.pilot_lon = Number(operatorPoint.lon);
+    }
     row.last_seen = fmtReplayTime(point.ts);
     row.last_pkt_time = fmtReplayTime(point.ts);
     row.capture_time = fmtReplayTime(point.ts);
@@ -4769,7 +4859,7 @@ function updateReplayMarkers(){
   selected.forEach(function(replaySn, idx){
     replaySn = String(replaySn || '');
     if(!replaySn) return;
-    var tr = Array.isArray(trackCache[replaySn]) ? trackCache[replaySn] : [];
+    var tr = replayTrackPointsForSn(replaySn);
     var point = null;
     var prevPoint = null;
     for(var i=0;i<tr.length;i++){
@@ -5117,33 +5207,36 @@ function updateMap(drones){
   trackSn.forEach(function(sn){
     sn = String(sn || '');
     if(!sn) return;
-    var tr = filterTrackForDisplay(Array.isArray(trackCache[sn]) ? trackCache[sn] : [], page, sn);
-    if(tr.length < 2){
-      dropTrackLayer(sn);
-      return;
-    }
-    var latlngs = [];
-    for(var i=0;i<tr.length;i++){
-      var p = tr[i] || {};
-      var lat = Number(p.lat), lon = Number(p.lon);
-      if(validMapCoord(lat, lon)){
-        var ll = safeMapLatLng(lat, lon);
-        if(!ll) continue;
-        latlngs.push(ll);
-        trackLatLngsAll.push(ll);
+    ['aircraft','operator'].forEach(function(trackType){
+      var lineKey = sn + ':' + trackType;
+      var tr = filterTrackForDisplay(trackCacheList(sn, trackType), page, sn);
+      if(tr.length < 2){
+        dropTrackLayer(lineKey);
+        return;
       }
-    }
-    if(latlngs.length < 2){
-      dropTrackLayer(sn);
-      return;
-    }
-    activeTrack[sn] = true;
-    var tColor = trackColorForSn(sn);
-    var sig = trackLatLngSignature(latlngs);
-    if(trackLines[sn] && trackLineSig[sn] === sig){
-      return;
-    }
-    queueTrackLayerRender(sn, latlngs, tColor, sig);
+      var latlngs = [];
+      for(var i=0;i<tr.length;i++){
+        var p = tr[i] || {};
+        var lat = Number(p.lat), lon = Number(p.lon);
+        if(validMapCoord(lat, lon)){
+          var ll = safeMapLatLng(lat, lon);
+          if(!ll) continue;
+          latlngs.push(ll);
+          trackLatLngsAll.push(ll);
+        }
+      }
+      if(latlngs.length < 2){
+        dropTrackLayer(lineKey);
+        return;
+      }
+      activeTrack[lineKey] = true;
+      var tColor = (trackType === 'operator') ? '#ffb84d' : trackColorForSn(sn);
+      var sig = trackLatLngSignature(latlngs);
+      if(trackLines[lineKey] && trackLineSig[lineKey] === sig){
+        return;
+      }
+      queueTrackLayerRender(lineKey, latlngs, tColor, sig);
+    });
   });
 
   // remove stale aircraft markers
@@ -6260,7 +6353,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     delete trackFetchMeta[sn];
     delete trackLineSig[sn];
     if(Array.isArray(data.track)){
-      trackCache[sn] = data.track.slice();
+      trackCache[sn] = normalizeTrackCacheEntry(data.tracks || data.track);
       trackFetchMeta[sn] = {
         ts: Date.now(),
         scope: 'history|' + TRACK_HISTORY_FETCH_LIMIT,
@@ -6271,11 +6364,11 @@ _MAIN_PAGE_PATCH_JS = r"""
       delete trackCache[sn];
     }
     try{
-      var detail = await getJson('/api/v1/drones/' + encodeURIComponent(sn));
+      var detail = await getJson('/api/drones/get?sn=' + encodeURIComponent(sn));
       if(detail && detail.item){
         updateLocalRowAfterReparse(sn, detail.item);
         if(Array.isArray(detail.track)){
-          trackCache[sn] = detail.track.slice();
+          trackCache[sn] = normalizeTrackCacheEntry(detail.tracks || detail.track);
           trackFetchMeta[sn] = {
             ts: Date.now(),
             scope: 'history|' + TRACK_HISTORY_FETCH_LIMIT,
@@ -7917,13 +8010,18 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _track_for_query(src.get("track") or [], query, firmware_type=src.get("firmware_type"))
+                    tracks = _sanitize_tracks(src)
+                    track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
                     "item": item,
                     "track_count": len(track),
                     "track": track,
+                    "tracks": {
+                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type")),
+                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=src.get("firmware_type")),
+                    },
                 }, 200)
                 return
             if path == "/api/v1/aps":
@@ -7967,13 +8065,18 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _track_for_query(src.get("track") or [], query, firmware_type=src.get("firmware_type"))
+                    tracks = _sanitize_tracks(src)
+                    track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
                 self._send_json({
                     "ok": True,
                     "api": _api_meta(),
                     "sn": sn,
                     "count": len(track),
                     "track": track,
+                    "tracks": {
+                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type")),
+                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=src.get("firmware_type")),
+                    },
                 }, 200)
                 return
             if path in ("/", "/index.html"):
@@ -8090,6 +8193,38 @@ def http_server_thread() -> None:
                 self._send_json(_host_metrics_payload(window_sec=window_sec), 200)
             elif path == "/api/settings/systemd/status":
                 self._send_json(_systemd_service_status_payload(), 200)
+            elif path == "/api/drones/get":
+                sn = ""
+                try:
+                    sn = str((query.get("sn") or [""])[0] or "").strip()
+                except Exception:
+                    sn = ""
+                if not sn:
+                    self._send_json({"ok": False, "error": "sn required"}, 400)
+                    return
+                snap = _state_snapshot()
+                item = None
+                for x in (snap.get("drones") or []):
+                    if str(x.get("sn") or "") == sn:
+                        item = x
+                        break
+                if not item:
+                    self._send_json({"ok": False, "error": "sn not found"}, 404)
+                    return
+                with state_lock:
+                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    tracks = _sanitize_tracks(src)
+                    track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
+                self._send_json({
+                    "ok": True,
+                    "item": item,
+                    "track_count": len(track),
+                    "track": track,
+                    "tracks": {
+                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type")),
+                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=src.get("firmware_type")),
+                    },
+                }, 200)
             elif path == "/api/settings/models/list":
                 self._send_json(_model_map_editor_payload(), 200)
             elif path == "/api/logs/view":
@@ -8154,14 +8289,19 @@ def http_server_thread() -> None:
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
                     firmware_type = src.get("firmware_type")
-                    full_track = _track_for_query(src.get("track") or [], firmware_type=firmware_type)
-                    track = _track_for_query(src.get("track") or [], query, firmware_type=firmware_type)
+                    tracks = _sanitize_tracks(src)
+                    full_track = _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=firmware_type)
+                    track = _track_for_query(tracks, query, firmware_type=firmware_type)
                 self._send_json({
                     "ok": True,
                     "sn": sn,
                     "count": len(track),
                     "count_total": len(full_track),
                     "track": track,
+                    "tracks": {
+                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=firmware_type),
+                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=firmware_type),
+                    },
                 }, 200)
             elif path == "/api/tools/export/all":
                 with state_lock:
@@ -8185,7 +8325,8 @@ def http_server_thread() -> None:
                     return
                 with state_lock:
                     src = history_table.get(sn) or state_table.get(sn) or {}
-                    track = _sanitize_track(src.get("track") or [])
+                    tracks = _sanitize_tracks(src)
+                    track = _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type"))
                 _op_log("tools-export-track", f"sn={sn} count={len(track)}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
@@ -8194,6 +8335,10 @@ def http_server_thread() -> None:
                     "sn": sn,
                     "count": len(track),
                     "track": track,
+                    "tracks": {
+                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type")),
+                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=src.get("firmware_type")),
+                    },
                 }, 200)
             elif path == "/api/settings/export/settings":
                 payload = _settings_export_payload()
@@ -8499,9 +8644,9 @@ def http_server_thread() -> None:
             if path == "/api/v1/history/reidentify-recent":
                 body = self._read_json_body()
                 try:
-                    limit = int(body.get("limit") or HISTORY_RAW_PACKET_LIMIT) if isinstance(body, dict) else HISTORY_RAW_PACKET_LIMIT
+                    limit = int(body.get("limit") or _track_store_points_limit()) if isinstance(body, dict) else _track_store_points_limit()
                 except Exception:
-                    limit = HISTORY_RAW_PACKET_LIMIT
+                    limit = _track_store_points_limit()
                 try:
                     rsp = reidentify_recent_history_packets(limit=limit)
                     rsp["api"] = _api_meta()
@@ -8548,9 +8693,9 @@ def http_server_thread() -> None:
             elif path in ("/api/settings/history/reidentify-recent", "/api/settings/history/reidentify-latest"):
                 body = self._read_json_body()
                 try:
-                    limit = int(body.get("limit") or HISTORY_RAW_PACKET_LIMIT) if isinstance(body, dict) else HISTORY_RAW_PACKET_LIMIT
+                    limit = int(body.get("limit") or _track_store_points_limit()) if isinstance(body, dict) else _track_store_points_limit()
                 except Exception:
-                    limit = HISTORY_RAW_PACKET_LIMIT
+                    limit = _track_store_points_limit()
                 try:
                     rsp = reidentify_recent_history_packets(limit=limit)
                     summary = f"aircraft={rsp.get('updated_aircraft')}/{rsp.get('aircraft_count')} packets={rsp.get('decoded')}/{rsp.get('packet_count')}"
@@ -8611,27 +8756,55 @@ def http_server_thread() -> None:
                 if not sn:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
-                track_raw = payload.get("track")
-                if not isinstance(track_raw, list):
-                    self._send_json({"ok": False, "error": "track must be array"}, 400)
+                has_legacy_track = isinstance(payload.get("track"), list)
+                has_dual_track = isinstance(payload.get("aircraft"), list) or isinstance(payload.get("operator"), list)
+                if not has_legacy_track and not has_dual_track:
+                    self._send_json({"ok": False, "error": "track or aircraft/operator array required"}, 400)
                     return
-                track = _sanitize_track(track_raw if isinstance(track_raw, list) else [])
+                tracks, track = _track_store_from_import_payload(
+                    payload,
+                    sn=sn,
+                    uas_id=_uas_id_clean(payload.get("uas_id")),
+                )
+                count_aircraft = len(tracks.get("aircraft") or [])
+                count_operator = len(tracks.get("operator") or [])
+                count_total = count_aircraft + count_operator
+                track_updated_wall_ts = None
+                for track_type in ("aircraft", "operator"):
+                    last = tracks.get(f"last_{track_type}")
+                    if not isinstance(last, dict):
+                        continue
+                    last_ms = last.get("receive_time_ms") or last.get("timestamp_ms")
+                    try:
+                        wall_ts = float(last_ms) / 1000.0
+                        if track_updated_wall_ts is None or wall_ts > track_updated_wall_ts:
+                            track_updated_wall_ts = wall_ts
+                    except Exception:
+                        pass
+                if track_updated_wall_ts is None:
+                    track_updated_wall_ts = time.time()
                 with state_lock:
                     h = history_table.get(sn) or {"sn": sn, "pkt_count_total": 0}
                     h["sn"] = sn
+                    h["tracks"] = tracks
                     h["track"] = track
-                    h["track_updated_wall_ts"] = (float(track[-1]["ts"]) if track else time.time())
+                    h["track_updated_wall_ts"] = track_updated_wall_ts
                     history_table[sn] = h
                     e = state_table.get(sn)
                     if isinstance(e, dict):
+                        e["tracks"] = _sanitize_tracks(tracks)
                         e["track"] = list(track)
                         e["track_updated_wall_ts"] = h["track_updated_wall_ts"]
                     _history_mark_dirty()
-                _op_log("tools-import-track", f"sn={sn} count={len(track)}", ip=_client_ip_from_handler(self), ok=True)
+                _op_log("tools-import-track", f"sn={sn} aircraft={count_aircraft} operator={count_operator}", ip=_client_ip_from_handler(self), ok=True)
                 self._send_json({
                     "ok": True,
                     "sn": sn,
                     "count": len(track),
+                    "count_aircraft": count_aircraft,
+                    "count_operator": count_operator,
+                    "count_total": count_total,
+                    "tracks": tracks,
                 }, 200)
             elif path == "/api/hw/op":
                 body = self._read_json_body()

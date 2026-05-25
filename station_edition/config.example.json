@@ -14,11 +14,12 @@
     "time": 1.0,
     "min_gap": 0.5,
     "lost_timeout": 15,
+    "track_points_limit": 12000,
     "rssi_delta": 3,
     "change_on_rssi": false,
     "change_on_payload": false,
     "model_map": "rid_models.json",
-    "history_file": "rid_history_cache.json",
+    "history_file": "rid_storage.db",
     "no_tui": true,
     "debug": false
   },

@@ -409,6 +409,9 @@ def _rid_unknown(
         "aircraft_position": None,
         "operator_positions": [],
         "raw_coords": [],
+        "track_samples": [],
+        "decoded": None,
+        "metadata": {},
         "coordinate_system": "WGS84",
         "parse_level": "unknown",
         "warnings": list(warnings or []),
@@ -439,6 +442,9 @@ def _rid_result(
         "aircraft_position": aircraft_position,
         "operator_positions": list(operator_positions or []),
         "raw_coords": list(raw_coords or []),
+        "track_samples": [],
+        "decoded": None,
+        "metadata": {},
         "coordinate_system": "WGS84",
         "parse_level": parse_level,
         "warnings": list(warnings or []),
@@ -522,6 +528,75 @@ def _rid_dedup_coords(items: list[dict]) -> list[dict]:
         seen.add(key)
         out.append(item)
     return out
+
+
+def _position_timestamp_ms(item: dict | None) -> int | None:
+    if not isinstance(item, dict):
+        return None
+    value = item.get("timestamp_ms")
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _track_sample_from_position(
+    position: dict | None,
+    *,
+    sample_type: str,
+    track_type: str,
+    sn: str | None,
+    uas_id: str | None,
+) -> dict | None:
+    if not isinstance(position, dict):
+        return None
+    try:
+        lat = float(position.get("lat"))
+        lon = float(position.get("lon"))
+    except Exception:
+        return None
+    if not _coord_pair_valid(lat, lon):
+        return None
+    return {
+        "sample_type": sample_type,
+        "track_type": track_type,
+        "sn": sn or None,
+        "uas_id": uas_id or None,
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "alt": position.get("alt"),
+        "timestamp_ms": _position_timestamp_ms(position),
+        "receive_time_ms": None,
+        "source": str(position.get("source") or ""),
+        "coordinate_system": str(position.get("coordinate_system") or "WGS84"),
+    }
+
+
+def _build_track_samples(result: dict) -> list[dict]:
+    if not isinstance(result, dict):
+        return []
+    samples: list[dict] = []
+    aircraft = _track_sample_from_position(
+        result.get("aircraft_position"),
+        sample_type="aircraft",
+        track_type="aircraft",
+        sn=result.get("sn"),
+        uas_id=result.get("uas_id"),
+    )
+    if aircraft:
+        samples.append(aircraft)
+    operators = result.get("operator_positions") if isinstance(result.get("operator_positions"), list) else []
+    for operator in operators:
+        sample = _track_sample_from_position(
+            operator,
+            sample_type="operator",
+            track_type="operator",
+            sn=result.get("sn"),
+            uas_id=result.get("uas_id"),
+        )
+        if sample:
+            samples.append(sample)
+    return samples
 
 
 def _rid_vendor_starts(vendor: bytes) -> bool:
@@ -1169,7 +1244,9 @@ def _legacy_payload_candidates(data: bytes) -> list[bytes]:
             continue
         pack_pos = vendor.find(b"\xf1\x19\x03", 4)
         if pack_pos >= 0:
-            add(vendor[pack_pos:])
+            qty = int(vendor[pack_pos + 2]) if pack_pos + 2 < len(vendor) else 0
+            pack_len = 3 + max(0, qty) * ODID_MSG_SIZE
+            add(vendor[pack_pos:pack_pos + pack_len])
         if _rid_vendor_starts(vendor):
             add(_pick_payload_candidate(vendor[4:]))
     return candidates
@@ -1264,14 +1341,67 @@ def parse_rid_payload(
     if mode_key in ("auto", "gb46750_2025"):
         gb = parse_gb46750_2025(raw, ssid_sn)
         if gb.get("ok") or _has_gb_blocking_marker(raw):
-            return gb
+            return _enrich_rid_result(gb)
         if mode_key == "gb46750_2025":
-            return gb
+            return _enrich_rid_result(gb)
     if mode_key in ("auto", "dji_old_odid"):
         old = parse_legacy_odid_payload(raw, ssid_sn)
         if old.get("ok") or mode_key == "dji_old_odid":
-            return old
-    return _rid_unknown(["RID payload did not match GB46750_2025 or DJI_OLD_ODID"], body=raw)
+            return _enrich_rid_result(old)
+    return _enrich_rid_result(_rid_unknown(["RID payload did not match GB46750_2025 or DJI_OLD_ODID"], body=raw))
+
+
+def parse_rid_payloads(
+    data: bytes,
+    mode: str | None = "auto",
+    *,
+    ssid_sn: str | None = None,
+    model_hint: str | None = None,
+) -> dict:
+    mode_key = normalize_parse_mode(mode)
+    raw = bytes(data or b"")
+    packets: list[dict] = []
+    track_samples: list[dict] = []
+    tracks: dict[str, dict[str, list[dict]]] = {}
+    candidates: list[tuple[str, bytes]] = []
+    if mode_key in ("auto", "gb46750_2025"):
+        if _rid_vendor_starts(raw):
+            candidates.append(("gb46750_2025", raw))
+        for vendor in _find_dji_vendor_payloads(raw):
+            vendor_bytes = bytes(vendor or b"")
+            if vendor_bytes and _rid_vendor_is_gb_candidate(vendor_bytes):
+                candidates.append(("gb46750_2025", vendor_bytes))
+    if mode_key in ("auto", "dji_old_odid"):
+        for payload in _legacy_payload_candidates(raw):
+            payload_bytes = bytes(payload or b"")
+            if payload_bytes:
+                candidates.append(("dji_old_odid", payload_bytes))
+    for candidate_mode, candidate in candidates:
+        parsed = parse_rid_payload(candidate, candidate_mode, ssid_sn=ssid_sn, model_hint=model_hint)
+        if not parsed.get("ok"):
+            continue
+        packets.append(parsed)
+        for sample in parsed.get("track_samples") or []:
+            if not isinstance(sample, dict):
+                continue
+            key = str(sample.get("sn") or sample.get("uas_id") or "").strip()
+            if not key:
+                continue
+            track_type = str(sample.get("track_type") or sample.get("sample_type") or "aircraft").strip() or "aircraft"
+            store = tracks.setdefault(key, {"aircraft": [], "operator": []})
+            if track_type not in store:
+                store[track_type] = []
+            store[track_type].append(dict(sample))
+            track_samples.append(dict(sample))
+    return {
+        "ok": bool(packets),
+        "mode": mode_key,
+        "packets": packets,
+        "track_samples": track_samples,
+        "tracks": tracks,
+        "count": len(packets),
+        "warnings": [] if packets else ["no RID payload decoded"],
+    }
 
 
 def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
@@ -1375,6 +1505,24 @@ def rid_parse_result_to_decoded(result: dict | None) -> dict | None:
     }
 
 
+def _enrich_rid_result(result: dict) -> dict:
+    if not isinstance(result, dict):
+        return _rid_unknown(["invalid RID parse result"])
+    if not result.get("ok"):
+        if "track_samples" not in result:
+            result["track_samples"] = []
+        if "decoded" not in result:
+            result["decoded"] = None
+        if "metadata" not in result:
+            result["metadata"] = {}
+        return result
+    result["track_samples"] = _build_track_samples(result)
+    decoded = rid_parse_result_to_decoded(result)
+    result["decoded"] = decoded
+    result["metadata"] = decoded.get("metadata") if isinstance(decoded, dict) else {}
+    return result
+
+
 def parse_dji_gb46750(vendor: bytes, ssid: str | None = None) -> dict | None:
     result = parse_gb46750_2025(bytes(vendor or b""), ssid)
     return result if result.get("ok") else None
@@ -1418,6 +1566,7 @@ def _wrap_success_payload(mode_key: str, result: dict[str, Any], decoded: dict[s
         "format": fmt,
         "body_hex": str(result.get("body_hex") or ""),
         "decoded": decoded,
+        "metadata": decoded.get("metadata") if isinstance(decoded, dict) else {},
         "result": result,
     }
     for key in (
@@ -1430,6 +1579,7 @@ def _wrap_success_payload(mode_key: str, result: dict[str, Any], decoded: dict[s
         "aircraft_position",
         "operator_positions",
         "raw_coords",
+        "track_samples",
         "coordinate_system",
         "parse_level",
         "warnings",
@@ -1465,6 +1615,7 @@ def parse_raw_packet(
                 "aircraft_position": None,
                 "operator_positions": [],
                 "raw_coords": [],
+                "track_samples": [],
                 "coordinate_system": "WGS84",
                 "parse_level": "unknown",
                 "warnings": ["raw packet has no usable hex"],

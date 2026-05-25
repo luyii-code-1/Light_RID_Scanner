@@ -1506,9 +1506,9 @@ function collectVisualPayload(){
       time: n('cfg-time'),
       min_gap: n('cfg-min-gap'),
       lost_timeout: n('cfg-lost-timeout'),
+      track_points_limit: n('cfg-track-points-limit'),
       rssi_delta: n('cfg-rssi-delta'),
       model_map: v('cfg-model-map'),
-      history_file: v('cfg-history-file'),
       auto_self_heal: check('cfg-heal'),
       change_on_rssi: check('cfg-rssi-change'),
       change_on_payload: check('cfg-payload-change'),
@@ -2491,6 +2491,7 @@ async function loadVisual(){
   qs('cfg-time').value = String(b.time ?? '');
   qs('cfg-min-gap').value = String(b.min_gap ?? '');
   qs('cfg-lost-timeout').value = String(b.lost_timeout ?? 15);
+  qs('cfg-track-points-limit').value = String(b.track_points_limit ?? 12000);
   qs('cfg-rssi-delta').value = String(b.rssi_delta ?? '');
   qs('cfg-model-map').value = String(b.model_map || '');
   qs('cfg-model-update-enabled').checked = mu.enabled !== false;
@@ -2570,7 +2571,7 @@ async function loadVisual(){
   if(qs('cfg-passkey-name')) qs('cfg-passkey-name').value = '';
   syncAuthMethodUi();
   if(qs('settings-config-path')) qs('settings-config-path').textContent = '设置文件: ' + String(data.path || '-');
-  if(qs('settings-scan-data-path')) qs('settings-scan-data-path').textContent = '扫描数据文件: ' + String(b.history_file || '-');
+  if(qs('settings-scan-data-path')) qs('settings-scan-data-path').textContent = '扫描数据库: ' + String(b.history_file || '-');
   renderScanDataFileInfo(data.scan_data_file || null);
   var rawAccess = data.raw_access || {};
   settingsState.rawUnlocked = !rawAccess.required || !!rawAccess.unlocked;

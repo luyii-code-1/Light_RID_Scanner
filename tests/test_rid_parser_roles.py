@@ -1,8 +1,10 @@
+import os
 import struct
+import tempfile
 import unittest
 from pathlib import Path
 
-from station_edition.light_rid.analize_core import parse_raw_packet
+from station_edition.light_rid.analize_core import parse_raw_packet, parse_rid_payload, parse_rid_payloads
 from station_edition.light_rid.runtime import create_runtime_context, load_namespace
 
 
@@ -27,6 +29,33 @@ def parser_namespace():
     )
 
 
+def common_namespace():
+    return load_namespace(
+        create_runtime_context(
+            chunk_files=("common_core.py",),
+            module_name="station_edition.light_rid._test_common_tracks",
+        )
+    )
+
+
+def process_namespace():
+    return load_namespace(
+        create_runtime_context(
+            chunk_files=("common_core.py", "scan_core.py", "process_core.py"),
+            module_name="station_edition.light_rid._test_process_tracks",
+        )
+    )
+
+
+def startup_namespace(name: str):
+    return load_namespace(
+        create_runtime_context(
+            chunk_files=("common_core.py",),
+            module_name=name,
+        )
+    )
+
+
 def gb46750_ff2048_sample() -> bytes:
     vendor = bytearray(72)
     vendor[0:4] = bytes.fromhex("fa 0b bc 0d")
@@ -41,10 +70,17 @@ def gb46750_ff2048_sample() -> bytes:
     return bytes(vendor)
 
 
+GB46750_STANDARD_SAMPLE = bytes.fromhex(
+    "fa0bbc0d24ff2048fffffe3135383146414e4c433235385530323952544e363030303030303030000101d1823b483bf2eb11ed0769833b4822f0eb1105001c00284700c2083d0902000c050478acc5529e0103"
+)
+
+
 class RidParserRoleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.ns = parser_namespace()
+        cls.common_ns = common_namespace()
+        cls.process_ns = process_namespace()
 
     def test_legacy_odid_result_roles_are_message_type_based(self):
         result = self.ns["parse_rid_payload"](LEGACY_ODID_RAW, "auto")
@@ -94,9 +130,9 @@ class RidParserRoleTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["format"], "GB46750_2025")
-        self.assertEqual(result["sub_format"], "FF2048_EXTENDED_COORD_PAIR")
-        self.assertAlmostEqual(result["aircraft_position"]["lat"], 30.0602531, places=7)
-        self.assertAlmostEqual(result["operator_positions"][0]["lon"], 121.2004249, places=7)
+        self.assertEqual(result["sub_format"], "GB46750_STANDARD_PACKET")
+        self.assertAlmostEqual(result["aircraft_position"]["lat"], 30.0609279, places=7)
+        self.assertAlmostEqual(result["operator_positions"][0]["lon"], 121.1956939, places=7)
 
     def test_frontend_map_uses_role_specific_fields(self):
         source = Path("station_edition/light_rid/web_server.py").read_text(encoding="utf-8")
@@ -107,6 +143,311 @@ class RidParserRoleTests(unittest.TestCase):
         self.assertIn("var op = primaryOperatorCoord(e);", source)
         self.assertNotIn("home_lat || e.lat", source)
         self.assertNotIn("aux_lat || e.lat", source)
+
+    def test_gb46750_standard_packet_roles_and_track_samples(self):
+        result = parse_rid_payload(GB46750_STANDARD_SAMPLE, "gb46750_2025")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["format"], "GB46750_2025")
+        self.assertEqual(result["sn"], "1581FANLC258U029RTN6")
+        self.assertEqual(result["uas_id"], "00000000")
+        self.assertAlmostEqual(result["operator_positions"][0]["lat"], 30.0675643, places=7)
+        self.assertAlmostEqual(result["operator_positions"][0]["lon"], 121.1859665, places=7)
+        self.assertAlmostEqual(result["aircraft_position"]["lat"], 30.0675106, places=7)
+        self.assertAlmostEqual(result["aircraft_position"]["lon"], 121.1859817, places=7)
+        self.assertEqual([x["track_type"] for x in result["track_samples"]], ["aircraft", "operator"])
+        self.assertEqual(result["decoded"]["location"]["lat"], result["aircraft_position"]["lat"])
+        self.assertEqual(result["decoded"]["system"]["pilot_lat"], result["operator_positions"][0]["lat"])
+
+    def test_multi_packet_parser_accumulates_all_samples(self):
+        payload = LEGACY_ODID_RAW + GB46750_STANDARD_SAMPLE + GB46750_STANDARD_SAMPLE
+        result = parse_rid_payloads(payload, "auto")
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["count"], 3)
+        self.assertGreaterEqual(len(result["track_samples"]), 5)
+        self.assertIn("1581F8DBW25B800B3417", result["tracks"])
+        self.assertIn("1581FANLC258U029RTN6", result["tracks"])
+        self.assertGreaterEqual(len(result["tracks"]["1581FANLC258U029RTN6"]["aircraft"]), 2)
+        self.assertGreaterEqual(len(result["tracks"]["1581FANLC258U029RTN6"]["operator"]), 2)
+
+    def test_track_store_dedups_same_packet_hash(self):
+        store = self.common_ns["_empty_track_store"]()
+        append = self.common_ns["_track_store_append_sample"]
+
+        first = {
+            "track_type": "aircraft",
+            "sn": "RID-1",
+            "lat": 30.0,
+            "lon": 121.0,
+            "timestamp_ms": 1000,
+            "receive_time_ms": 2000,
+            "packet_hash": "pkt-1",
+        }
+        duplicate = dict(first)
+        duplicate["receive_time_ms"] = 2001
+
+        self.assertTrue(append(store, first))
+        self.assertTrue(append(store, duplicate))
+        self.assertEqual(len(store["aircraft"]), 1)
+        self.assertEqual(store["last_aircraft"]["receive_time_ms"], 2001)
+
+    def test_track_store_caps_points_and_keeps_latest_marker(self):
+        store = self.common_ns["_empty_track_store"]()
+        append = self.common_ns["_track_store_append_sample"]
+        config = self.common_ns["APP_CONFIG"]
+        old_basic = dict(config.get("basic") or {})
+        config["basic"] = dict(old_basic)
+        config["basic"]["track_points_limit"] = 10
+        try:
+            for idx in range(12):
+                self.assertTrue(append(store, {
+                    "track_type": "aircraft",
+                    "sn": "RID-2",
+                    "lat": 30.0 + idx * 0.001,
+                    "lon": 121.0 + idx * 0.001,
+                    "timestamp_ms": 1000 + idx,
+                    "receive_time_ms": 2000 + idx,
+                }))
+            self.assertEqual(len(store["aircraft"]), 10)
+            self.assertEqual(store["aircraft"][0]["timestamp_ms"], 1002)
+            self.assertEqual(store["last_aircraft"]["timestamp_ms"], 1011)
+        finally:
+            config["basic"] = old_basic
+
+    def test_import_payload_supports_legacy_and_dual_tracks(self):
+        build_store = self.common_ns["_track_store_from_import_payload"]
+
+        legacy_store, legacy_primary = build_store({
+            "track": [
+                {"lat": 30.1, "lon": 121.1, "ts": 1.0},
+                {"lat": 30.2, "lon": 121.2, "ts": 2.0},
+            ],
+        }, sn="RID-3")
+        self.assertEqual(len(legacy_store["aircraft"]), 2)
+        self.assertEqual(len(legacy_store["operator"]), 0)
+        self.assertEqual(len(legacy_primary), 2)
+
+        dual_store, dual_primary = build_store({
+            "aircraft": [
+                {"lat": 30.3, "lon": 121.3, "timestamp_ms": 3000},
+                {"lat": 30.4, "lon": 121.4, "timestamp_ms": 4000},
+            ],
+            "operator": [
+                {"lat": 31.3, "lon": 122.3, "timestamp_ms": 3500},
+                {"lat": 31.4, "lon": 122.4, "timestamp_ms": 4500},
+            ],
+        }, sn="RID-4")
+        self.assertEqual(len(dual_store["aircraft"]), 2)
+        self.assertEqual(len(dual_store["operator"]), 2)
+        self.assertEqual(len(dual_primary), 2)
+        self.assertEqual(dual_store["last_aircraft"]["timestamp_ms"], 4000)
+        self.assertEqual(dual_store["last_operator"]["timestamp_ms"], 4500)
+
+    def test_frontend_track_import_accepts_dual_track_payload(self):
+        source = Path("station_edition/light_rid/web_server.py").read_text(encoding="utf-8")
+
+        self.assertIn("var hasLegacyTrack = Array.isArray(payload.track);", source)
+        self.assertIn("var hasDualTrack = Array.isArray(payload.aircraft) || Array.isArray(payload.operator);", source)
+        self.assertIn("trackCache[payload.sn] = normalizeTrackCacheEntry(payload.tracks || payload);", source)
+
+    def test_reidentify_history_packet_for_sn_no_longer_uses_undefined_track_points(self):
+        history_table = self.process_ns["history_table"]
+        state_table = self.process_ns["state_table"]
+        reidentify = self.process_ns["reidentify_history_packet_for_sn"]
+        self.process_ns["_resolve_model_name"] = lambda sn, scan_type=None, current_model=None: current_model or "N/A"
+        target_sn = "1581F8DBW25B800B3417"
+        history_table.clear()
+        state_table.clear()
+        try:
+            history_table[target_sn] = {
+                "sn": target_sn,
+                "raw_packets": [{
+                    "hex": LEGACY_ODID_RAW.hex(),
+                    "ts": 1.0,
+                }],
+                "pkt_count_total": 1,
+            }
+            result = reidentify(target_sn, "auto")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["sn_now"], target_sn)
+            self.assertGreaterEqual(result["track_count"], 1)
+            self.assertIn("tracks", result)
+        finally:
+            history_table.clear()
+            state_table.clear()
+
+    def test_reidentify_preserves_longer_existing_aircraft_track_for_gb_cache(self):
+        history_table = self.process_ns["history_table"]
+        state_table = self.process_ns["state_table"]
+        reidentify = self.process_ns["reidentify_history_packet_for_sn"]
+        self.process_ns["_resolve_model_name"] = lambda sn, scan_type=None, current_model=None: current_model or "N/A"
+        target_sn = "GB-PRESERVE-1"
+        history_table.clear()
+        state_table.clear()
+        try:
+            history_table[target_sn] = {
+                "sn": target_sn,
+                "track": [
+                    {"lat": 30.0 + idx * 0.0001, "lon": 121.0 + idx * 0.0001, "ts": 1000.0 + idx}
+                    for idx in range(120)
+                ],
+                "raw_packets": [{
+                    "hex": GB46750_STANDARD_SAMPLE.hex(),
+                    "ts": 2000.0,
+                }],
+                "pkt_count_total": 120,
+            }
+            result = reidentify(target_sn, "auto")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["before_counts"]["aircraft"], 120)
+            self.assertEqual(result["rebuilt_counts"]["aircraft"], 1)
+            self.assertEqual(result["rebuilt_counts"]["operator"], 1)
+            self.assertEqual(result["final_counts"]["aircraft"], 120)
+            self.assertEqual(result["final_counts"]["operator"], 1)
+            self.assertTrue(result["preserve_existing_longer_tracks"])
+            self.assertIn("aircraft", result["preserved_track_types"])
+        finally:
+            history_table.clear()
+            state_table.clear()
+
+    def test_reidentify_warns_when_only_one_raw_packet_exists(self):
+        history_table = self.process_ns["history_table"]
+        state_table = self.process_ns["state_table"]
+        reidentify = self.process_ns["reidentify_history_packet_for_sn"]
+        self.process_ns["_resolve_model_name"] = lambda sn, scan_type=None, current_model=None: current_model or "N/A"
+        target_sn = "RAW-ONLY-1"
+        history_table.clear()
+        state_table.clear()
+        try:
+            history_table[target_sn] = {
+                "sn": target_sn,
+                "raw_packets": [{
+                    "hex": GB46750_STANDARD_SAMPLE.hex(),
+                    "ts": 3000.0,
+                }],
+                "pkt_count_total": 1,
+            }
+            result = reidentify(target_sn, "auto")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["before_counts"]["aircraft"], 0)
+            self.assertEqual(result["rebuilt_counts"]["aircraft"], 1)
+            self.assertEqual(result["rebuilt_counts"]["operator"], 1)
+            self.assertEqual(result["final_counts"]["aircraft"], 1)
+            self.assertEqual(result["final_counts"]["operator"], 1)
+            self.assertFalse(result["preserve_existing_longer_tracks"])
+            self.assertTrue(any("only has 1 raw packet" in msg for msg in result["warnings"]))
+        finally:
+            history_table.clear()
+            state_table.clear()
+
+    def test_realtime_append_120_packets_keeps_aircraft_and_operator_counts(self):
+        store = self.common_ns["_empty_track_store"]()
+        append = self.common_ns["_track_store_append_sample"]
+        parsed = parse_rid_payload(GB46750_STANDARD_SAMPLE, "gb46750_2025")
+        base_samples = parsed["track_samples"]
+        for idx in range(120):
+            for sample in base_samples:
+                item = dict(sample)
+                item["timestamp_ms"] = int(item.get("timestamp_ms") or 0) + idx
+                item["receive_time_ms"] = 10_000 + idx
+                item["packet_hash"] = f"pkt-{idx}"
+                self.assertTrue(append(store, item))
+        self.assertEqual(len(store["aircraft"]), 120)
+        self.assertEqual(len(store["operator"]), 120)
+
+    def test_reidentify_preserves_longer_existing_aircraft_track_for_legacy_dji(self):
+        history_table = self.process_ns["history_table"]
+        state_table = self.process_ns["state_table"]
+        reidentify = self.process_ns["reidentify_history_packet_for_sn"]
+        self.process_ns["_resolve_model_name"] = lambda sn, scan_type=None, current_model=None: current_model or "N/A"
+        target_sn = "1581F8DBW25B800B3417"
+        history_table.clear()
+        state_table.clear()
+        try:
+            history_table[target_sn] = {
+                "sn": target_sn,
+                "track": [
+                    {"lat": 30.0 + idx * 0.0001, "lon": 121.0 + idx * 0.0001, "ts": 4000.0 + idx}
+                    for idx in range(120)
+                ],
+                "raw_packets": [{
+                    "hex": LEGACY_ODID_RAW.hex(),
+                    "ts": 5000.0,
+                }],
+                "pkt_count_total": 120,
+            }
+            result = reidentify(target_sn, "auto")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["before_counts"]["aircraft"], 120)
+            self.assertEqual(result["rebuilt_counts"]["aircraft"], 1)
+            self.assertEqual(result["rebuilt_counts"]["operator"], 1)
+            self.assertEqual(result["final_counts"]["aircraft"], 120)
+            self.assertEqual(result["final_counts"]["operator"], 1)
+            self.assertTrue(result["preserve_existing_longer_tracks"])
+            self.assertIn("aircraft", result["preserved_track_types"])
+        finally:
+            history_table.clear()
+            state_table.clear()
+
+    def test_first_startup_creates_config_and_sqlite_store_when_paths_are_missing(self):
+        ns = startup_namespace("station_edition.light_rid._test_first_startup_default")
+        with tempfile.TemporaryDirectory(prefix="rid_first_startup_default_") as tmpdir:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                config_path = os.path.join(tmpdir, "config.json")
+                db_path = ns["_history_store_default_path"](config_path)
+                ns["APP_CONFIG_PATH"] = config_path
+                ns["APP_CONFIG_PATH_LOCKED"] = False
+                ns["HISTORY_STORE_PATH"] = db_path
+                ns["_history_set_legacy_source_paths"]([])
+
+                ns["_ensure_runtime_json_files"](config_path, db_path, config_locked=False)
+                cfg = ns["load_app_config"](config_path)
+                ns["APP_CONFIG"] = cfg
+                ns["load_history_store"](db_path)
+                self.assertTrue(ns["save_history_store"](force=True))
+                ns["_history_db_close_locked"]()
+                ns["history_table"].clear()
+                ns["load_history_store"](db_path)
+
+                file_info = ns["_scan_data_file_info"](db_path)
+                self.assertTrue(os.path.exists(config_path))
+                self.assertTrue(os.path.exists(db_path))
+                self.assertTrue(file_info["exists"])
+                self.assertGreaterEqual(int(file_info["size"]), 1)
+                self.assertEqual(cfg["basic"]["history_file"], db_path)
+            finally:
+                os.chdir(old_cwd)
+                ns["_history_db_close_locked"]()
+
+    def test_first_startup_with_locked_missing_config_uses_defaults_and_creates_sqlite_store(self):
+        ns = startup_namespace("station_edition.light_rid._test_first_startup_locked")
+        with tempfile.TemporaryDirectory(prefix="rid_first_startup_locked_") as tmpdir:
+            config_path = os.path.join(tmpdir, "nested", "config.json")
+            db_path = ns["_history_store_default_path"](config_path)
+            ns["APP_CONFIG_PATH"] = config_path
+            ns["APP_CONFIG_PATH_LOCKED"] = True
+            ns["HISTORY_STORE_PATH"] = db_path
+            ns["_history_set_legacy_source_paths"]([])
+
+            ns["_ensure_runtime_json_files"](config_path, db_path, config_locked=True)
+            cfg = ns["load_app_config"](config_path)
+            ns["APP_CONFIG"] = cfg
+            ns["load_history_store"](db_path)
+            self.assertTrue(ns["save_history_store"](force=True))
+            ns["_history_db_close_locked"]()
+            ns["history_table"].clear()
+            ns["load_history_store"](db_path)
+
+            file_info = ns["_scan_data_file_info"](db_path)
+            self.assertFalse(os.path.exists(config_path))
+            self.assertTrue(os.path.exists(db_path))
+            self.assertTrue(file_info["exists"])
+            self.assertGreaterEqual(int(file_info["size"]), 1)
+            self.assertIn("basic", cfg)
+            ns["_history_db_close_locked"]()
 
 
 if __name__ == "__main__":

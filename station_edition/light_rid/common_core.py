@@ -355,7 +355,9 @@ PAGE_API_HEADER_VALUE = "1"
 UPDATE_PROBE_HEADER = "X-LightRID-Update-Probe"
 UPDATE_PROBE_HEADER_VALUE = "1"
 APP_UPDATE_UPLOAD_NAME_HEADER = "X-LightRID-Upload-Name"
+APP_UPDATE_UPLOAD_TOKEN_HEADER = "X-LightRID-Upload-Token"
 APP_UPDATE_MAX_BYTES = 512 * 1024 * 1024
+APP_UPDATE_UPLOAD_SESSION_TTL_SEC = 15 * 60
 NOTIFY_CFG: dict = {
     "enabled": False,
     "only_online": True,
@@ -433,6 +435,8 @@ CONFIG_UPDATE_STATE: dict = {
 config_update_lock = Lock()
 config_update_worker_started = False
 app_update_lock = Lock()
+app_update_upload_lock = Lock()
+app_update_upload_sessions: dict[str, dict] = {}
 
 METRICS_CFG: dict = {
     "enabled": False,

@@ -8959,13 +8959,28 @@ def http_server_thread() -> None:
                 rsp = _start_app_update_download(manual=True)
                 _op_log("app-update-download", str(rsp.get("error") or rsp.get("message") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 self._send_json(rsp, 200 if rsp.get("ok") else 500)
+            elif path == "/api/settings/app-update/upload/prepare":
+                body = self._read_json_body()
+                file_name = str(body.get("file_name") or "").strip()
+                try:
+                    total_bytes = int(body.get("file_size") or 0)
+                except Exception:
+                    total_bytes = 0
+                try:
+                    rsp = _prepare_uploaded_app_update_package(file_name, total_bytes)
+                    _op_log("app-update-upload-prepare", str((rsp.get("prepare") or {}).get("asset_name") or file_name), ip=_client_ip_from_handler(self), ok=True)
+                    self._send_json(rsp, 200)
+                except Exception as e:
+                    _op_log("app-update-upload-prepare", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
+                    self._send_json({"ok": False, "error": str(e), "state": _app_update_status_payload()}, 400)
             elif path == "/api/settings/app-update/upload":
                 file_name, body_len = self._read_binary_upload_info()
+                upload_token = str(self.headers.get(APP_UPDATE_UPLOAD_TOKEN_HEADER) or "").strip()
                 if not file_name:
                     self._send_json({"ok": False, "error": "upload file name missing"}, 400)
                     return
                 try:
-                    meta = _accept_uploaded_app_update_package(file_name, self.rfile, body_len)
+                    meta = _accept_uploaded_app_update_package(file_name, self.rfile, body_len, upload_token=upload_token)
                     rsp = {
                         "ok": True,
                         "message": f"{meta.get('asset_name') or file_name} 已上传并通过 SHA256 校验。",

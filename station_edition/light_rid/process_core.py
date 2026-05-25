@@ -1782,6 +1782,99 @@ def _app_update_clear_stage_meta(remove_file: bool = True) -> None:
         "staged_size": 0,
     })
 
+def _app_update_upload_sessions_purge(now_ts: float | None = None) -> None:
+    now = float(now_ts or time.time())
+    with app_update_upload_lock:
+        stale = [
+            key
+            for key, item in app_update_upload_sessions.items()
+            if now >= float((item or {}).get("expires_at") or 0.0)
+        ]
+        for key in stale:
+            app_update_upload_sessions.pop(key, None)
+
+def _app_update_upload_session_create(file_name: str, total_bytes: int) -> dict:
+    safe_name = _app_update_safe_filename(file_name)
+    size = int(total_bytes or 0)
+    if not safe_name:
+        raise ValueError("upload file name missing")
+    if size <= 0:
+        raise ValueError("empty upload")
+    if size > APP_UPDATE_MAX_BYTES:
+        raise ValueError(f"upload too large (>{APP_UPDATE_MAX_BYTES} bytes)")
+    release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    release = _fetch_latest_release(release_url)
+    asset = _find_release_asset_by_name(release.get("assets") or [], safe_name)
+    if not asset:
+        raise ValueError("uploaded file name does not match any asset in the latest GitHub release")
+    digest = _app_update_normalize_digest(asset.get("digest") or "")
+    if not digest:
+        raise ValueError("GitHub release asset digest is missing")
+    expected_size = int(asset.get("size") or 0)
+    if expected_size > 0 and size != expected_size:
+        raise ValueError(f"uploaded file size does not match GitHub asset ({format_bytes(expected_size)} expected)")
+    token = secrets.token_urlsafe(24)
+    payload = {
+        "token": token,
+        "file_name": safe_name,
+        "total_bytes": size,
+        "expires_at": time.time() + float(APP_UPDATE_UPLOAD_SESSION_TTL_SEC),
+        "latest_tag": str(release.get("tag_name") or ""),
+        "latest_commit": str(release.get("target_commitish") or ""),
+        "asset": dict(asset),
+        "release": {
+            "tag_name": str(release.get("tag_name") or ""),
+            "target_commitish": str(release.get("target_commitish") or ""),
+            "html_url": str(release.get("html_url") or ""),
+            "published_at": str(release.get("published_at") or ""),
+        },
+    }
+    _app_update_upload_sessions_purge()
+    with app_update_upload_lock:
+        app_update_upload_sessions[token] = payload
+    return {
+        "token": token,
+        "asset_name": str(asset.get("name") or safe_name),
+        "expected_size": expected_size,
+        "expected_sha256": digest,
+        "latest_tag": str(release.get("tag_name") or ""),
+        "latest_commit": str(release.get("target_commitish") or ""),
+        "release_url": str(release.get("html_url") or ""),
+        "expires_at": float(payload.get("expires_at") or 0.0),
+    }
+
+def _app_update_upload_session_get(token: str, file_name: str, total_bytes: int) -> dict:
+    raw_token = str(token or "").strip()
+    safe_name = _app_update_safe_filename(file_name)
+    size = int(total_bytes or 0)
+    if not raw_token:
+        return {}
+    _app_update_upload_sessions_purge()
+    with app_update_upload_lock:
+        payload = dict(app_update_upload_sessions.get(raw_token) or {})
+    if not payload:
+        raise ValueError("upload session expired, please reselect the package")
+    if safe_name != str(payload.get("file_name") or ""):
+        raise ValueError("upload file changed, please reselect the package")
+    if size != int(payload.get("total_bytes") or 0):
+        raise ValueError("upload size changed, please reselect the package")
+    return payload
+
+def _app_update_upload_session_remove(token: str) -> None:
+    raw_token = str(token or "").strip()
+    if not raw_token:
+        return
+    with app_update_upload_lock:
+        app_update_upload_sessions.pop(raw_token, None)
+
+def _discard_upload_stream(body_stream, total_bytes: int) -> None:
+    remain = max(0, int(total_bytes or 0))
+    while remain > 0:
+        chunk = body_stream.read(min(1024 * 512, remain))
+        if not chunk:
+            break
+        remain -= len(chunk)
+
 def _app_update_requires_sudo() -> bool:
     try:
         return hasattr(os, "geteuid") and int(os.geteuid()) != 0
@@ -2027,7 +2120,16 @@ def _start_app_update_download(manual: bool = False) -> dict:
         "state": _app_update_status_payload(),
     }
 
-def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes: int) -> dict:
+def _prepare_uploaded_app_update_package(file_name: str, total_bytes: int) -> dict:
+    info = _app_update_upload_session_create(file_name, total_bytes)
+    return {
+        "ok": True,
+        "prepare": info,
+        "message": f"ready to upload {info.get('asset_name') or _app_update_safe_filename(file_name)}",
+        "state": _app_update_status_payload(),
+    }
+
+def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes: int, upload_token: str = "") -> dict:
     safe_name = _app_update_safe_filename(file_name)
     if int(total_bytes or 0) <= 0:
         raise ValueError("empty upload")
@@ -2081,6 +2183,7 @@ def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes
             asset_name=str(meta.get("asset_name") or ""),
             last_error="",
         )
+        _app_update_upload_session_remove(upload_token)
         return meta
     except Exception:
         try:

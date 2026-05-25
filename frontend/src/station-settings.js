@@ -24,6 +24,8 @@ var visualCheckboxSaveTimer = null;
 var appUpdatePollTimer = null;
 var appUpdatePollFailures = 0;
 var appUpdateState = {};
+var appUpdateUploadFile = null;
+var appUpdateUploadMeta = null;
 var SETTINGS_DRAFT_SECTIONS = [
   {key:'capture', label:'采集'},
   {key:'map', label:'地图与基站'},
@@ -1262,6 +1264,7 @@ function renderAppUpdateState(state){
   if(state.completion_notice && state.completion_notice.text){
     showNotice(String(state.completion_notice.text), state.completion_notice.kind === 'warn' ? 'warn' : 'ok', 5200);
   }
+  renderAppUpdateUploadModal();
   if(!(state.running || state.download_running || state.installing)){
     appUpdatePollFailures = 0;
   }
@@ -1321,26 +1324,74 @@ async function downloadAppUpdateNow(){
     if(btn) btn.disabled = false;
   }
 }
-function triggerAppUpdateUpload(){
+function resetAppUpdateUploadModal(keepFile){
+  if(!keepFile) appUpdateUploadFile = null;
+  appUpdateUploadMeta = null;
   var input = qs('app-update-upload-file');
-  if(input) input.click();
+  if(input && !keepFile) input.value = '';
+}
+function renderAppUpdateUploadModal(){
+  var nameEl = qs('app-update-upload-file-name');
+  var stateEl = qs('app-update-upload-prepare-state');
+  var confirmBtn = qs('btn-app-update-upload-confirm');
+  if(nameEl){
+    if(appUpdateUploadFile) nameEl.textContent = '已选择: ' + String(appUpdateUploadFile.name || 'package.bin') + ' | ' + formatBytes(appUpdateUploadFile.size || 0);
+    else nameEl.textContent = '尚未选择安装包。';
+  }
+  if(stateEl){
+    if(appUpdateUploadMeta && appUpdateUploadMeta.token){
+      var lines = ['匹配资产: ' + String(appUpdateUploadMeta.asset_name || '-'), 'Release Tag: ' + String(appUpdateUploadMeta.latest_tag || '-')];
+      if(Number(appUpdateUploadMeta.expected_size || 0) > 0) lines.push('期望大小: ' + formatBytes(appUpdateUploadMeta.expected_size || 0));
+      if(appUpdateUploadMeta.expected_sha256) lines.push('SHA256: ' + String(appUpdateUploadMeta.expected_sha256).slice(0, 16) + '...');
+      stateEl.textContent = lines.join('\n');
+    }else if(appUpdateUploadFile) stateEl.textContent = '已选择文件，正在等待预检查。';
+    else stateEl.textContent = '选择文件后会在正式上传之前先做一次预检查。';
+  }
+  if(confirmBtn) confirmBtn.disabled = !(appUpdateUploadFile && appUpdateUploadMeta && appUpdateUploadMeta.token) || !!appUpdateState.download_running || !!appUpdateState.installing;
+}
+function closeAppUpdateUploadModal(){
+  var modal = qs('app-update-upload-modal');
+  if(modal) modal.classList.remove('show');
+  resetAppUpdateUploadModal(false);
+  renderAppUpdateUploadModal();
+}
+function triggerAppUpdateUpload(){
+  if(qs('app-update-upload-modal')) qs('app-update-upload-modal').classList.add('show');
+  resetAppUpdateUploadModal(false);
+  renderAppUpdateUploadModal();
+}
+async function prepareAppUpdateUploadPackage(file){
+  if(!file) return;
+  appUpdateUploadFile = file;
+  appUpdateUploadMeta = null;
+  renderAppUpdateUploadModal();
+  var maxUploadBytes = Number((appUpdateState && appUpdateState.max_upload_bytes) || 0);
+  if(maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) throw new Error('安装包过大，当前上限为 ' + formatBytes(maxUploadBytes) + '。');
+  if(qs('app-update-upload-prepare-state')) qs('app-update-upload-prepare-state').textContent = '正在预检查文件名、大小与 Release 资产信息...';
+  var data = await postJson('/api/settings/app-update/upload/prepare', {file_name:String(file.name || 'package.bin'), file_size:Number(file.size || 0)});
+  appUpdateUploadMeta = Object.assign({}, (data && data.prepare) || {});
+  renderAppUpdateState((data && data.state) || appUpdateState);
+  renderAppUpdateUploadModal();
 }
 async function uploadAppUpdatePackage(file){
   if(!file) return;
-  var btn = qs('btn-app-update-upload');
+  var btn = qs('btn-app-update-upload-confirm');
   var input = qs('app-update-upload-file');
   try{
     if(btn) btn.disabled = true;
     var maxUploadBytes = Number((appUpdateState && appUpdateState.max_upload_bytes) || 0);
+    if(!(appUpdateUploadMeta && appUpdateUploadMeta.token)) throw new Error('请先完成预检查。');
     if(maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes){
       throw new Error('安装包过大，当前上限为 ' + formatBytes(maxUploadBytes) + '。');
     }
     setStatus('status-visual', '正在上传并校验安装包 SHA256...', false);
+    if(qs('app-update-upload-prepare-state')) qs('app-update-upload-prepare-state').textContent = '正在上传文件并校验 SHA256，请不要关闭页面...';
     const rsp = await requestJson('/api/settings/app-update/upload', {
       method:'POST',
       headers:pageHeaders({
         'Content-Type':'application/octet-stream',
-        'X-LightRID-Upload-Name': encodeURIComponent(String(file.name || 'package.bin'))
+        'X-LightRID-Upload-Name': encodeURIComponent(String(file.name || 'package.bin')),
+        'X-LightRID-Upload-Token': String((appUpdateUploadMeta && appUpdateUploadMeta.token) || '')
       }),
       body:file
     });
@@ -1355,6 +1406,7 @@ async function uploadAppUpdatePackage(file){
   }catch(e){
     if(e && e.state) renderAppUpdateState(e.state);
     setStatus('status-visual', '上传失败: ' + (e.message || e), true);
+    if(qs('app-update-upload-prepare-state')) qs('app-update-upload-prepare-state').textContent = '上传失败: ' + (e.message || e);
     showNotice(e.message || e, 'warn', 4800);
   }finally{
     if(input) input.value = '';
@@ -2665,15 +2717,28 @@ function bindModelEditorActions(){
   });
   on('btn-model-map-close', 'click', function(){ qs('model-map-modal').classList.remove('show'); });
   on('model-map-modal', 'click', function(ev){ if(ev.target === qs('model-map-modal')) qs('model-map-modal').classList.remove('show'); });
+  on('app-update-upload-modal', 'click', function(ev){ if(ev.target === qs('app-update-upload-modal')) closeAppUpdateUploadModal(); });
   on('btn-model-update-now', 'click', updateModelsNow);
   on('btn-app-update-check', 'click', checkAppVersionNow);
   on('btn-app-update-download', 'click', downloadAppUpdateNow);
   on('btn-app-update-upload', 'click', triggerAppUpdateUpload);
   on('btn-app-update-start', 'click', startAppUpdateNow);
+  on('btn-app-update-upload-pick', 'click', function(){
+    var input = qs('app-update-upload-file');
+    if(input) input.click();
+  });
+  on('btn-app-update-upload-confirm', 'click', function(){
+    uploadAppUpdatePackage(appUpdateUploadFile).catch(function(e){
+      setStatus('status-visual', e.message || e, true);
+      showNotice(e.message || e, 'warn', 4800);
+    });
+  });
+  on('btn-app-update-upload-close', 'click', closeAppUpdateUploadModal);
   on('app-update-upload-file', 'change', function(ev){
     var file = ev && ev.target && ev.target.files && ev.target.files[0];
-    uploadAppUpdatePackage(file).catch(function(e){
+    prepareAppUpdateUploadPackage(file).catch(function(e){
       setStatus('status-visual', e.message || e, true);
+      if(qs('app-update-upload-prepare-state')) qs('app-update-upload-prepare-state').textContent = e.message || String(e);
       showNotice(e.message || e, 'warn', 4800);
     });
   });

@@ -860,4 +860,19 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
     <div class="row-actions" style="margin-top:14px"><button class="btn ghost" id="btn-model-map-close" type="button">关闭</button></div>
   </div>
 </div>
+<div class="modal-mask" id="app-update-upload-modal">
+  <div class="modal-card">
+    <h3>上传本地安装包</h3>
+    <div class="micro">先选择与当前架构匹配的 Release 安装包。系统会先预检查文件名、大小和 GitHub Asset 摘要，再开始上传。</div>
+    <div class="row-actions" style="margin-top:12px">
+      <button class="btn ghost" id="btn-app-update-upload-pick" type="button">选择文件</button>
+      <button class="btn" id="btn-app-update-upload-confirm" type="button">开始上传</button>
+    </div>
+    <div class="micro" id="app-update-upload-file-name" style="margin-top:12px">尚未选择安装包。</div>
+    <div class="micro" id="app-update-upload-prepare-state" style="margin-top:8px">选择文件后会在正式上传之前先做一次预检查。</div>
+    <div class="row-actions" style="margin-top:16px">
+      <button class="btn ghost" id="btn-app-update-upload-close" type="button">关闭</button>
+    </div>
+  </div>
+</div>
 </body></html>

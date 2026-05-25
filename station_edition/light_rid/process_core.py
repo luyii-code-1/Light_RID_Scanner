@@ -1796,28 +1796,24 @@ def _app_update_upload_sessions_purge(now_ts: float | None = None) -> None:
 def _app_update_upload_session_create(file_name: str, total_bytes: int) -> dict:
     safe_name = _app_update_safe_filename(file_name)
     size = int(total_bytes or 0)
-    if not safe_name:
-        raise ValueError("upload file name missing")
     if size <= 0:
         raise ValueError("empty upload")
     if size > APP_UPDATE_MAX_BYTES:
         raise ValueError(f"upload too large (>{APP_UPDATE_MAX_BYTES} bytes)")
     release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
     release = _fetch_latest_release(release_url)
-    asset = _find_release_asset_by_name(release.get("assets") or [], safe_name)
+    support = _app_update_runtime_support()
+    asset = _pick_release_asset(release.get("assets") or [], str(support.get("target_arch") or ""))
     if not asset:
-        raise ValueError("uploaded file name does not match any asset in the latest GitHub release")
+        raise ValueError("latest release has no matching asset for this architecture")
     digest = _app_update_normalize_digest(asset.get("digest") or "")
     if not digest:
         raise ValueError("GitHub release asset digest is missing")
-    expected_size = int(asset.get("size") or 0)
-    if expected_size > 0 and size != expected_size:
-        raise ValueError(f"uploaded file size does not match GitHub asset ({format_bytes(expected_size)} expected)")
+    if not safe_name:
+        safe_name = _app_update_safe_filename(str(asset.get("name") or "")) or "package.bin"
     token = secrets.token_urlsafe(24)
     payload = {
         "token": token,
-        "file_name": safe_name,
-        "total_bytes": size,
         "expires_at": time.time() + float(APP_UPDATE_UPLOAD_SESSION_TTL_SEC),
         "latest_tag": str(release.get("tag_name") or ""),
         "latest_commit": str(release.get("target_commitish") or ""),
@@ -1835,7 +1831,6 @@ def _app_update_upload_session_create(file_name: str, total_bytes: int) -> dict:
     return {
         "token": token,
         "asset_name": str(asset.get("name") or safe_name),
-        "expected_size": expected_size,
         "expected_sha256": digest,
         "latest_tag": str(release.get("tag_name") or ""),
         "latest_commit": str(release.get("target_commitish") or ""),
@@ -1843,10 +1838,8 @@ def _app_update_upload_session_create(file_name: str, total_bytes: int) -> dict:
         "expires_at": float(payload.get("expires_at") or 0.0),
     }
 
-def _app_update_upload_session_get(token: str, file_name: str, total_bytes: int) -> dict:
+def _app_update_upload_session_get(token: str) -> dict:
     raw_token = str(token or "").strip()
-    safe_name = _app_update_safe_filename(file_name)
-    size = int(total_bytes or 0)
     if not raw_token:
         return {}
     _app_update_upload_sessions_purge()
@@ -1854,10 +1847,6 @@ def _app_update_upload_session_get(token: str, file_name: str, total_bytes: int)
         payload = dict(app_update_upload_sessions.get(raw_token) or {})
     if not payload:
         raise ValueError("upload session expired, please reselect the package")
-    if safe_name != str(payload.get("file_name") or ""):
-        raise ValueError("upload file changed, please reselect the package")
-    if size != int(payload.get("total_bytes") or 0):
-        raise ValueError("upload size changed, please reselect the package")
     return payload
 
 def _app_update_upload_session_remove(token: str) -> None:
@@ -2135,16 +2124,23 @@ def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes
         raise ValueError("empty upload")
     if int(total_bytes) > APP_UPDATE_MAX_BYTES:
         raise ValueError(f"upload too large (>{APP_UPDATE_MAX_BYTES} bytes)")
-    release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
-    release = _fetch_latest_release(release_url)
-    asset = _find_release_asset_by_name(release.get("assets") or [], safe_name)
-    if not asset:
-        raise ValueError("uploaded file name does not match any asset in the latest GitHub release")
+    session = _app_update_upload_session_get(upload_token) if upload_token else {}
+    if session:
+        release = dict(session.get("release") or {})
+        asset = dict(session.get("asset") or {})
+    else:
+        release_url = str(APP_UPDATE_CFG.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+        release = _fetch_latest_release(release_url)
+        support = _app_update_runtime_support()
+        asset = _pick_release_asset(release.get("assets") or [], str(support.get("target_arch") or ""))
+        if not asset:
+            raise ValueError("latest release has no matching asset for this architecture")
     digest = _app_update_normalize_digest(asset.get("digest") or "")
     if not digest:
         raise ValueError("GitHub release asset digest is missing")
+    asset_file_name = _app_update_safe_filename(str(asset.get("name") or "")) or safe_name or "package.bin"
     stage_dir = _app_update_prepare_stage_dir(str(release.get("tag_name") or "upload"))
-    file_path = os.path.join(stage_dir, safe_name)
+    file_path = os.path.join(stage_dir, asset_file_name)
     h = hashlib.sha256()
     written = 0
     try:
@@ -2387,30 +2383,6 @@ def _pick_release_asset(assets: list[dict], target_arch: str) -> dict:
         for item in normalized:
             if item["name"].endswith(candidate):
                 return item
-    return {}
-
-def _find_release_asset_by_name(assets: list[dict], file_name: str) -> dict:
-    safe_name = str(file_name or "").strip()
-    if not safe_name:
-        return {}
-    normalized: list[dict] = []
-    for item in assets:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        url = str(item.get("browser_download_url") or item.get("url") or "").strip()
-        if not name:
-            continue
-        normalized.append({
-            "name": name,
-            "url": url,
-            "size": int(item.get("size") or 0),
-            "content_type": str(item.get("content_type") or "").strip(),
-            "digest": _app_update_normalize_digest(item.get("digest") or ""),
-        })
-    for item in normalized:
-        if item["name"] == safe_name:
-            return item
     return {}
 
 def _app_update_download_asset(asset: dict, latest_tag: str) -> tuple[str, str]:

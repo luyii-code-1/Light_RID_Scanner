@@ -1341,11 +1341,10 @@ function renderAppUpdateUploadModal(){
   if(stateEl){
     if(appUpdateUploadMeta && appUpdateUploadMeta.token){
       var lines = ['匹配资产: ' + String(appUpdateUploadMeta.asset_name || '-'), 'Release Tag: ' + String(appUpdateUploadMeta.latest_tag || '-')];
-      if(Number(appUpdateUploadMeta.expected_size || 0) > 0) lines.push('期望大小: ' + formatBytes(appUpdateUploadMeta.expected_size || 0));
       if(appUpdateUploadMeta.expected_sha256) lines.push('SHA256: ' + String(appUpdateUploadMeta.expected_sha256).slice(0, 16) + '...');
       stateEl.textContent = lines.join('\n');
-    }else if(appUpdateUploadFile) stateEl.textContent = '已选择文件，正在等待预检查。';
-    else stateEl.textContent = '选择文件后会在正式上传之前先做一次预检查。';
+    }else if(appUpdateUploadFile) stateEl.textContent = '已选择文件，正在等待架构匹配和 SHA256 预检查。';
+    else stateEl.textContent = '选择文件后会先按当前架构匹配 Release 资产，并显示待校验的 SHA256。';
   }
   if(confirmBtn) confirmBtn.disabled = !(appUpdateUploadFile && appUpdateUploadMeta && appUpdateUploadMeta.token) || !!appUpdateState.download_running || !!appUpdateState.installing;
 }
@@ -1367,7 +1366,7 @@ async function prepareAppUpdateUploadPackage(file){
   renderAppUpdateUploadModal();
   var maxUploadBytes = Number((appUpdateState && appUpdateState.max_upload_bytes) || 0);
   if(maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) throw new Error('安装包过大，当前上限为 ' + formatBytes(maxUploadBytes) + '。');
-  if(qs('app-update-upload-prepare-state')) qs('app-update-upload-prepare-state').textContent = '正在预检查文件名、大小与 Release 资产信息...';
+  if(qs('app-update-upload-prepare-state')) qs('app-update-upload-prepare-state').textContent = '正在按当前架构匹配 Release 资产并读取 SHA256...';
   var data = await postJson('/api/settings/app-update/upload/prepare', {file_name:String(file.name || 'package.bin'), file_size:Number(file.size || 0)});
   appUpdateUploadMeta = Object.assign({}, (data && data.prepare) || {});
   renderAppUpdateState((data && data.state) || appUpdateState);

@@ -51,6 +51,7 @@ def _packager_import_anchor() -> None:
     import shutil
     import socket
     import socketserver
+    import sqlite3
     import struct
     import subprocess
     import sys

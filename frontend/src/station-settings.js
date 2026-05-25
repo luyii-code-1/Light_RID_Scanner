@@ -1331,6 +1331,10 @@ async function uploadAppUpdatePackage(file){
   var input = qs('app-update-upload-file');
   try{
     if(btn) btn.disabled = true;
+    var maxUploadBytes = Number((appUpdateState && appUpdateState.max_upload_bytes) || 0);
+    if(maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes){
+      throw new Error('安装包过大，当前上限为 ' + formatBytes(maxUploadBytes) + '。');
+    }
     setStatus('status-visual', '正在上传并校验安装包 SHA256...', false);
     const rsp = await requestJson('/api/settings/app-update/upload', {
       method:'POST',

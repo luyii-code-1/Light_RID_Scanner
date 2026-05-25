@@ -1917,14 +1917,14 @@ def _app_update_download_worker(release_url: str) -> None:
             asset_name=str(asset.get("name") or ""),
             last_error="",
         )
-        req = urllib.request.Request(
-            str(asset.get("url") or ""),
-            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
-        )
         h = hashlib.sha256()
         downloaded = 0
         last_update = 0.0
-        with urllib.request.urlopen(req, timeout=30) as resp, open(download_path, "wb") as f:
+        with _http_open_with_fallback(
+            str(asset.get("url") or ""),
+            headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
+            timeout=30,
+        ) as resp, open(download_path, "wb") as f:
             while True:
                 chunk = resp.read(1024 * 512)
                 if not chunk:
@@ -2234,15 +2234,16 @@ def _app_update_runtime_support() -> dict:
     return {"supported": True, "reason": "", "target_arch": target_arch, "target_path": target_path}
 
 def _fetch_latest_release(release_url: str) -> dict:
-    req = urllib.request.Request(
+    raw, _ = _http_read_with_fallback(
         release_url,
         headers={
             "User-Agent": APP_HTTP_USER_AGENT + " (+release update)",
             "Accept": "application/vnd.github+json",
         },
+        timeout=12,
+        max_bytes=1024 * 1024,
     )
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        data = json.loads(resp.read(1024 * 1024).decode("utf-8", errors="replace"))
+    data = json.loads(raw.decode("utf-8", errors="replace"))
     if not isinstance(data, dict):
         raise RuntimeError("GitHub Release 响应无效")
     assets = data.get("assets")
@@ -2319,11 +2320,11 @@ def _app_update_download_asset(asset: dict, latest_tag: str) -> tuple[str, str]:
     safe_tag = re.sub(r"[^0-9A-Za-z._-]+", "_", str(latest_tag or "latest"))[:40] or "latest"
     stage_dir = tempfile.mkdtemp(prefix=f"{safe_tag}_{stamp}_", dir=stage_root)
     download_path = os.path.join(stage_dir, name)
-    req = urllib.request.Request(
+    with _http_open_with_fallback(
         url,
         headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp, open(download_path, "wb") as f:
+        timeout=30,
+    ) as resp, open(download_path, "wb") as f:
         shutil.copyfileobj(resp, f, length=1024 * 1024)
     return stage_dir, download_path
 
@@ -2418,6 +2419,7 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
     state["current_short"] = _short_commit(current_commit)
     state["latest_short"] = _short_commit(state.get("latest_commit") or "")
     state["release_url"] = str(cfg.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    state["max_upload_bytes"] = int(APP_UPDATE_MAX_BYTES)
     state["install_supported"] = bool(support.get("supported"))
     state["support_reason"] = str(support.get("reason") or "")
     state["target_arch"] = str(support.get("target_arch") or state.get("target_arch") or "")

@@ -622,13 +622,12 @@ def ensure_model_map_file(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
     errors: list[str] = []
     try:
-        req = urllib.request.Request(
+        data, _ = _http_read_with_fallback(
             RID_MODELS_UPDATE_URL_DEFAULT,
             headers={"User-Agent": APP_HTTP_USER_AGENT + " (+model-map bootstrap)"},
-            method="GET",
+            timeout=12,
+            max_bytes=2 * 1024 * 1024,
         )
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            data = resp.read(2 * 1024 * 1024)
         obj = json.loads(data.decode("utf-8", errors="replace"))
         next_map = _validate_model_map_payload(obj)
         _write_json_file(path, next_map)
@@ -809,13 +808,12 @@ def update_model_map_from_url(manual: bool = False, url_override: str | None = N
     if busy:
         return {"ok": False, "error": "识别库更新正在运行", "state": _model_update_status_payload()}
     try:
-        req = urllib.request.Request(
+        data, _ = _http_read_with_fallback(
             url,
             headers={"User-Agent": APP_HTTP_USER_AGENT + " (+model-map update)"},
-            method="GET",
+            timeout=20,
+            max_bytes=2 * 1024 * 1024,
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = resp.read(2 * 1024 * 1024)
         if not data:
             raise ValueError("远端返回为空")
         obj = json.loads(data.decode("utf-8", errors="replace"))

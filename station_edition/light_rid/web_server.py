@@ -6448,7 +6448,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
   }
   function modelPrEditUrl(){
-    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid-models.json';
+    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid_models.json';
   }
   function patchLocalModel(sn, model){
     sn = String(sn || '');
@@ -8529,7 +8529,11 @@ def http_server_thread() -> None:
                 body_len = int(self.headers.get("Content-Length", "0") or "0")
             except Exception:
                 body_len = 0
-            if body_len > HTTP_JSON_MAX_BYTES:
+            if path == "/api/settings/app-update/upload":
+                if body_len > APP_UPDATE_MAX_BYTES:
+                    self._send_json({"ok": False, "error": f"upload too large (>{APP_UPDATE_MAX_BYTES} bytes)"}, 413)
+                    return
+            elif body_len > HTTP_JSON_MAX_BYTES:
                 self._send_json({"ok": False, "error": f"request too large (>{HTTP_JSON_MAX_BYTES} bytes)"}, 413)
                 return
             if path == "/api/notifications":

@@ -30,6 +30,7 @@ import time
 import traceback
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -147,7 +148,8 @@ EULA_MARKDOWN_FILE = "EULA.md"
 EULA_URL = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/EULA.md"
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
-RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid-models.json"
+GITHUB_PROXY_PREFIX = "https://gh-proxy.org/"
+RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
 APP_UPDATE_COMMIT_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
 APP_UPDATE_RELEASE_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/releases/latest"
 MODEL_UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
@@ -174,6 +176,73 @@ TRACK_MIN_INTERVAL_SEC = 0.8
 TRACK_ANOMALY_MAX_METERS = 50_000.0
 NO_IFACE_DEGRADE_HINT = "未检测到已绑定的无线网卡，已进入降级运行。请打开设置或 OOBE 完成网卡配置。"
 CONFIG_ROLLBACK_SUFFIX = ".rollback"
+
+
+def _github_proxy_candidate_urls(url: str) -> list[str]:
+    raw = str(url or "").strip()
+    if not raw:
+        return []
+    urls = [raw]
+    if raw.startswith(GITHUB_PROXY_PREFIX):
+        return urls
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        host = str(parsed.netloc or "").strip().lower()
+    except Exception:
+        host = ""
+    if host in ("github.com", "raw.githubusercontent.com", "api.github.com"):
+        urls.append(GITHUB_PROXY_PREFIX + raw)
+    return urls
+
+
+def _http_open_with_fallback(
+    url: str,
+    *,
+    headers: dict | None = None,
+    timeout: float = 15.0,
+    method: str = "GET",
+    data=None,
+):
+    candidates = _github_proxy_candidate_urls(url)
+    if not candidates:
+        raise ValueError("url required")
+    last_error = None
+    for idx, candidate in enumerate(candidates):
+        req = urllib.request.Request(candidate, data=data, headers=headers or {}, method=method)
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except Exception as e:
+            last_error = e
+            if idx + 1 < len(candidates):
+                try:
+                    _log(f"[WARN] request failed, retrying via mirror: {candidate} -> {e}")
+                except Exception:
+                    pass
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("request failed")
+
+
+def _http_read_with_fallback(
+    url: str,
+    *,
+    headers: dict | None = None,
+    timeout: float = 15.0,
+    method: str = "GET",
+    data=None,
+    max_bytes: int | None = None,
+) -> tuple[bytes, str]:
+    with _http_open_with_fallback(url, headers=headers, timeout=timeout, method=method, data=data) as resp:
+        if max_bytes is None:
+            payload = resp.read()
+        else:
+            payload = resp.read(max(0, int(max_bytes)))
+        final_url = ""
+        try:
+            final_url = str(resp.geturl() or "")
+        except Exception:
+            final_url = ""
+    return payload, final_url or str(url or "")
 
 # -----------------------------------------------------------------------------
 # Global runtime state (initialized in `main()`)

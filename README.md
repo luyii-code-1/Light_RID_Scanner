@@ -15,7 +15,7 @@ It also includes a portable edition for mobile deployments and a node-center vie
 - Root `rid-models.json`
   Public GitHub Raw model map. Binaries also embed this file and restore it if runtime download fails.
 
-The station edition is meant to be usable from its own directory. Runtime files such as `config.json`, `history-cache.json`, and `rid-models.json` are resolved relative to the current working directory unless explicit paths are passed.
+The station edition is meant to be usable from its own directory. Runtime files such as `config.json`, `rid_storage.db`, and `rid-models.json` are resolved relative to the current working directory unless explicit paths are passed. Older `history-cache.json` / `rid_history_cache.json` files are treated as legacy migration sources.
 
 - [Architecture](#architecture)
   - [Editions](#editions)
@@ -147,7 +147,8 @@ The station runtime uses a chunk-loading architecture: `app.py` loads and execut
 ### Data Persistence
 - Aircraft history with first-seen / last-seen timestamps
 - Per-aircraft GPS track storage
-- Server-side cache (`rid_history_cache.json`) surviving service restarts
+- SQLite-backed history storage (`rid_storage.db`) surviving service restarts
+- Automatic one-time migration from legacy `history-cache.json` / `rid_history_cache.json` on first startup after upgrade
 - Configurable aircraft offline detection timeout (default 15 seconds)
 
 ### Settings Page (`/settings`)
@@ -313,7 +314,9 @@ Runtime files are resolved relative to the current working directory unless expl
 | File | Purpose | Auto-created? |
 |---|---|---|
 | `config.json` | Main runtime configuration | Yes (from defaults) |
-| `rid_history_cache.json` | Aircraft history and track cache | Yes (empty) |
+| `rid_storage.db` | SQLite history store and retained raw packet data | Yes |
+| `history-cache.json` | Legacy JSON history source, auto-imported once when present | Legacy migration source |
+| `rid_history_cache.json` | Older legacy JSON history source, auto-imported once when present | Legacy migration source |
 | `rid_models.json` | RID model prefix-to-name mapping | Yes (from GitHub or embedded resource) |
 | `oui.txt` | MAC OUI vendor database | Optional (auto-downloaded) |
 | `light_rid_scanner/host_metrics.jsonl` | Host load samples | Yes (system temp dir) |
@@ -859,7 +862,9 @@ CI builds viewer binaries through `.github/workflows/build-viewer.yml` for Linux
 | `rid_build_info.json` | Local build marker (commit + build number) | Yes |
 | `station_edition/config.example.json` | Safe example configuration | Yes |
 | `config.json` | Real runtime configuration | **Never** |
-| `rid_history_cache.json` | Runtime aircraft history and tracks | **Never** |
+| `rid_storage.db` | Runtime SQLite history store | **Never** |
+| `history-cache.json` | Legacy JSON history cache kept only for one-time upgrade import | **Never** |
+| `rid_history_cache.json` | Older legacy JSON history cache kept only for one-time upgrade import | **Never** |
 | `config.json.rollback` | Automatic rollback copy for recovery | **Never** |
 | `oui.txt` | MAC OUI vendor database (auto-downloaded) | **Never** |
 | `light_rid_scanner/host_metrics.jsonl` | Host metrics samples (system temp dir) | **Never** |

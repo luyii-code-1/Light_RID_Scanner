@@ -274,6 +274,8 @@ history_io_lock = Lock()
 history_db_lock = Lock()
 history_db_conn = None
 history_db_path: str | None = None
+history_storage_notice_lock = Lock()
+history_storage_pending_notice: dict | None = None
 
 APP_CONFIG: dict = {}
 APP_CONFIG_PATH: str | None = None
@@ -1543,14 +1545,29 @@ def _history_storage_clear_raw_packets(path: str | None = None) -> None:
     with history_db_lock:
         conn.execute("DELETE FROM raw_packets")
 
-def _history_storage_notice(message: str) -> None:
+def _history_storage_notice(message: str, kind: str = "warn") -> None:
     text = str(message or "").strip()
     if not text:
         return
+    notice = {
+        "text": text,
+        "kind": "warn" if str(kind or "").strip().lower() == "warn" else "ok",
+    }
+    global history_storage_pending_notice
+    with history_storage_notice_lock:
+        history_storage_pending_notice = dict(notice)
     try:
-        _notification_add(text, "warn", "server")
+        _notification_add(text, notice["kind"], "server")
     except Exception:
         pass
+
+def _history_storage_notice_payload(consume: bool = False) -> dict:
+    global history_storage_pending_notice
+    with history_storage_notice_lock:
+        notice = dict(history_storage_pending_notice or {})
+        if consume:
+            history_storage_pending_notice = None
+    return notice
 
 def _history_storage_normalize_import_item(raw: dict) -> dict:
     item = dict(raw if isinstance(raw, dict) else {})
@@ -2941,6 +2958,7 @@ def _settings_view_payload() -> dict:
         "eula": _eula_status_payload(),
         "raw_access": _raw_config_access_payload(),
         "scan_data_file": scan_data_file,
+        "history_storage_notice": _history_storage_notice_payload(consume=True),
         "hardware_link": "/hardware-assistant",
     }
 

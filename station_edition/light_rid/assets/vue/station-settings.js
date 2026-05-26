@@ -2610,7 +2610,8 @@
       setStatus("status-visual", "定位失败: " + (err && err.message ? err.message : err), true);
     }, { enableHighAccuracy: true, timeout: 12e3, maximumAge: 0 });
   }
-  async function loadVisual() {
+  async function loadVisual(opts) {
+    opts = opts && typeof opts === "object" ? opts : {};
     const data = await getJson("/api/settings/view");
     const s = data.visual || {};
     const b = s.basic || {}, w = s.web || {}, nt = s.notify || {}, api = s.api || {}, auth = s.auth || {}, mu = s.model_update || {}, au = s.app_update || {}, mc = s.metrics || {};
@@ -2708,6 +2709,10 @@
     if (qs("settings-config-path")) qs("settings-config-path").textContent = "设置文件: " + String(data.path || "-");
     if (qs("settings-scan-data-path")) qs("settings-scan-data-path").textContent = "扫描数据库: " + String(b.history_file || "-");
     renderScanDataFileInfo(data.scan_data_file || null);
+    if (data.history_storage_notice && data.history_storage_notice.text) {
+      setStatus("status-data-transfer", String(data.history_storage_notice.text), data.history_storage_notice.kind === "warn");
+      showNotice(String(data.history_storage_notice.text), data.history_storage_notice.kind === "warn" ? "warn" : "ok", 5200);
+    }
     var rawAccess = data.raw_access || {};
     settingsState.rawUnlocked = !rawAccess.required || !!rawAccess.unlocked;
     settingsState.rawRoot = String(rawAccess.root || settingsState.rawRoot || "");
@@ -2720,7 +2725,7 @@
     var apiTokenCount = Array.isArray(api.tokens) ? api.tokens.length : 0;
     qs("secret-state").textContent = "通知通道 " + String((nt.wecom_webhooks || []).length || 0) + " | API Token " + String(apiTokenCount) + " 个 | 外部 API " + (api.enabled ? "开启" : "关闭") + " | 登录 " + (auth.enabled ? auth.configured ? "开启" : "未完成" : "关闭");
     resetVisualDraftState();
-    if (data.path) setStatus("status-visual", "配置文件: " + data.path, false);
+    if (data.path && !opts.preserveVisualStatus) setStatus("status-visual", "配置文件: " + data.path, false);
   }
   async function saveVisual(opts) {
     opts = opts && typeof opts === "object" ? opts : {};
@@ -2735,7 +2740,14 @@
       settingsState.visualInitial = cloneJson(payload);
       updateVisualDraftState();
     } else {
-      await loadVisual();
+      settingsState.visualInitial = cloneJson(payload);
+      updateVisualDraftState();
+      window.setTimeout(function() {
+        loadVisual({ preserveVisualStatus: true }).catch(function(e) {
+          setStatus("status-visual", "保存成功，但刷新设置失败: " + (e.message || e), true);
+          showNotice(e.message || e, "warn", 3800);
+        });
+      }, 0);
     }
   }
   async function testVisual() {

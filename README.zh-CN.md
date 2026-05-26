@@ -16,7 +16,7 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 - 根目录 `rid-models.json`
   面向 GitHub Raw 的公开机型库；二进制内也会嵌入同一份资源，运行目录缺失时可自动恢复。
 
-基站版优先从自身目录运行。未显式传入路径时，`config.json`、`history-cache.json` 和 `rid-models.json` 等运行文件都按当前工作目录解析。
+基站版优先从自身目录运行。未显式传入路径时，`config.json`、`rid_storage.db` 和 `rid-models.json` 等运行文件都按当前工作目录解析；旧的 `history-cache.json` / `rid_history_cache.json` 会被视为一次性迁移来源。
 
 ## 功能概览
 
@@ -39,7 +39,8 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 ### 数据持久化
 - 飞机历史记录，包含首次/最后发现时间戳
 - 每架飞机的 GPS 轨迹存储
-- 服务端缓存（`rid_history_cache.json`），服务重启后继续保留
+- 基于 SQLite 的历史存储（`rid_storage.db`），服务重启后继续保留
+- 升级后首次启动时，会自动把旧的 `history-cache.json` / `rid_history_cache.json` 迁移进数据库
 - 可配置的飞机离线判定时间（默认 15 秒）
 
 ### 设置页 (`/settings`)
@@ -217,7 +218,9 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://0.0.0.0:4600/api/v1/drones
 | 文件 | 用途 | 自动创建？ |
 |---|---|---|
 | `config.json` | 主运行时配置 | 是（基于默认值） |
-| `rid_history_cache.json` | 飞机历史与轨迹缓存 | 是（空文件） |
+| `rid_storage.db` | SQLite 历史库与保留的原始 HEX 数据 | 是 |
+| `history-cache.json` | 旧版 JSON 历史文件，存在时会自动导入一次 | 旧版迁移来源 |
+| `rid_history_cache.json` | 更早期的 JSON 历史文件，存在时会自动导入一次 | 旧版迁移来源 |
 | `rid_models.json` | RID 机型前缀到名称的映射 | 是（从 GitHub 或内嵌资源） |
 | `oui.txt` | MAC OUI 厂商数据库 | 可选（自动下载） |
 | `light_rid_scanner/host_metrics.jsonl` | 主机负载采样数据 | 是（系统临时目录） |
@@ -807,7 +810,9 @@ CI 通过 `.github/workflows/build-viewer.yml` 构建 Viewer 二进制，覆盖 
 | `rid_build_info.json` | 本地构建标记（commit + 构建号） | 是 |
 | `station_edition/config.example.json` | 安全示例配置 | 是 |
 | `config.json` | 实际运行时配置 | **禁止** |
-| `rid_history_cache.json` | 运行时飞机历史与轨迹 | **禁止** |
+| `rid_storage.db` | 运行时 SQLite 历史库 | **禁止** |
+| `history-cache.json` | 仅用于一次性升级导入的旧版 JSON 历史文件 | **禁止** |
+| `rid_history_cache.json` | 仅用于一次性升级导入的更早期 JSON 历史文件 | **禁止** |
 | `config.json.rollback` | 自动回滚恢复副本 | **禁止** |
 | `oui.txt` | MAC OUI 厂商数据库（自动下载） | **禁止** |
 | `light_rid_scanner/host_metrics.jsonl` | 主机负载采样数据（系统临时目录） | **禁止** |

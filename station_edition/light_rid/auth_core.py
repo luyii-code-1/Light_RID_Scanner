@@ -219,6 +219,33 @@ def _settings_runtime_payload(limit: int = 180) -> dict:
         "system_logs": system_logs,
     }
 
+
+def _diagnostics_summary_payload() -> dict:
+    host = _host_resource_snapshot()
+    parser = _packet_parse_diag_snapshot()
+    cpu_percent = host.get("cpu_percent")
+    load1 = host.get("load1")
+    cpu_count = max(1, int(host.get("cpu_count") or os.cpu_count() or 1))
+    load_percent = None
+    try:
+        if load1 is not None:
+            load_percent = round(max(0.0, min(100.0, (float(load1) / float(cpu_count)) * 100.0)), 1)
+    except Exception:
+        load_percent = None
+    return {
+        "ok": True,
+        "generated_wall": time.time(),
+        "host": {
+            "cpu_count": cpu_count,
+            "cpu_percent": cpu_percent,
+            "load1": host.get("load1"),
+            "load5": host.get("load5"),
+            "load15": host.get("load15"),
+            "load_percent": load_percent,
+        },
+        "parser": parser,
+    }
+
 def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:
     try:
         n = max(1, min(5000, int(limit)))

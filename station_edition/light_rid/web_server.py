@@ -25,7 +25,10 @@ html,body{height:100%}
   --selected-border:rgba(47,111,237,.28);--selected-muted:#43566f;
   --radius-sm:8px;--radius:10px;--radius-lg:16px;--radius-xl:18px;
   --shadow-sm:0 1px 2px rgba(15,23,42,.04);--shadow:0 8px 18px rgba(15,23,42,.06);--shadow-lg:0 14px 30px rgba(15,23,42,.10);
-  --transition:0.32s cubic-bezier(.22,1,.36,1)
+  --transition:0.32s cubic-bezier(.22,1,.36,1);
+  --info-card-max-height:min(68vh, 560px);
+  --info-modal-top-pad:78px;
+  --info-modal-bottom-pad:18px
 }
 body{background:var(--bg);color:var(--txt);font-family:var(--font-ui);font-size:16px;
      height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) minmax(240px,38vh) auto;
@@ -45,13 +48,19 @@ body.theme-light{
   --shadow-sm:0 1px 2px rgba(15,23,42,.04);--shadow:0 8px 18px rgba(15,23,42,.06);--shadow-lg:0 14px 30px rgba(15,23,42,.10)
 }
 body.theme-dark{
-  --bg:#0f1724;--bg2:#142033;--panel:rgba(18,27,42,.96);--panel2:#172336;--border:rgba(148,163,184,.18);--txt:#e7eef9;
-  --green:#39b980;--yellow:#e2a24a;--dim:#9aacbf;--blue:#6ea8ff;
-  --purple:#8a86ff;--cyan:#58b6ff;--glow:rgba(110,168,255,.18);--soft:rgba(11,18,28,.88);
-  --warn:#ff8d8d;--muted:#95a6bc;--surface-tonal:#17283d;
-  --selected-surface:rgba(110,168,255,.16);--selected-surface-card:rgba(110,168,255,.12);
-  --selected-border:rgba(110,168,255,.34);--selected-muted:#d4e3f6;
-  --shadow-sm:0 1px 2px rgba(0,0,0,.26);--shadow:0 12px 24px rgba(0,0,0,.28);--shadow-lg:0 18px 40px rgba(0,0,0,.34)
+  --bg:#0b1320;--bg2:#101b2d;--panel:rgba(12,20,33,.96);--panel2:#162338;--border:rgba(166,185,210,.20);--txt:#edf4ff;
+  --green:#48cb90;--yellow:#f0b35b;--dim:#aabbd1;--blue:#78b2ff;
+  --purple:#9a93ff;--cyan:#6cc7ff;--glow:rgba(120,178,255,.20);--soft:rgba(7,12,21,.90);
+  --warn:#ff9b9b;--muted:#9db0c8;--surface-tonal:#12253b;
+  --selected-surface:rgba(120,178,255,.18);--selected-surface-card:rgba(120,178,255,.14);
+  --selected-border:rgba(120,178,255,.42);--selected-muted:#dce8fb;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.30);--shadow:0 14px 28px rgba(0,0,0,.30);--shadow-lg:0 22px 48px rgba(0,0,0,.38)
+}
+body.theme-dark{
+  background:
+    radial-gradient(circle at 10% 8%, rgba(28,54,104,.34), rgba(28,54,104,0) 32%),
+    radial-gradient(circle at 88% 0%, rgba(74,142,255,.18), rgba(74,142,255,0) 26%),
+    linear-gradient(180deg,var(--bg),var(--bg2) 36%,var(--bg));
 }
 body::before{
   content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
@@ -557,13 +566,13 @@ tbody td.hl{
 }
 .info-modal{
   position:fixed;inset:0;display:none;align-items:flex-start;justify-content:flex-end;
-  background:transparent;backdrop-filter:none;z-index:9999;padding:78px 18px 18px;
+  background:transparent;backdrop-filter:none;z-index:9999;padding:var(--info-modal-top-pad) 18px var(--info-modal-bottom-pad);
   pointer-events:none;
 }
 .info-modal.show{display:flex}
 .info-card{
   width:min(360px, calc(100vw - 24px));
-  max-height:min(68vh, 560px);
+  max-height:var(--info-card-max-height);
   border:1px solid color-mix(in srgb, var(--border) 92%, transparent);border-radius:16px;overflow:hidden;
   background:var(--panel);
   box-shadow:0 12px 28px rgba(15,23,42,.10);
@@ -718,6 +727,56 @@ body.theme-light .raw-code{
   border-color:var(--border);background:var(--panel2);color:var(--txt);
 }
 body.theme-light .raw-empty{color:var(--dim)}
+body.theme-dark header{
+  background:color-mix(in srgb, var(--panel) 96%, #0b1320);
+  box-shadow:0 12px 30px rgba(0,0,0,.26);
+}
+body.theme-dark .tbl-wrap,
+body.theme-dark .panel,
+body.theme-dark .live-card-panel,
+body.theme-dark .main-more-pop,
+body.theme-dark .map-mini-list{
+  background:color-mix(in srgb, var(--panel) 94%, #08111d);
+  box-shadow:0 12px 26px rgba(0,0,0,.24);
+}
+body.theme-dark .panel-hdr,
+body.theme-dark .live-card-head,
+body.theme-dark .notify-center-head{
+  background:color-mix(in srgb, var(--panel2) 92%, #101a2b);
+}
+body.theme-dark .main-live-stats .stat,
+body.theme-dark .app-tab-nav,
+body.theme-dark .btn-mini,
+body.theme-dark .header-link-btn,
+body.theme-dark .app-tab-btn,
+body.theme-dark .icon-btn,
+body.theme-dark .info-card-close,
+body.theme-dark .live-card,
+body.theme-dark .live-card-item,
+body.theme-dark .notify-item,
+body.theme-dark .raw-code{
+  background:color-mix(in srgb, var(--panel2) 94%, #0e1828);
+}
+body.theme-dark tbody tr:hover,
+body.theme-dark .aprow:hover,
+body.theme-dark .live-card:hover{
+  background:color-mix(in srgb, var(--blue) 10%, var(--panel2));
+}
+body.theme-dark .live-card-state.live{color:#77d8a7;border-color:rgba(72,203,144,.24);background:rgba(21,64,46,.56)}
+body.theme-dark .live-card-state.lost{color:#ffb2b2;border-color:rgba(255,107,107,.26);background:rgba(92,25,25,.54)}
+body.theme-dark .live-card-state.firmware{color:#9ec7ff;border-color:rgba(120,178,255,.26);background:rgba(24,52,97,.56)}
+body.theme-dark .live-card-state.alarm{color:#ffbf7a;border-color:rgba(245,158,11,.28);background:rgba(82,45,12,.58)}
+body.theme-dark .info-card{
+  background:color-mix(in srgb, var(--panel) 96%, #08111d);
+  box-shadow:0 24px 54px rgba(0,0,0,.40);
+}
+body.theme-dark .info-card-hd{
+  background:color-mix(in srgb, var(--panel2) 86%, #0f1828);
+}
+body.theme-dark .main-more-pop,
+body.theme-dark .notify-center-panel{
+  border-color:color-mix(in srgb, var(--border) 96%, transparent);
+}
 body.theme-light .sniff-banner{
   border-color:color-mix(in srgb, var(--warn) 40%, var(--border));
   background:color-mix(in srgb, var(--warn) 10%, var(--panel));
@@ -816,6 +875,7 @@ var COOKIE_TRACK_REALTIME = 'rid_realtime_track';
 var COOKIE_TRACK_2H_ONLY = 'rid_track_2h_only';
 var FREEZE_ON_HOME_KEY = 'rid_freeze_on_home_once';
 var NEW_FIRMWARE_PARSE_KEY = 'rid_new_firmware_parse_enabled';
+var ROOT_SECURITY_IGNORE_KEY = 'rid_root_security_ignore_v1';
 var LIVE_LOST_WINDOW_SEC = 120;
 var HISTORY_DEFAULT_WINDOW_SEC = 12 * 3600;
 var TRACK_HISTORY_FETCH_LIMIT = 4000;
@@ -827,6 +887,10 @@ var notificationPollTimer = null;
 var authRedirecting = false;
 var replaySyncPaused = false;
 var suppressNextDroneNotifications = false;
+var wsOnline = false;
+var wsLatencyMs = null;
+var diagnosticSummary = null;
+var diagnosticPollTimer = null;
 var replayState = {sn:null,snList:[],points:[],min:null,max:null,start:null,end:null,cursor:null,startIndex:0,endIndex:null,cursorIndex:null,playing:false,speed:1,timer:null,userRange:false};
 var replayMarkers = {};
 var replayUiSig = '';
@@ -1090,6 +1154,12 @@ function ridFormatText(e){
   var s = String((e && (e.rid_format || e.dji_rid_kind || e.kind)) || '').trim();
   return s ? s : '-';
 }
+function ridFormatKey(e){
+  return String((e && (e.rid_format || e.dji_rid_kind || e.kind)) || '').trim().toUpperCase();
+}
+function detailSupportsGbExtended(e){
+  return ridFormatKey(e) === 'GB46750_2025';
+}
 function parseNoteText(e){
   var s = String((e && e.parse_note) || '').trim();
   return s ? s : '';
@@ -1210,7 +1280,7 @@ function trackFetchUrl(sn){
   url += '&limit=' + encodeURIComponent(String(TRACK_HISTORY_FETCH_LIMIT));
   return url;
 }
-async function ensureTrackLoaded(sn, force){
+async function ensureTrackLoaded(sn, force, opts){
   sn = String(sn || '');
   if(!sn) return;
   if(trackLoading[sn]) return;
@@ -1218,6 +1288,7 @@ async function ensureTrackLoaded(sn, force){
   var meta = trackFetchMeta[sn] || {};
   var scope = 'history|' + TRACK_HISTORY_FETCH_LIMIT;
   if(trackCache[sn] && !force && meta.scope === scope) return;
+  var taskId = (opts && opts.interactive) ? window.beginAsyncTask(opts.title || '轨迹详情', opts.detail || ('正在加载轨迹详情: ' + sn)) : null;
   trackLoading[sn] = true;
   try{
     var data = await getJson(trackFetchUrl(sn));
@@ -1236,8 +1307,10 @@ async function ensureTrackLoaded(sn, force){
       if(replaySyncPaused) renderReplayFrame();
       else updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
+    if(taskId) window.finishAsyncTask(taskId, true, '轨迹详情已刷新。');
   }catch(_e){
     if(!trackCache[sn]) trackCache[sn] = {aircraft:[], operator:[]};
+    if(taskId) window.finishAsyncTask(taskId, false, (_e && _e.message) ? _e.message : _e);
   }finally{
     delete trackLoading[sn];
   }
@@ -1384,16 +1457,40 @@ function hideInfoCard(){
   modal.classList.remove('show');
   activeInfoSn = '';
 }
-function clampInfoCardPosition(card, x, y){
+function infoCardViewportBounds(){
   var margin = 8;
+  var vw = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
+  var vh = Math.max(320, window.innerHeight || document.documentElement.clientHeight || 320);
+  var top = margin;
+  var bottom = vh - margin;
+  if(currentAppPage() === 'history'){
+    var tableWrap = document.querySelector('.history-table-slot .tbl-wrap');
+    if(tableWrap){
+      var rect = tableWrap.getBoundingClientRect();
+      top = Math.max(margin, Math.round(rect.top));
+      bottom = Math.max(top + 220, Math.min(vh - margin, Math.round(rect.bottom)));
+    }
+  }
+  return {left: margin, top: top, right: vw - margin, bottom: bottom};
+}
+function syncInfoCardViewport(card){
+  if(!card) return;
+  var bounds = infoCardViewportBounds();
+  var modal = qs('info-modal');
+  card.style.maxHeight = Math.max(220, bounds.bottom - bounds.top) + 'px';
+  if(modal){
+    modal.style.setProperty('--info-modal-top-pad', bounds.top + 'px');
+    modal.style.setProperty('--info-modal-bottom-pad', Math.max(8, (window.innerHeight || bounds.bottom) - bounds.bottom) + 'px');
+  }
+}
+function clampInfoCardPosition(card, x, y){
+  var bounds = infoCardViewportBounds();
   var rect = card.getBoundingClientRect();
   var w = Math.max(1, rect.width || card.offsetWidth || 360);
   var h = Math.max(1, rect.height || card.offsetHeight || 220);
-  var vw = Math.max(w + margin * 2, window.innerWidth || document.documentElement.clientWidth || w);
-  var vh = Math.max(h + margin * 2, window.innerHeight || document.documentElement.clientHeight || h);
   return {
-    x: Math.max(margin, Math.min(Number(x) || margin, vw - w - margin)),
-    y: Math.max(margin, Math.min(Number(y) || margin, vh - h - margin))
+    x: Math.max(bounds.left, Math.min(Number(x) || bounds.left, bounds.right - w)),
+    y: Math.max(bounds.top, Math.min(Number(y) || bounds.top, bounds.bottom - h))
   };
 }
 function placeInfoCard(card, x, y){
@@ -1410,7 +1507,9 @@ function placeInfoCard(card, x, y){
 }
 function applyInfoCardDragPosition(){
   var card = qs('info-modal') ? qs('info-modal').querySelector('.info-card') : null;
-  if(!card || infoCardDragState.x == null || infoCardDragState.y == null) return;
+  if(!card) return;
+  syncInfoCardViewport(card);
+  if(infoCardDragState.x == null || infoCardDragState.y == null) return;
   placeInfoCard(card, infoCardDragState.x, infoCardDragState.y);
 }
 function bindInfoCardDrag(){
@@ -1468,12 +1567,14 @@ function stripUnsafeHtml(html){
 function showInfoCard(msg, asHtml){
   var modal = qs('info-modal');
   var body = qs('info-card-body');
-  if(!modal || !body) return;
+  var card = modal ? modal.querySelector('.info-card') : null;
+  if(!modal || !body || !card) return;
   if(asHtml){
     body.innerHTML = stripUnsafeHtml(msg);
   }else{
     body.textContent = String(msg || '无详情');
   }
+  syncInfoCardViewport(card);
   modal.classList.add('show');
   applyInfoCardDragPosition();
 }
@@ -1825,10 +1926,6 @@ function ensureNotificationCenter(){
     });
   }
   renderNotificationCenter();
-  refreshNotificationCenter();
-  if(!notificationPollTimer){
-    notificationPollTimer = setInterval(refreshNotificationCenter, 5000);
-  }
 }
 function toggleNotificationCenter(force){
   ensureNotificationCenter();
@@ -1975,6 +2072,110 @@ function apiUrl(url){
     return u;
   }
 }
+function rootSecurityIgnored(){
+  try{ return localStorage.getItem(ROOT_SECURITY_IGNORE_KEY) === '1'; }catch(_e){ return false; }
+}
+function setRootSecurityIgnored(on){
+  try{
+    if(on) localStorage.setItem(ROOT_SECURITY_IGNORE_KEY, '1');
+    else localStorage.removeItem(ROOT_SECURITY_IGNORE_KEY);
+  }catch(_e){}
+}
+function noteWsSample(data){
+  var serverMs = Number((data && data.server_wall_ms) || 0);
+  if(serverMs > 0){
+    var sample = Date.now() - serverMs;
+    if(isFinite(sample) && sample >= 0 && sample <= 600000){
+      wsLatencyMs = Math.round(sample);
+    }
+  }
+  if(qs('main-more-menu') && qs('main-more-menu').classList.contains('diagnostic-open')){
+    renderDiagnosticPopup();
+  }
+}
+function fmtDiagNum(v, digits, suffix){
+  if(v == null || v === '' || !isFinite(Number(v))) return '-';
+  return Number(v).toFixed(Math.max(0, Number(digits || 0))) + String(suffix || '');
+}
+function renderDiagnosticPopup(){
+  var pop = qs('main-diagnostic-pop');
+  if(!pop) return;
+  var host = (diagnosticSummary && diagnosticSummary.host) || {};
+  var parser = (diagnosticSummary && diagnosticSummary.parser) || {};
+  var wsText = wsOnline ? fmtDiagNum(wsLatencyMs, 0, ' ms') : '断开';
+  var queueText = fmtDiagNum(parser.queue_size, 0, '') + ' / ' + fmtDiagNum(parser.queue_max, 0, '');
+  if(parser.queue_usage_pct != null && isFinite(Number(parser.queue_usage_pct))){
+    queueText += ' (' + fmtDiagNum(parser.queue_usage_pct, 1, '%') + ')';
+  }
+  var queueMeta = [];
+  if(parser.queue_high_water != null) queueMeta.push('高水位 ' + fmtDiagNum(parser.queue_high_water, 0, ''));
+  if(parser.workers != null) queueMeta.push('线程 ' + fmtDiagNum(parser.workers, 0, ''));
+  if(parser.dropped != null) queueMeta.push('丢包 ' + fmtDiagNum(parser.dropped, 0, ''));
+  var parseMeta = [];
+  if(parser.last_parse_ms != null) parseMeta.push('本次 ' + fmtDiagNum(parser.last_parse_ms, 3, ' ms'));
+  if(parser.max_parse_ms != null) parseMeta.push('最大 ' + fmtDiagNum(parser.max_parse_ms, 3, ' ms'));
+  var hostCpu = [];
+  if(host.cpu_count != null) hostCpu.push(fmtDiagNum(host.cpu_count, 0, ' 核'));
+  if(host.cpu_percent != null) hostCpu.push('占用 ' + fmtDiagNum(host.cpu_percent, 1, '%'));
+  var loadMeta = [];
+  if(host.load1 != null) loadMeta.push('1m ' + fmtDiagNum(host.load1, 2, ''));
+  if(host.load5 != null) loadMeta.push('5m ' + fmtDiagNum(host.load5, 2, ''));
+  if(host.load15 != null) loadMeta.push('15m ' + fmtDiagNum(host.load15, 2, ''));
+  if(host.load_percent != null) loadMeta.push('折算 ' + fmtDiagNum(host.load_percent, 1, '%'));
+  pop.innerHTML =
+    '<div class="main-diagnostic-head">诊断</div>'
+    + '<div class="main-diagnostic-body">'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">WS 延迟</div><div class="main-diagnostic-value">' + esc(wsText) + '</div><div class="main-diagnostic-sub">最近一次服务端推送</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">解析队列</div><div class="main-diagnostic-value">' + esc(queueText) + '</div><div class="main-diagnostic-sub">' + esc(queueMeta.join(' | ') || '-') + '</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">解析耗时</div><div class="main-diagnostic-value">' + esc(fmtDiagNum(parser.avg_parse_ms, 3, ' ms')) + '</div><div class="main-diagnostic-sub">' + esc(parseMeta.join(' | ') || '-') + '</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机 CPU</div><div class="main-diagnostic-value">' + esc(hostCpu.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">当前主机 CPU 信息</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机负载</div><div class="main-diagnostic-value">' + esc(loadMeta.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">load average 与核数折算</div></div>'
+    + '</div>';
+}
+function scheduleDiagnosticRefresh(){
+  if(diagnosticPollTimer){
+    clearTimeout(diagnosticPollTimer);
+    diagnosticPollTimer = null;
+  }
+  var menu = qs('main-more-menu');
+  if(!menu || !menu.classList.contains('diagnostic-open')) return;
+  diagnosticPollTimer = setTimeout(loadDiagnosticSummary, 2000);
+}
+async function loadDiagnosticSummary(){
+  try{
+    diagnosticSummary = await getJson('/api/diagnostics/summary');
+  }catch(e){
+    diagnosticSummary = {host:{}, parser:{}, error:(e && e.message) ? e.message : String(e || 'failed')};
+  }
+  renderDiagnosticPopup();
+  scheduleDiagnosticRefresh();
+}
+function setDiagnosticVisible(on){
+  var menu = qs('main-more-menu');
+  if(!menu) return;
+  menu.classList.toggle('diagnostic-open', !!on);
+  if(!on){
+    if(diagnosticPollTimer){
+      clearTimeout(diagnosticPollTimer);
+      diagnosticPollTimer = null;
+    }
+    return;
+  }
+  menu.classList.add('open');
+  renderDiagnosticPopup();
+  loadDiagnosticSummary();
+}
+function openDiagnosticWindow(){
+  var target = '/diagnostics';
+  var features = 'noopener,noreferrer,width=220,height=360';
+  try{
+    if(window.matchMedia && window.matchMedia('(max-width: 900px)').matches){
+      window.open(target, '_blank', 'noopener,noreferrer');
+      return;
+    }
+  }catch(_e){}
+  window.open(target, 'rid_diagnostic_window', features);
+}
 function loadThemePref(){
   try{
     var s = localStorage.getItem('rid_ui_theme');
@@ -2078,7 +2279,9 @@ function _pickToolSn(){
 async function toolsExportAllDetails(){
   setToolsStatus('导出全部详情中...');
   try{
-    var data = await getJson('/api/tools/export/all');
+    var data = await withAsyncTask('详情导出', '正在导出全部详情...', function(){
+      return getJson('/api/tools/export/all');
+    });
     _downloadJsonFile('rid_details_all_' + _toolStamp() + '.json', data);
     setToolsStatus('导出完成：全部详情 ' + Number(data.count || 0) + ' 架');
     showBanner('已导出全部详情', 'ok', 2200);
@@ -2098,7 +2301,9 @@ async function toolsExportSingleTrack(){
   }
   setToolsStatus('导出轨迹中: ' + sn);
   try{
-    var data = await getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
+    var data = await withAsyncTask('轨迹导出', '正在导出轨迹: ' + sn, function(){
+      return getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
+    });
     _downloadJsonFile('rid_track_' + sn + '_' + _toolStamp() + '.json', data);
     setToolsStatus('导出完成: ' + sn + ' (' + Number(data.count || 0) + ' 点)');
     showBanner('已导出轨迹: ' + sn, 'ok', 2200);
@@ -3049,21 +3254,27 @@ function applyRuntimeSecurity(meta){
   var sec = (meta && meta.runtime_security) || {};
   var banner = qs('security-banner');
   if(!banner) return;
-  if(sec.running_as_root){
-    if(qs('security-banner-text')){
-      qs('security-banner-text').textContent = '当前处于 root 权限，存在安全风险。请在设置中一键修复为 rid 专用账号运行。';
-    }
-    banner.className = 'sniff-banner warn security-banner';
-    banner.style.display = 'flex';
+    if(sec.running_as_root){
+      if(rootSecurityIgnored()){
+        banner.style.display = 'none';
+        applyRuntimeSecurity.__last = 'ignored';
+        return;
+      }
+      if(qs('security-banner-text')){
+        qs('security-banner-text').textContent = '当前处于 root 权限，存在安全风险。请在设置中一键修复为 rid 专用账号运行。';
+      }
+      banner.className = 'sniff-banner warn security-banner';
+      banner.style.display = 'flex';
     if(applyRuntimeSecurity.__last !== 'root'){
       showBanner('当前处于 root 权限，存在安全风险。', 'warn', 5200);
+      }
+      applyRuntimeSecurity.__last = 'root';
+    }else{
+      setRootSecurityIgnored(false);
+      banner.style.display = 'none';
+      applyRuntimeSecurity.__last = 'ok';
     }
-    applyRuntimeSecurity.__last = 'root';
-  }else{
-    banner.style.display = 'none';
-    applyRuntimeSecurity.__last = 'ok';
   }
-}
 
 function applySniffStatus(meta){
   var state = String((meta && meta.sniff_state) || 'warn');
@@ -3775,6 +3986,7 @@ function connect(){
   ws.onerror = function(){ ws.close(); };
   ws.onmessage = function(ev){
     var d = JSON.parse(ev.data);
+    noteWsSample(d);
     if(uiFrozen || replaySyncPaused){
       frozenPendingData = d;
       renderReplayCard();
@@ -3784,7 +3996,11 @@ function connect(){
   };
 }
 function setWsState(ok){
+  wsOnline = !!ok;
   qs('dot-ws').className = ok ? 'on' : '';
+  if(!ok && qs('main-more-menu') && qs('main-more-menu').classList.contains('diagnostic-open')){
+    renderDiagnosticPopup();
+  }
   qs('ws-status').textContent = replaySyncPaused ? '重演中' : (ok ? '实时' : '重连中');
 }
 
@@ -3792,6 +4008,7 @@ function onData(d){
   clearInitialDataLoading();
   buildExtraUi();
   applyMeta((d && d.meta) || {});
+  applyNotificationPayload(d && d.notifications);
   qs('cur-ts').textContent = d.ts;
   if(qs('cur-ch')) qs('cur-ch').textContent = d.ch;
   var list = (Array.isArray(d.drones) ? d.drones : []).filter(includeDroneByFirmware);
@@ -3993,6 +4210,7 @@ function focusLiveAircraft(sn){
   setSnSelected(sn, true, {exclusive:true});
   var e = latestDroneMap[sn];
   if(e){
+    ensureTrackLoaded(sn, false, {interactive:true, title:'轨迹详情', detail:'正在加载轨迹详情...'});
     showDroneInfoCard(e);
     focusEntryOnMap(e, 16);
   }
@@ -4003,6 +4221,7 @@ function focusHistoryAircraft(sn){
   setHistoryVisibleSet([sn], {keepReplay:false});
   var e = latestDroneMap[sn];
   if(e){
+    ensureTrackLoaded(sn, false, {interactive:true, title:'轨迹详情', detail:'正在加载轨迹详情...'});
     showDroneInfoCard(e);
     focusEntryOnMap(e, 16);
   }
@@ -5653,6 +5872,14 @@ header.app-shell-header h1{
 .main-more-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;min-width:170px;padding:8px;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 12px 28px rgba(15,23,42,.10);z-index:45}
 .main-more-menu.open .main-more-pop{display:grid;gap:6px}
 .main-more-pop .header-link-btn{width:100%;text-align:left;box-shadow:none}
+.main-diagnostic-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;width:200px;min-height:300px;max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 14px 30px rgba(15,23,42,.14);z-index:46}
+.main-more-menu.diagnostic-open .main-diagnostic-pop{display:block}
+.main-diagnostic-head{padding:12px 12px 8px;font:700 13px/1 var(--font-ui);color:var(--txt);border-bottom:1px solid var(--border)}
+.main-diagnostic-body{padding:8px;display:grid;gap:8px}
+.main-diagnostic-row{display:grid;gap:4px;padding:8px 9px;border:1px solid color-mix(in srgb,var(--border) 94%,transparent);border-radius:10px;background:color-mix(in srgb,var(--panel2) 88%,transparent)}
+.main-diagnostic-label{font:700 11px/1.2 var(--font-ui);color:var(--muted);letter-spacing:.02em}
+.main-diagnostic-value{font:700 13px/1.25 var(--font-mono);color:var(--txt);word-break:break-word}
+.main-diagnostic-sub{font:600 11px/1.45 var(--font-ui);color:var(--dim);word-break:break-word}
 .app-tab-btn,.header-link-btn,.btn-mini,.icon-btn,.info-card-close{
   border:1px solid var(--border);
   background:var(--panel2);
@@ -5873,6 +6100,19 @@ body.zone-alert-active header.app-shell-header,body.zone-alert-active header{box
 .rid-toast-msg{font:600 13px/1.4 var(--font-ui);color:var(--txt);white-space:pre-wrap;word-break:break-word}
 @keyframes toastIn{0%{opacity:0;transform:translateX(40px)}100%{opacity:1;transform:translateX(0)}}
 @keyframes toastOut{0%{opacity:1;transform:translateX(0)}100%{opacity:0;transform:translateX(40px)}}
+.rid-task-host{position:fixed;right:18px;bottom:156px;z-index:10001;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:min(360px,calc(100vw - 28px))}
+.rid-task{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;align-items:start;padding:12px 14px;border-radius:var(--radius);background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--border);box-shadow:0 10px 22px rgba(15,23,42,.10);pointer-events:auto}
+.rid-task.done{opacity:.96}
+.rid-task.warn{border-color:color-mix(in srgb,var(--warn) 38%,var(--border))}
+.rid-task-icon{position:relative;width:34px;height:34px;border-radius:10px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--border));background:color-mix(in srgb,var(--panel2) 94%,transparent);display:grid;place-items:center;color:var(--blue);font:700 15px/1 var(--font-ui)}
+.rid-task.busy .rid-task-icon::before{content:"";width:16px;height:16px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 14%,var(--border));border-top-color:var(--blue);animation:ridLoadingSpin .9s linear infinite}
+.rid-task.done.ok .rid-task-icon{color:var(--green);border-color:color-mix(in srgb,var(--green) 26%,var(--border))}
+.rid-task.done.ok .rid-task-icon::before{content:"✓"}
+.rid-task.done.warn .rid-task-icon{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 34%,var(--border))}
+.rid-task.done.warn .rid-task-icon::before{content:"!"}
+.rid-task-copy{display:grid;gap:4px;min-width:0}
+.rid-task-title{font:700 13px/1.2 var(--font-ui);color:var(--txt)}
+.rid-task-detail{font:600 12px/1.45 var(--font-ui);color:var(--muted);white-space:pre-wrap;word-break:break-word}
 """
 
 _MAIN_PAGE_PATCH_JS = r"""
@@ -5885,6 +6125,7 @@ _MAIN_PAGE_PATCH_JS = r"""
   var alarmLastSig='';
   /* ---- Toast notification system ---- */
   window._ridToasts=[];
+  window._ridTasks=[];
   window.showToast=function(msg,kind,ms){
     kind=String(kind||'info');ms=Number(ms)||2800;
     var t={id:Date.now()+Math.random(),msg:String(msg||''),kind:kind};
@@ -5908,6 +6149,55 @@ _MAIN_PAGE_PATCH_JS = r"""
       html+='<div class="rid-toast '+t.kind+'" id="rid-toast-'+t.id+'"><span class="rid-toast-bar"></span><span class="rid-toast-msg">'+String(t.msg).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</span></div>';
     });
     host.innerHTML=html;
+  }
+  function dismissTask(id){
+    window._ridTasks=window._ridTasks.filter(function(t){return t.id!==id;});
+    renderTasks();
+  }
+  function renderTasks(){
+    var host=document.getElementById('rid-task-host');
+    if(!host){
+      host=document.createElement('div');host.id='rid-task-host';host.className='rid-task-host';
+      document.body.appendChild(host);
+    }
+    var html='';
+    window._ridTasks.forEach(function(t){
+      var stateClass=t.done?('done '+(t.ok?'ok':'warn')):'busy';
+      html+='<div class="rid-task '+stateClass+'"><div class="rid-task-icon"></div><div class="rid-task-copy"><div class="rid-task-title">'+String(t.title||'正在处理').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div><div class="rid-task-detail">'+String(t.detail||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div></div></div>';
+    });
+    host.innerHTML=html;
+  }
+  window.beginAsyncTask=function(title,detail){
+    var task={id:Date.now()+Math.random(),title:String(title||'正在处理'),detail:String(detail||''),done:false,ok:true};
+    window._ridTasks.push(task);
+    renderTasks();
+    return task.id;
+  };
+  window.updateAsyncTask=function(id,detail){
+    window._ridTasks=window._ridTasks.map(function(t){
+      if(t.id!==id) return t;
+      return Object.assign({}, t, {detail:String(detail||'')});
+    });
+    renderTasks();
+  };
+  window.finishAsyncTask=function(id,ok,detail,ms){
+    window._ridTasks=window._ridTasks.map(function(t){
+      if(t.id!==id) return t;
+      return Object.assign({}, t, {done:true, ok:!!ok, detail:String(detail||(ok?'已完成。':'执行失败。'))});
+    });
+    renderTasks();
+    setTimeout(function(){dismissTask(id);}, Math.max(1400, Number(ms || (ok ? 1800 : 3200))));
+  };
+  async function withAsyncTask(title, detail, work){
+    var taskId=window.beginAsyncTask(title, detail);
+    try{
+      var result=await work(taskId);
+      window.finishAsyncTask(taskId, true, String(detail||title||'操作') + '已完成。');
+      return result;
+    }catch(e){
+      window.finishAsyncTask(taskId, false, (e && e.message) ? e.message : e);
+      throw e;
+    }
   }
   /* ---- End Toast ---- */
   function syncHomeViewport(){
@@ -5965,6 +6255,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     syncTableSelectionUi();
     updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     syncHomeViewport();
+    applyInfoCardDragPosition();
   }
   window.__ridNavSet = navSet;
   function mountMainMapPanel(page){
@@ -6084,20 +6375,38 @@ _MAIN_PAGE_PATCH_JS = r"""
       menu.innerHTML = '<button class="btn-mini header-link-btn" id="btn-main-more" type="button">更多</button><div class="main-more-pop" id="main-more-pop"></div>';
       actions.appendChild(menu);
       var pop = qs('main-more-pop');
-      [['btn-settings','设置','/settings'], ['btn-logs','日志','/logs']].forEach(function(item){
+      [
+        {id:'btn-settings', text:'设置', href:'/settings'},
+        {id:'btn-logs', text:'日志', href:'/logs'},
+        {id:'btn-diagnostic', text:'诊断'}
+      ].forEach(function(item){
         var b = document.createElement('button');
-        b.id = item[0];
+        b.id = item.id;
         b.className = 'btn-mini header-link-btn';
         b.type = 'button';
-        b.textContent = item[1];
-        b.addEventListener('click', function(){ location.href = item[2]; });
+        b.textContent = item.text;
+        b.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          if(item.href){
+            setDiagnosticVisible(false);
+            location.href = item.href;
+            return;
+          }
+          setDiagnosticVisible(false);
+          menu.classList.remove('open');
+          openDiagnosticWindow();
+        });
         pop.appendChild(b);
       });
       qs('btn-main-more').addEventListener('click', function(ev){
         ev.stopPropagation();
         menu.classList.toggle('open');
+        if(!menu.classList.contains('open')) setDiagnosticVisible(false);
       });
-      document.addEventListener('click', function(){ menu.classList.remove('open'); });
+      document.addEventListener('click', function(){
+        menu.classList.remove('open');
+        setDiagnosticVisible(false);
+      });
     }
     ['btn-freeze','btn-web-notify','btn-clear-history'].forEach(function(id){
       var node = qs(id);
@@ -6205,8 +6514,10 @@ _MAIN_PAGE_PATCH_JS = r"""
   window.exportTrackForSn = async function(sn){
     sn = String(sn || '').trim();
     if(!sn) return;
-    var data = await getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
-    _downloadJsonFile('rid_track_' + sn + '_' + _toolStamp() + '.json', data);
+    await withAsyncTask('轨迹导出', '正在导出轨迹: ' + sn, async function(){
+      var data = await getJson('/api/tools/export/track?sn=' + encodeURIComponent(sn));
+      _downloadJsonFile('rid_track_' + sn + '_' + _toolStamp() + '.json', data);
+    });
   };
   function cleanModelPrefixFromSn(sn){
     var raw = String(sn || '');
@@ -6403,7 +6714,9 @@ _MAIN_PAGE_PATCH_JS = r"""
     btn.disabled = true;
     if(status) status.textContent = '正在重新解析...';
     try{
-      var data = await postJson(detailReparseApiUrl(), {sn:sn, mode:mode});
+      var data = await withAsyncTask('详细信息重解析', '正在重解析 ' + sn + ' ...', function(){
+        return postJson(detailReparseApiUrl(), {sn:sn, mode:mode});
+      });
       setDetailReparseModeForSn(sn, mode);
       if(data && data.sn_now) setDetailReparseModeForSn(data.sn_now, mode);
       var msg = data.message || ('重新解析完成: ' + String(data.mode || mode));
@@ -6563,6 +6876,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     }
     buildInfoHtml = function(e){
       e = e || {};
+      var gbExtended = detailSupportsGbExtended(e);
       var base = [
         ['SN', String(e.sn || '-')],
         ['UAS ID', uasIdText(e)],
@@ -6598,6 +6912,19 @@ _MAIN_PAGE_PATCH_JS = r"""
         ['运行状态', String(e.operation_state_text || e.operation_state || '-')],
         ['方向', String(e.dir || '-')]
       ];
+      if(gbExtended){
+        dronePos[7][1] = String(e.operation_category_text || e.operation_category || '-') + ' / ' + String(e.aircraft_category_text || e.aircraft_classification_text || e.aircraft_category || e.aircraft_classification || '-');
+        dronePos[8][1] = String(e.operation_state_text || e.operational_status_text || e.operation_state || e.operational_status || '-');
+      }else{
+        dronePos = [
+          dronePos[0],
+          dronePos[1],
+          dronePos[2],
+          ['速度', fmt(e.spd,2,'m/s')],
+          ['垂直速度', fmt(e.vspd,2,'m/s')],
+          dronePos[9]
+        ];
+      }
       var pilotPos = [
         ['遥控站纬度', fmt(e.pilot_lat,6,'')],
         ['遥控站经度', fmt(e.pilot_lon,6,'')]
@@ -7157,6 +7484,19 @@ select,input{height:40px;border:1px solid var(--border);background:var(--card2);
 pre{margin:0;height:calc(100dvh - 176px);min-height:420px;overflow:auto;padding:14px;background:#0e1116;color:#d6deeb;font:13px/1.55 var(--font-mono);white-space:pre-wrap;word-break:break-word}
 body.theme-light pre{background:#fbfbfb;color:#24292f}
 .status{padding:8px 12px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+.task-host{position:fixed;right:18px;bottom:18px;display:grid;gap:8px;z-index:2000;width:min(340px,calc(100vw - 28px));pointer-events:none}
+.task-card{display:grid;grid-template-columns:30px minmax(0,1fr);gap:10px;align-items:start;padding:11px 13px;border-radius:12px;border:1px solid var(--border);background:var(--card);box-shadow:0 8px 18px rgba(0,0,0,.12);pointer-events:auto}
+.task-card.warn{border-color:color-mix(in srgb,var(--warn) 38%,var(--border))}
+.task-icon{position:relative;width:30px;height:30px;border-radius:9px;border:1px solid color-mix(in srgb,var(--blue) 24%,var(--border));background:color-mix(in srgb,var(--blue) 8%,var(--card2));display:grid;place-items:center;color:var(--blue);font:700 14px/1 var(--font-ui)}
+.task-card.busy .task-icon::before{content:"";width:14px;height:14px;border-radius:50%;border:2px solid color-mix(in srgb,var(--blue) 14%,var(--border));border-top-color:var(--blue);animation:ridLogTaskSpin .9s linear infinite}
+.task-card.done.ok .task-icon{color:var(--green);border-color:color-mix(in srgb,var(--green) 26%,var(--border))}
+.task-card.done.ok .task-icon::before{content:"✓"}
+.task-card.done.warn .task-icon{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 34%,var(--border))}
+.task-card.done.warn .task-icon::before{content:"!"}
+.task-copy{display:grid;gap:4px}
+.task-title{font:700 13px/1.2 var(--font-ui)}
+.task-detail{font:600 12px/1.45 var(--font-ui);color:var(--muted);white-space:pre-wrap;word-break:break-word}
+@keyframes ridLogTaskSpin{to{transform:rotate(360deg)}}
 @media(max-width:720px){.wrap{width:calc(100vw - 10px);padding:10px 5px}.title{font-size:22px}pre{height:calc(100dvh - 230px);font-size:12px}}
 </style></head><body><div class="wrap">
   <div class="topbar">
@@ -7197,6 +7537,9 @@ function authExpired(r,d){var e=String((d&&d.error)||'');return r&&r.status===40
 function redirectLogin(){if(authRedirecting)return;authRedirecting=true;location.href='/login?next=/'}
 function loadTheme(){try{var s=localStorage.getItem('rid_ui_theme'); if(s==='light'||s==='dark') return s}catch(_e){} return (matchMedia && matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}
 function applyTheme(t){var light=t==='light'; document.body.classList.toggle('theme-light', light); try{localStorage.setItem('rid_ui_theme', light?'light':'dark')}catch(_e){} qs('btn-theme').textContent=light?'深色':'浅色'}
+var logTasks=[];
+function renderLogTasks(){var host=document.getElementById('log-task-host'); if(!host){host=document.createElement('div'); host.id='log-task-host'; host.className='task-host'; document.body.appendChild(host)} host.innerHTML=logTasks.map(function(t){var c=t.done?('done '+(t.ok?'ok':'warn')):'busy'; return '<div class="task-card '+c+'"><div class="task-icon"></div><div class="task-copy"><div class="task-title">'+String(t.title||'正在处理').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div><div class="task-detail">'+String(t.detail||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div></div></div>';}).join('')}
+function withLogTask(title, detail, work){var task={id:Date.now()+Math.random(),title:String(title||'正在处理'),detail:String(detail||''),done:false,ok:true}; logTasks.push(task); renderLogTasks(); return Promise.resolve().then(function(){return work()}).then(function(result){task.done=true; task.ok=true; task.detail=String(detail||title||'操作')+'已完成。'; renderLogTasks(); setTimeout(function(){logTasks=logTasks.filter(function(x){return x.id!==task.id}); renderLogTasks();}, 1800); return result;}).catch(function(err){task.done=true; task.ok=false; task.detail=(err&&err.message)?err.message:String(err||'failed'); renderLogTasks(); setTimeout(function(){logTasks=logTasks.filter(function(x){return x.id!==task.id}); renderLogTasks();}, 3200); throw err;})}
 var currentType='runtime';
 async function loadLogs(){
   var limit=Math.max(20, Math.min(5000, Number(qs('limit').value||500)));
@@ -7231,14 +7574,174 @@ async function downloadLogs(type){
   setTimeout(function(){URL.revokeObjectURL(url); if(a.parentNode)a.parentNode.removeChild(a)}, 8000);
 }
 document.querySelectorAll('.tab').forEach(function(btn){btn.addEventListener('click', function(){setType(btn.getAttribute('data-type'))})});
-qs('btn-refresh').addEventListener('click', function(){loadLogs().catch(function(e){qs('status').textContent=e.message||String(e)})});
-qs('btn-export').addEventListener('click', function(){downloadLogs(currentType).catch(function(e){qs('status').textContent=e.message||String(e)})});
-qs('btn-export-all').addEventListener('click', function(){downloadLogs('all').catch(function(e){qs('status').textContent=e.message||String(e)})});
+qs('btn-refresh').addEventListener('click', function(){withLogTask('日志刷新', '正在读取日志...', function(){return loadLogs()}).catch(function(e){qs('status').textContent=e.message||String(e)})});
+qs('btn-export').addEventListener('click', function(){withLogTask('日志导出', '正在导出当前日志...', function(){return downloadLogs(currentType)}).catch(function(e){qs('status').textContent=e.message||String(e)})});
+qs('btn-export-all').addEventListener('click', function(){withLogTask('日志导出', '正在导出全部日志...', function(){return downloadLogs('all')}).catch(function(e){qs('status').textContent=e.message||String(e)})});
 qs('btn-back').addEventListener('click', function(){location.href='/'});
 qs('btn-settings').addEventListener('click', function(){location.href='/settings'});
 qs('btn-theme').addEventListener('click', function(){applyTheme(document.body.classList.contains('theme-light')?'dark':'light')});
 applyTheme(loadTheme());
 loadLogs().catch(function(e){qs('status').textContent=e.message||String(e)});
+</script></body></html>"""
+
+def _build_diagnostics_html() -> str:
+    return """<!doctype html><html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>诊断 - Light RID Scanner</title>
+<style>
+*{box-sizing:border-box}
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+  --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --bg:#f3f2f1;--card:#fff;--card2:#faf9f8;--border:#e1dfdd;--txt:#323130;--muted:#605e5c;--blue:#0078d4;--warn:#d83b01;--dim:#7a768f
+}
+@media(prefers-color-scheme:dark){
+  :root{--bg:#201f1e;--card:#2b2a29;--card2:#252423;--border:#3b3a39;--txt:#f3f2f1;--muted:#c8c6c4;--blue:#2899f5;--warn:#f7630c;--dim:#a7a2bf}
+}
+html,body{margin:0;min-height:100dvh;background:linear-gradient(180deg,var(--bg),var(--card2));color:var(--txt);font-family:var(--font-ui)}
+body{padding:10px}
+.card{min-height:calc(100dvh - 20px);border:1px solid var(--border);background:var(--card);border-radius:14px;box-shadow:0 14px 30px rgba(0,0,0,.14);padding:10px;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;gap:8px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.title{font:700 14px/1 var(--font-ui)}
+.row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.btn{height:30px;border:1px solid var(--border);background:var(--card2);color:var(--txt);border-radius:9px;padding:0 10px;font:700 12px/1 var(--font-ui);cursor:pointer}
+.btn:hover{border-color:var(--blue)}
+.hint{font:600 11px/1.35 var(--font-ui);color:var(--muted)}
+.grid{display:grid;gap:8px;min-height:0}
+.item{display:grid;gap:4px;padding:8px 9px;border:1px solid var(--border);border-radius:10px;background:var(--card2)}
+.label{font:700 11px/1.2 var(--font-ui);color:var(--muted)}
+.value{font:700 13px/1.25 var(--font-mono);color:var(--txt);word-break:break-word}
+.sub{font:600 11px/1.4 var(--font-ui);color:var(--dim);word-break:break-word}
+.status{font:600 11px/1.4 var(--font-ui);color:var(--muted);white-space:pre-wrap}
+.status.err{color:var(--warn)}
+</style></head><body><div class="card">
+  <div class="topbar">
+    <div class="title">诊断</div>
+    <div class="row">
+      <button class="btn" id="btn-refresh" type="button">刷新</button>
+      <button class="btn" id="btn-close" type="button">关闭</button>
+    </div>
+  </div>
+  <div class="hint">独立窗口诊断页，显示 WS 延迟、解析队列、解析耗时、主机 CPU 与负载。</div>
+  <div class="grid">
+    <div class="item"><div class="label">WS 延迟</div><div class="value" id="diag-ws">-</div><div class="sub" id="diag-ws-sub">等待连接</div></div>
+    <div class="item"><div class="label">解析队列</div><div class="value" id="diag-queue">-</div><div class="sub" id="diag-queue-sub">-</div></div>
+    <div class="item"><div class="label">解析耗时</div><div class="value" id="diag-parse">-</div><div class="sub" id="diag-parse-sub">-</div></div>
+    <div class="item"><div class="label">主机 CPU</div><div class="value" id="diag-cpu">-</div><div class="sub" id="diag-cpu-sub">-</div></div>
+    <div class="item"><div class="label">主机负载</div><div class="value" id="diag-load">-</div><div class="sub" id="diag-load-sub">-</div></div>
+  </div>
+  <div class="status" id="status">正在读取...</div>
+</div><script>
+var ws = null;
+var wsReconnectTimer = null;
+var pollTimer = null;
+var wsOnline = false;
+var wsLatencyMs = null;
+function qs(id){ return document.getElementById(id); }
+function pageHeaders(extra){ var h={'X-LightRID-Page':'1'}; if(extra) Object.keys(extra).forEach(function(k){ h[k]=extra[k]; }); return h; }
+function apiUrl(url){ try{ return new URL(String(url || ''), window.location.origin).toString(); }catch(_e){ return String(url || ''); } }
+function authExpired(r, d){ return !!(r && r.status === 401 && d && d.auth_expired); }
+function redirectLogin(d){ location.href = (d && d.login_url) ? d.login_url : '/login?next=/diagnostics'; }
+function setStatus(text, err){
+  var el = qs('status');
+  if(!el) return;
+  el.textContent = text || '-';
+  el.classList.toggle('err', !!err);
+}
+function fmt(v, digits, suffix){
+  if(v == null || v === '' || !isFinite(Number(v))) return '-';
+  return Number(v).toFixed(Math.max(0, Number(digits || 0))) + String(suffix || '');
+}
+function setText(id, text){
+  var el = qs(id);
+  if(el) el.textContent = text || '-';
+}
+function noteWsSample(data){
+  var serverMs = Number((data && data.server_wall_ms) || 0);
+  if(serverMs > 0){
+    var sample = Date.now() - serverMs;
+    if(isFinite(sample) && sample >= 0 && sample <= 600000) wsLatencyMs = Math.round(sample);
+  }
+  setText('diag-ws', wsOnline ? fmt(wsLatencyMs, 0, ' ms') : '断开');
+  setText('diag-ws-sub', wsOnline ? '最近一次主页 WS 推送' : 'WebSocket 未连接');
+}
+async function getJson(url){
+  var resp = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
+  var data = await resp.json().catch(function(){ return {}; });
+  if(authExpired(resp, data)){
+    redirectLogin(data);
+    throw new Error('login required');
+  }
+  if(!resp.ok || data.ok === false) throw new Error((data && data.error) ? data.error : ('HTTP ' + resp.status));
+  return data;
+}
+function renderSummary(data){
+  data = data || {};
+  var host = data.host || {};
+  var parser = data.parser || {};
+  var queueText = fmt(parser.queue_size, 0, '') + ' / ' + fmt(parser.queue_max, 0, '');
+  if(parser.queue_usage_pct != null && isFinite(Number(parser.queue_usage_pct))) queueText += ' (' + fmt(parser.queue_usage_pct, 1, '%') + ')';
+  setText('diag-queue', queueText);
+  setText('diag-queue-sub', [
+    parser.queue_high_water != null ? ('高水位 ' + fmt(parser.queue_high_water, 0, '')) : '',
+    parser.workers != null ? ('线程 ' + fmt(parser.workers, 0, '')) : '',
+    parser.dropped != null ? ('丢包 ' + fmt(parser.dropped, 0, '')) : ''
+  ].filter(Boolean).join(' | ') || '-');
+  setText('diag-parse', fmt(parser.avg_parse_ms, 3, ' ms'));
+  setText('diag-parse-sub', [
+    parser.last_parse_ms != null ? ('本次 ' + fmt(parser.last_parse_ms, 3, ' ms')) : '',
+    parser.max_parse_ms != null ? ('最大 ' + fmt(parser.max_parse_ms, 3, ' ms')) : ''
+  ].filter(Boolean).join(' | ') || '-');
+  setText('diag-cpu', [
+    host.cpu_count != null ? fmt(host.cpu_count, 0, ' 核') : '',
+    host.cpu_percent != null ? ('占用 ' + fmt(host.cpu_percent, 1, '%')) : ''
+  ].filter(Boolean).join(' | ') || '-');
+  setText('diag-cpu-sub', '当前主机 CPU 信息');
+  setText('diag-load', [
+    host.load1 != null ? ('1m ' + fmt(host.load1, 2, '')) : '',
+    host.load5 != null ? ('5m ' + fmt(host.load5, 2, '')) : '',
+    host.load15 != null ? ('15m ' + fmt(host.load15, 2, '')) : ''
+  ].filter(Boolean).join(' | ') || '-');
+  setText('diag-load-sub', host.load_percent != null ? ('负载折算 ' + fmt(host.load_percent, 1, '%')) : '-');
+  setStatus('已刷新。', false);
+}
+function schedulePoll(){
+  if(pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(refreshSummary, 2000);
+}
+async function refreshSummary(){
+  try{
+    renderSummary(await getJson('/api/diagnostics/summary'));
+  }catch(e){
+    setStatus((e && e.message) ? e.message : String(e || 'failed'), true);
+  }finally{
+    schedulePoll();
+  }
+}
+function connectWs(){
+  if(wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if(ws){ try{ ws.close(); }catch(_e){} ws = null; }
+  var wsProto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
+  ws = new WebSocket(wsProto + location.host + '/ws');
+  ws.onopen = function(){ wsOnline = true; noteWsSample({}); };
+  ws.onmessage = function(ev){ try{ noteWsSample(JSON.parse(String((ev && ev.data) || '{}'))); }catch(_e){} };
+  ws.onerror = function(){ try{ ws.close(); }catch(_e){} };
+  ws.onclose = function(){
+    wsOnline = false;
+    noteWsSample({});
+    wsReconnectTimer = setTimeout(connectWs, 2000);
+  };
+}
+qs('btn-refresh').addEventListener('click', refreshSummary);
+qs('btn-close').addEventListener('click', function(){ window.close(); });
+window.addEventListener('beforeunload', function(){
+  if(pollTimer) clearTimeout(pollTimer);
+  if(wsReconnectTimer) clearTimeout(wsReconnectTimer);
+  if(ws){ try{ ws.close(); }catch(_e){} }
+});
+connectWs();
+refreshSummary();
 </script></body></html>"""
 
 def _build_oobe_html() -> str:
@@ -8009,7 +8512,7 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn not found"}, 404)
                     return
                 with state_lock:
-                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    src = state_table.get(sn) or history_table.get(sn) or {}
                     tracks = _sanitize_tracks(src)
                     track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
                 self._send_json({
@@ -8064,7 +8567,7 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
                 with state_lock:
-                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    src = state_table.get(sn) or history_table.get(sn) or {}
                     tracks = _sanitize_tracks(src)
                     track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
                 self._send_json({
@@ -8101,6 +8604,16 @@ def http_server_thread() -> None:
                 self.wfile.write(body)
             elif path in ("/logs", "/logs.html"):
                 body = _build_logs_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path in ("/diagnostics", "/diagnostics.html"):
+                body = _build_diagnostics_html().encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -8182,6 +8695,8 @@ def http_server_thread() -> None:
                 except Exception:
                     limit = 180
                 self._send_json(_settings_runtime_payload(limit=limit), 200)
+            elif path == "/api/diagnostics/summary":
+                self._send_json(_diagnostics_summary_payload(), 200)
             elif path == "/api/settings/metrics":
                 raw_window = str((query.get("window") or ["24h"])[0] or "24h").strip().lower()
                 if raw_window in ("12h", "12"):
@@ -8212,9 +8727,11 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn not found"}, 404)
                     return
                 with state_lock:
-                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    src = state_table.get(sn) or history_table.get(sn) or {}
                     tracks = _sanitize_tracks(src)
                     track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
+                    item["raw_packets"] = list(src.get("raw_packets", []) or [])[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:]
+                    item["raw_packets_count"] = len(list(src.get("raw_packets", []) or []))
                 self._send_json({
                     "ok": True,
                     "item": item,
@@ -8287,7 +8804,7 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
                 with state_lock:
-                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    src = state_table.get(sn) or history_table.get(sn) or {}
                     firmware_type = src.get("firmware_type")
                     tracks = _sanitize_tracks(src)
                     full_track = _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=firmware_type)
@@ -8324,7 +8841,7 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
                 with state_lock:
-                    src = history_table.get(sn) or state_table.get(sn) or {}
+                    src = state_table.get(sn) or history_table.get(sn) or {}
                     tracks = _sanitize_tracks(src)
                     track = _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type"))
                 _op_log("tools-export-track", f"sn={sn} count={len(track)}", ip=_client_ip_from_handler(self), ok=True)
@@ -8382,12 +8899,21 @@ def http_server_thread() -> None:
                         f"Sec-WebSocket-Accept: {accept}\r\n\r\n")
                 self.connection.sendall(resp.encode())
                 sock = self.connection
+                ws_mode = str((query.get("page") or ["home"])[0] or "home").strip().lower()
+                if ws_mode != "settings":
+                    ws_mode = "home"
+                client_entry = {
+                    "sock": sock,
+                    "mode": ws_mode,
+                    "next_send_at": (time.monotonic() + 5.0) if ws_mode == "settings" else 0.0,
+                }
                 with _ws_lock:
-                    _ws_clients.append(sock)
+                    _ws_clients.append(client_entry)
                 import json as _json
                 try:
+                    initial_payload = _ws_settings_runtime_payload() if ws_mode == "settings" else _state_snapshot()
                     sock.sendall(_ws_frame(
-                        _json.dumps(_state_snapshot(), ensure_ascii=False).encode()))
+                        _json.dumps(initial_payload, ensure_ascii=False).encode()))
                 except Exception:
                     pass
                 # Keep connection open and drain incoming frames until disconnect.
@@ -8412,7 +8938,7 @@ def http_server_thread() -> None:
                 except Exception:
                     pass
                 with _ws_lock:
-                    if sock in _ws_clients: _ws_clients.remove(sock)
+                    if client_entry in _ws_clients: _ws_clients.remove(client_entry)
                 try: sock.close()
                 except Exception: pass
             else:

@@ -140,7 +140,7 @@ APP_RELEASE_VERSION = "2.4.6"
 APP_HTTP_USER_AGENT = f"LightRIDScanner/{APP_RELEASE_VERSION}"
 APP_SERVER_HEADER = f"LightRID/{APP_RELEASE_VERSION}"
 BUILD_INFO_FILE = "rid_build_info.json"
-HISTORY_STORAGE_SCHEMA_VERSION = 1
+HISTORY_STORAGE_SCHEMA_VERSION = 2
 HISTORY_STORAGE_EXPORT_VERSION = 4
 HISTORY_STORAGE_UPGRADE_TARGET = "v2.4.6"
 EULA_SET_FILE = "EULA.set"
@@ -492,6 +492,15 @@ sniff_last_recover_wall: float = 0.0
 sniff_last_error: str = ""
 sniff_last_error_wall: float = 0.0
 sniff_iface_name: str = ""
+packet_parse_diag_lock = Lock()
+packet_parse_diag_state: dict[str, float | int] = {
+    "samples": 0,
+    "last_ms": 0.0,
+    "avg_ms": 0.0,
+    "max_ms": 0.0,
+    "high_water": 0,
+    "last_done_wall": 0.0,
+}
 
 # Runtime parameters (set in `main()`)
 PRINT_INTERVAL: float = DEFAULT_PRINT_INTERVAL
@@ -1260,6 +1269,41 @@ def _track_for_query(raw, query: dict | None = None, firmware_type: str | None =
         track = track[-limit:]
     return track
 
+
+def _track_display_count(raw, track_type: str = "aircraft", firmware_type: str | None = None) -> int:
+    track_kind = str(track_type or "aircraft").strip().lower() or "aircraft"
+    if isinstance(raw, dict):
+        base_track = _track_store_primary(raw, track_kind if track_kind in ("aircraft", "operator") else "aircraft")
+    else:
+        base_track = _sanitize_track(raw or [])
+    if _firmware_type_key(firmware_type) != "new":
+        return len(base_track)
+    base = _web_base_coord_pair()
+    ref_lat = base[0] if base else None
+    ref_lon = base[1] if base else None
+    count = 0
+    prev_lat = None
+    prev_lon = None
+    for p in base_track:
+        try:
+            lat = float(p.get("lat"))
+            lon = float(p.get("lon"))
+        except Exception:
+            continue
+        if _new_fw_coord_anomalous(
+            lat,
+            lon,
+            prev_lat=prev_lat,
+            prev_lon=prev_lon,
+            ref_lat=ref_lat,
+            ref_lon=ref_lon,
+        ):
+            continue
+        count += 1
+        prev_lat = lat
+        prev_lon = lon
+    return count
+
 def _history_store_default_path(config_path: str | None = None) -> str:
     base_dir = os.getcwd()
     raw_cfg = str(config_path or APP_CONFIG_PATH or "").strip()
@@ -1390,10 +1434,23 @@ def _history_storage_init(path: str | None = None) -> str:
                 firmware_type TEXT,
                 uas_id TEXT,
                 payload BLOB,
-                hex_text TEXT
+                hex_text TEXT,
+                decoded_json TEXT,
+                parse_mode TEXT,
+                parse_format TEXT
             )
             """
         )
+        cols = {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1] or "")
+            for row in conn.execute("PRAGMA table_info(raw_packets)").fetchall()
+        }
+        if "decoded_json" not in cols:
+            conn.execute("ALTER TABLE raw_packets ADD COLUMN decoded_json TEXT")
+        if "parse_mode" not in cols:
+            conn.execute("ALTER TABLE raw_packets ADD COLUMN parse_mode TEXT")
+        if "parse_format" not in cols:
+            conn.execute("ALTER TABLE raw_packets ADD COLUMN parse_format TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_packets_sn_ts ON raw_packets(sn, capture_wall_ts, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_packets_ts ON raw_packets(capture_wall_ts, id)")
         conn.execute(
@@ -1444,25 +1501,54 @@ def _history_storage_write_summary(payload: dict, path: str | None = None) -> bo
         )
     return True
 
+def _history_storage_json_dumps(value) -> str:
+    if value in (None, "", [], {}, ()):
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except Exception:
+        return ""
+
+def _history_storage_json_loads(raw) -> object | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
 def _history_storage_packet_row_to_dict(row) -> dict:
     if row is None:
         return {}
-    payload = row["payload"] if isinstance(row, sqlite3.Row) else row[6]
-    hex_text = row["hex_text"] if isinstance(row, sqlite3.Row) else row[7]
+    payload = row["payload"] if isinstance(row, sqlite3.Row) else row[7]
+    hex_text = row["hex_text"] if isinstance(row, sqlite3.Row) else row[8]
     raw_hex = ""
     if isinstance(payload, (bytes, bytearray)) and payload:
         raw_hex = bytes(payload).hex()
     elif hex_text not in (None, ""):
         raw_hex = str(hex_text)
-    ts_text = row["capture_time_text"] if isinstance(row, sqlite3.Row) else row[2]
-    capture_wall_ts = row["capture_wall_ts"] if isinstance(row, sqlite3.Row) else row[1]
-    return {
+    ts_text = row["capture_time_text"] if isinstance(row, sqlite3.Row) else row[3]
+    capture_wall_ts = row["capture_wall_ts"] if isinstance(row, sqlite3.Row) else row[2]
+    item = {
+        "_db_id": int((row["id"] if isinstance(row, sqlite3.Row) else row[0]) or 0),
+        "_wall_ts": float(capture_wall_ts or 0.0),
         "ts": str(ts_text or _fmt_wall_ts(float(capture_wall_ts or 0.0))),
-        "capture_type": str((row["capture_type"] if isinstance(row, sqlite3.Row) else row[3]) or ""),
-        "firmware_type": str((row["firmware_type"] if isinstance(row, sqlite3.Row) else row[4]) or ""),
-        "uas_id": str((row["uas_id"] if isinstance(row, sqlite3.Row) else row[5]) or ""),
+        "capture_type": str((row["capture_type"] if isinstance(row, sqlite3.Row) else row[4]) or ""),
+        "firmware_type": str((row["firmware_type"] if isinstance(row, sqlite3.Row) else row[5]) or ""),
+        "uas_id": str((row["uas_id"] if isinstance(row, sqlite3.Row) else row[6]) or ""),
         "hex": raw_hex,
     }
+    parsed = _history_storage_json_loads(row["decoded_json"] if isinstance(row, sqlite3.Row) else row[9])
+    if parsed is not None:
+        item["parsed"] = parsed
+    parse_mode = str((row["parse_mode"] if isinstance(row, sqlite3.Row) else row[10]) or "").strip()
+    if parse_mode:
+        item["parse_mode"] = parse_mode
+    parse_format = str((row["parse_format"] if isinstance(row, sqlite3.Row) else row[11]) or "").strip()
+    if parse_format:
+        item["parse_format"] = parse_format
+    return item
 
 def _history_storage_fetch_raw_packets(sn: str | None = None, limit: int | None = None, *, newest_first: bool = False, path: str | None = None) -> list[dict]:
     db_path = _history_storage_init(path)
@@ -1475,7 +1561,7 @@ def _history_storage_fetch_raw_packets(sn: str | None = None, limit: int | None 
         args.append(target_sn)
     order = "ORDER BY capture_wall_ts DESC, id DESC" if newest_first else "ORDER BY capture_wall_ts ASC, id ASC"
     sql = (
-        "SELECT sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text "
+        "SELECT id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format "
         "FROM raw_packets "
         + (("WHERE " + " AND ".join(clauses) + " ") if clauses else "")
         + order
@@ -1501,11 +1587,12 @@ def _history_storage_append_raw_packet(sn: str, raw: dict, path: str | None = No
     conn = _history_db_conn(db_path)
     payload = _history_hex_text_to_bytes(raw_hex)
     capture_wall_ts = _history_parse_wall_ts_text(str(raw.get("ts") or ""), raw.get("_wall_ts"))
+    decoded_json = _history_storage_json_dumps(raw.get("parsed"))
     with history_db_lock:
         conn.execute(
             """
-            INSERT INTO raw_packets(sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO raw_packets(sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 target_sn,
@@ -1515,10 +1602,56 @@ def _history_storage_append_raw_packet(sn: str, raw: dict, path: str | None = No
                 str(raw.get("firmware_type") or ""),
                 str(raw.get("uas_id") or ""),
                 sqlite3.Binary(payload) if payload else None,
-                None if payload else raw_hex,
+                raw_hex,
+                decoded_json or None,
+                str(raw.get("parse_mode") or ""),
+                str(raw.get("parse_format") or ""),
             ),
         )
     return True
+
+def _history_storage_update_raw_packet(sn: str, raw: dict, path: str | None = None) -> bool:
+    target_sn = str(sn or raw.get("sn") or "").strip()
+    if not target_sn or not isinstance(raw, dict):
+        return False
+    raw_hex = str(raw.get("hex") or "").strip()
+    if not raw_hex:
+        return False
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    payload = _history_hex_text_to_bytes(raw_hex)
+    capture_wall_ts = _history_parse_wall_ts_text(str(raw.get("ts") or ""), raw.get("_wall_ts"))
+    decoded_json = _history_storage_json_dumps(raw.get("parsed"))
+    db_id = raw.get("_db_id")
+    updated = False
+    with history_db_lock:
+        if db_id not in (None, "", 0):
+            cur = conn.execute(
+                """
+                UPDATE raw_packets
+                SET sn = ?, capture_wall_ts = ?, capture_time_text = ?, capture_type = ?, firmware_type = ?, uas_id = ?,
+                    payload = ?, hex_text = ?, decoded_json = ?, parse_mode = ?, parse_format = ?
+                WHERE id = ?
+                """,
+                (
+                    target_sn,
+                    float(capture_wall_ts or 0.0),
+                    str(raw.get("ts") or _fmt_wall_ts(float(capture_wall_ts or 0.0))),
+                    str(raw.get("capture_type") or ""),
+                    str(raw.get("firmware_type") or ""),
+                    str(raw.get("uas_id") or ""),
+                    sqlite3.Binary(payload) if payload else None,
+                    raw_hex,
+                    decoded_json or None,
+                    str(raw.get("parse_mode") or ""),
+                    str(raw.get("parse_format") or ""),
+                    int(db_id),
+                ),
+            )
+            updated = bool(cur.rowcount)
+    if updated:
+        return True
+    return _history_storage_append_raw_packet(target_sn, raw, db_path)
 
 def _history_storage_delete_sn(sn: str, path: str | None = None) -> None:
     target_sn = str(sn or "").strip()
@@ -1568,6 +1701,78 @@ def _history_storage_notice_payload(consume: bool = False) -> dict:
         if consume:
             history_storage_pending_notice = None
     return notice
+
+
+def _packet_parse_diag_note_queue(depth: int | None = None) -> None:
+    if depth is None:
+        return
+    try:
+        depth_i = max(0, int(depth))
+    except Exception:
+        return
+    with packet_parse_diag_lock:
+        packet_parse_diag_state["high_water"] = max(int(packet_parse_diag_state.get("high_water") or 0), depth_i)
+
+
+def _packet_parse_diag_note_parse(duration_ms: float | None, queue_depth: int | None = None) -> None:
+    if queue_depth is not None:
+        _packet_parse_diag_note_queue(queue_depth)
+    if duration_ms is None:
+        return
+    try:
+        dur = max(0.0, float(duration_ms))
+    except Exception:
+        return
+    now_wall = time.time()
+    with packet_parse_diag_lock:
+        samples = int(packet_parse_diag_state.get("samples") or 0) + 1
+        prev_avg = float(packet_parse_diag_state.get("avg_ms") or 0.0)
+        packet_parse_diag_state["samples"] = samples
+        packet_parse_diag_state["last_ms"] = dur
+        packet_parse_diag_state["avg_ms"] = dur if samples <= 1 else (((prev_avg * (samples - 1)) + dur) / samples)
+        packet_parse_diag_state["max_ms"] = max(float(packet_parse_diag_state.get("max_ms") or 0.0), dur)
+        packet_parse_diag_state["last_done_wall"] = now_wall
+
+
+def _packet_parse_diag_snapshot() -> dict:
+    q = globals().get("packet_parse_queue")
+    qsize = 0
+    qmax = int(globals().get("PACKET_PARSE_QUEUE_MAX") or 0)
+    if q is not None:
+        try:
+            qsize = max(0, int(q.qsize()))
+        except Exception:
+            qsize = 0
+        if not qmax:
+            try:
+                qmax = max(0, int(q.maxsize))
+            except Exception:
+                qmax = 0
+    workers = max(0, int(globals().get("PACKET_PARSE_WORKERS") or 0))
+    drops = max(0, int(globals().get("packet_parse_drop_count") or 0))
+    with packet_parse_diag_lock:
+        state = dict(packet_parse_diag_state)
+        high_water = max(int(state.get("high_water") or 0), qsize)
+        packet_parse_diag_state["high_water"] = high_water
+    usage_pct = None
+    if qmax > 0:
+        try:
+            usage_pct = round(max(0.0, min(100.0, (float(qsize) / float(qmax)) * 100.0)), 1)
+        except Exception:
+            usage_pct = None
+    return {
+        "queue_size": qsize,
+        "queue_max": qmax,
+        "queue_usage_pct": usage_pct,
+        "queue_high_water": high_water,
+        "workers": workers,
+        "dropped": drops,
+        "samples": int(state.get("samples") or 0),
+        "last_parse_ms": round(float(state.get("last_ms") or 0.0), 3) if state.get("samples") else None,
+        "avg_parse_ms": round(float(state.get("avg_ms") or 0.0), 3) if state.get("samples") else None,
+        "max_parse_ms": round(float(state.get("max_ms") or 0.0), 3) if state.get("samples") else None,
+        "last_done_wall": float(state.get("last_done_wall") or 0.0),
+    }
 
 def _history_storage_normalize_import_item(raw: dict) -> dict:
     item = dict(raw if isinstance(raw, dict) else {})
@@ -2841,9 +3046,26 @@ def _settings_view_payload() -> dict:
         channel_effective = int(channel_raw) if channel_raw not in (None, "") else 6
     except Exception:
         channel_effective = 6
-    interfaces = _iface_options_snapshot()
+    selected_iface = None if basic.get("iface") in (None, "") else str(basic.get("iface"))
+    interfaces = []
+    seen_ifaces: set[str] = set()
+    for iface_name in (selected_iface, str(sniff_iface_name or "").strip()):
+        iface_name = str(iface_name or "").strip()
+        if not iface_name or iface_name in seen_ifaces:
+            continue
+        seen_ifaces.add(iface_name)
+        interfaces.append({
+            "name": iface_name,
+            "mode": "",
+            "is_monitor": False,
+            "is_wireless": True,
+            "admin_up": None,
+            "supports_5g": False,
+            "model": "",
+            "ipv4": [],
+        })
     host = _host_resource_snapshot()
-    host["active_iface"] = str(sniff_iface_name or basic.get("iface") or "")
+    host["active_iface"] = str(sniff_iface_name or selected_iface or "")
     host["current_channel"] = int(current_channel or channel_effective or 6)
     host["sniff_state"] = _sniff_health_meta(time.monotonic(), time.time())
     host["ifaces"] = interfaces
@@ -3303,20 +3525,9 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
         }
     notify_msg = "skip"
 
-    backup_path = ""
-    b_ok, b_msg = create_config_backup(APP_CONFIG_PATH, tag="settings")
-    if not b_ok:
-        try:
-            reload_runtime_config(prev_cfg)
-        except Exception:
-            pass
-        return {"ok": False, "error": f"backup failed: {b_msg}"}
-    backup_path = b_msg
-
     ok, msg = save_app_config(APP_CONFIG_PATH, candidate_cfg)
     if not ok:
         try:
-            restore_config_backup(APP_CONFIG_PATH, backup_path)
             reload_runtime_config(prev_cfg)
         except Exception:
             pass
@@ -3325,19 +3536,18 @@ def _save_visual_settings(body: dict | None, test_only: bool = False) -> dict:
     cfg_loaded = load_app_config(APP_CONFIG_PATH)
     r_ok, r_msg = reload_runtime_config(cfg_loaded)
     if not r_ok:
-        restore_ok, restore_msg = restore_config_backup(APP_CONFIG_PATH, backup_path)
+        restore_ok, restore_msg = save_app_config(APP_CONFIG_PATH, prev_cfg)
         try:
             reload_runtime_config(prev_cfg)
         except Exception:
             pass
         if restore_ok:
-            return {"ok": False, "error": f"reload failed: {r_msg}; rolled back from backup", "backup_path": backup_path}
-        return {"ok": False, "error": f"reload failed: {r_msg}; restore failed: {restore_msg}", "backup_path": backup_path}
+            return {"ok": False, "error": f"reload failed: {r_msg}; rolled back to previous config"}
+        return {"ok": False, "error": f"reload failed: {r_msg}; restore failed: {restore_msg}"}
 
     return {
         "ok": True,
         "saved_to": APP_CONFIG_PATH,
-        "backup_path": backup_path,
         "tested": False,
         "saved": True,
         "reloaded": bool(r_ok),

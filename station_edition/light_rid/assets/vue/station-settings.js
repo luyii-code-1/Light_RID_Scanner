@@ -29,6 +29,8 @@
   var settingsState = { visualLoaded: false, rawLoaded: false, rawUnlocked: false, rawRoot: "", rawTree: null, rawSelectedPath: "", rawSelectedRel: "", channelUseDefault: true, channelEditing: false, visualInitial: null, visualDirty: false, dirtyCards: {}, authConfigured: false, networkBindings: null, interfaceItems: [] };
   var metricsState = { window: "12h", zoom: 1, panSec: 0, hover: null, drag: null, chartMeta: {}, items: [] };
   var visualCheckboxSaveTimer = null;
+  var settingsRuntimeWs = null;
+  var settingsRuntimeWsReconnectTimer = null;
   var appUpdatePollTimer = null;
   var appUpdatePollFailures = 0;
   var appUpdateState = {};
@@ -44,10 +46,25 @@
   var COOKIE_TRACK_REALTIME = "rid_realtime_track";
   var COOKIE_TRACK_2H_ONLY = "rid_track_2h_only";
   var NEW_FIRMWARE_PARSE_KEY = "rid_new_firmware_parse_enabled";
+  var ROOT_SECURITY_IGNORE_KEY = "rid_root_security_ignore_v1";
   function on(id, type, handler) {
     var el = qs(id);
     if (el) el.addEventListener(type, handler);
     return el;
+  }
+  function rootSecurityIgnored() {
+    try {
+      return localStorage.getItem(ROOT_SECURITY_IGNORE_KEY) === "1";
+    } catch (_e) {
+      return false;
+    }
+  }
+  function setRootSecurityIgnored(on2) {
+    try {
+      if (on2) localStorage.setItem(ROOT_SECURITY_IGNORE_KEY, "1");
+      else localStorage.removeItem(ROOT_SECURITY_IGNORE_KEY);
+    } catch (_e) {
+    }
   }
   function bindAccessCollapsibles() {
     qsa(".access-subcard.collapsible > .access-subhead").forEach(function(head) {
@@ -98,6 +115,8 @@
   }
   var settingsLoadingStartedAt = 0;
   var settingsLoadingTimer = null;
+  var settingsTaskSeq = 0;
+  var settingsTasks = [];
   function settingsLoadingState(target) {
     if (!settingsLoadingStartedAt) settingsLoadingStartedAt = Date.now();
     var elapsed = Math.floor((Date.now() - settingsLoadingStartedAt) / 1e3);
@@ -187,6 +206,70 @@
         if (node.parentNode) node.parentNode.removeChild(node);
       }, 220);
     }, ttl);
+  }
+  function renderSettingsTasks() {
+    var host = qs("settings-task-stack");
+    if (!host) return;
+    host.innerHTML = settingsTasks.map(function(task) {
+      var stateClass = task.done ? "done " + (task.ok ? "ok" : "warn") : "busy";
+      return '<div class="settings-task ' + stateClass + '"><div class="settings-task-icon" aria-hidden="true"></div><div class="settings-task-copy"><div class="settings-task-title">' + enc(String(task.title || "正在处理")) + '</div><div class="settings-task-detail">' + enc(String(task.detail || "")) + "</div></div></div>";
+    }).join("");
+  }
+  function settingsTaskIndex(id) {
+    for (var i = 0; i < settingsTasks.length; i++) {
+      if (settingsTasks[i] && settingsTasks[i].id === id) return i;
+    }
+    return -1;
+  }
+  function beginSettingsTask(title, detail) {
+    var id = "task-" + ++settingsTaskSeq + "-" + Date.now();
+    settingsTasks.push({
+      id,
+      title: String(title || "正在处理"),
+      detail: String(detail || ""),
+      done: false,
+      ok: true
+    });
+    renderSettingsTasks();
+    return id;
+  }
+  function updateSettingsTask(id, patch) {
+    var idx = settingsTaskIndex(id);
+    if (idx < 0) return;
+    var next = patch && typeof patch === "object" ? patch : {};
+    settingsTasks[idx] = Object.assign({}, settingsTasks[idx], next);
+    renderSettingsTasks();
+  }
+  function finishSettingsTask(id, ok, detail, keepMs) {
+    var idx = settingsTaskIndex(id);
+    if (idx < 0) return;
+    settingsTasks[idx] = Object.assign({}, settingsTasks[idx], {
+      done: true,
+      ok: !!ok,
+      detail: String(detail || (ok ? "已完成。" : "执行失败。"))
+    });
+    renderSettingsTasks();
+    window.setTimeout(function() {
+      var nextIdx = settingsTaskIndex(id);
+      if (nextIdx < 0) return;
+      settingsTasks.splice(nextIdx, 1);
+      renderSettingsTasks();
+    }, Math.max(1400, Number(keepMs || (ok ? 1800 : 3200))));
+  }
+  async function withSettingsAsyncTask(title, detail, fn) {
+    var taskId = beginSettingsTask(title, detail);
+    try {
+      var result = await fn({
+        update: function(nextDetail) {
+          updateSettingsTask(taskId, { detail: String(nextDetail || detail || "") });
+        }
+      });
+      finishSettingsTask(taskId, true, String(detail || title || "操作") + "已完成。");
+      return result;
+    } catch (e) {
+      finishSettingsTask(taskId, false, e && e.message ? e.message : e);
+      throw e;
+    }
   }
   function apiUrl(url) {
     try {
@@ -704,6 +787,7 @@
     var iw = data.iw || {};
     var wirelessToolsMissing = !iw.available || !iw.hostapd_available;
     var sec = data.security || {};
+    var rootIgnored = rootSecurityIgnored();
     var lines = [];
     if (data.supported) {
       if (data.registered && data.unit_matches === false) lines.push("当前服务文件和本页生成的启动参数不一致，可点“注册/更新服务”修正。");
@@ -716,7 +800,13 @@
     if (iw.message && wirelessToolsMissing) lines.push(String(iw.message));
     if (iw.manual_hint && wirelessToolsMissing) lines.push(String(iw.manual_hint));
     if (data.last_error) lines.push("状态读取失败：" + String(data.last_error));
-    var securityWarn = !!(data.running_as_root || data.registered && !data.service_uses_dedicated_user || !data.dedicated_user_exists);
+    if (rootIgnored) {
+      lines = lines.filter(function(line) {
+        var text = String(line || "");
+        return text.indexOf("root") < 0 && text.indexOf("rid") < 0;
+      });
+    }
+    var securityWarn = !rootIgnored && !!(data.running_as_root || data.registered && !data.service_uses_dedicated_user || !data.dedicated_user_exists);
     setStatus("status-system-service", lines.join("\n") || "-", wirelessToolsMissing || !!data.supported && securityWarn);
     renderRuntimeSecurityAlert(data, sec);
     var regBtn = qs("btn-service-register");
@@ -733,6 +823,15 @@
     sec = sec || data.security || {};
     var runningRoot = !!(data.running_as_root || sec.running_as_root);
     var serviceOk = !!data.service_uses_dedicated_user && !!data.dedicated_user_exists;
+    var ignoreBtn = qs("btn-security-ignore");
+    if (!runningRoot && serviceOk) setRootSecurityIgnored(false);
+    if (ignoreBtn) ignoreBtn.style.display = runningRoot || !serviceOk ? "" : "none";
+    if ((runningRoot || !serviceOk) && rootSecurityIgnored()) {
+      box.classList.remove("show");
+      box.style.display = "none";
+      return;
+    }
+    box.style.display = "";
     box.classList.add("show");
     box.classList.toggle("warn", runningRoot || !serviceOk);
     box.classList.toggle("ok", !runningRoot && serviceOk);
@@ -841,7 +940,7 @@
       }
     }
   }
-  function renderSettingsRuntime(data) {
+  function renderSettingsApSnapshot(data) {
     data = data || {};
     var apRoot = qs("settings-ap-list");
     if (apRoot) {
@@ -858,6 +957,10 @@
         }).join("") + "</div>";
       }
     }
+    setStatus("status-runtime", "AP " + String((data.aps || []).length || 0) + "/" + String(data.aps_total || 0), false);
+  }
+  function renderSettingsRuntimeLog(data) {
+    data = data || {};
     var log = qs("settings-runtime-log");
     if (log) {
       var lines = [];
@@ -869,7 +972,11 @@
       if (Array.isArray(data.scan_logs) && data.scan_logs.length) lines = lines.concat(lines.length ? ["", "[SCAN]"] : ["[SCAN]"], data.scan_logs);
       log.value = lines.join("\n");
     }
-    setStatus("status-runtime", "AP " + String((data.aps || []).length || 0) + "/" + String(data.aps_total || 0), false);
+  }
+  function renderSettingsRuntime(data) {
+    data = data || {};
+    renderSettingsApSnapshot(data);
+    renderSettingsRuntimeLog(data);
     if (data.metrics && Array.isArray(data.metrics.items)) {
       metricsState.items = data.metrics.items;
       drawMetricsChart();
@@ -878,6 +985,41 @@
   async function loadRuntimePanel() {
     const data = await getJson("/api/settings/runtime?limit=220");
     renderSettingsRuntime(data);
+  }
+  function connectSettingsRuntimeWs() {
+    if (settingsRuntimeWsReconnectTimer) {
+      clearTimeout(settingsRuntimeWsReconnectTimer);
+      settingsRuntimeWsReconnectTimer = null;
+    }
+    if (settingsRuntimeWs) {
+      try {
+        settingsRuntimeWs.close();
+      } catch (_e) {
+      }
+      settingsRuntimeWs = null;
+    }
+    var wsProto = location.protocol === "https:" ? "wss://" : "ws://";
+    settingsRuntimeWs = new WebSocket(wsProto + location.host + "/ws?page=settings");
+    settingsRuntimeWs.onmessage = function(ev) {
+      try {
+        var data = JSON.parse(String(ev && ev.data || "{}"));
+        if (data && data.kind === "settings_runtime") {
+          renderSettingsApSnapshot(data);
+        }
+      } catch (_e) {
+      }
+    };
+    settingsRuntimeWs.onerror = function() {
+      try {
+        settingsRuntimeWs.close();
+      } catch (_e) {
+      }
+    };
+    settingsRuntimeWs.onclose = function() {
+      settingsRuntimeWs = null;
+      if (settingsRuntimeWsReconnectTimer) clearTimeout(settingsRuntimeWsReconnectTimer);
+      settingsRuntimeWsReconnectTimer = setTimeout(connectSettingsRuntimeWs, 2e3);
+    };
   }
   function metricWindowSec() {
     if (metricsState.window === "7d") return 7 * 86400;
@@ -1281,7 +1423,9 @@
     try {
       if (btn) btn.disabled = true;
       if (qs("model-update-state")) qs("model-update-state").textContent = "正在更新识别库...";
-      const data = await postJson("/api/settings/models/update", { url: v("cfg-model-update-url") });
+      const data = await withSettingsAsyncTask("识别库更新", "正在更新识别库...", function() {
+        return postJson("/api/settings/models/update", { url: v("cfg-model-update-url") });
+      });
       if (qs("model-update-state")) qs("model-update-state").textContent = data.message || "识别库已更新。";
       showNotice(data.message || "识别库已更新。", "ok", 3e3);
       await loadVisual();
@@ -1379,7 +1523,9 @@
     try {
       if (btn) btn.disabled = true;
       renderAppUpdateState({ running: true });
-      const data = await postJson("/api/settings/app-update/check", {});
+      const data = await withSettingsAsyncTask("版本检查", "正在检查新版本...", function() {
+        return postJson("/api/settings/app-update/check", {});
+      });
       renderAppUpdateState(data && data.state || {});
       showNotice(data && data.state && data.state.update_available ? "发现新版本，请手动更新。" : "版本检查完成。", "ok", 3e3);
     } catch (e) {
@@ -1393,7 +1539,9 @@
     try {
       if (btn) btn.disabled = true;
       setStatus("status-visual", "正在启动后台下载任务...", false);
-      const data = await postJson("/api/settings/app-update/download", {});
+      const data = await withSettingsAsyncTask("更新下载", "正在启动后台下载任务...", function() {
+        return postJson("/api/settings/app-update/download", {});
+      });
       renderAppUpdateState(data && data.state || {});
       setStatus("status-visual", data && data.message || "安装包后台下载已开始。", false);
       showNotice(data && data.message || "安装包后台下载已开始。", "ok", 3200);
@@ -1448,7 +1596,9 @@
     var maxUploadBytes = Number(appUpdateState && appUpdateState.max_upload_bytes || 0);
     if (maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) throw new Error("安装包过大，当前上限为 " + formatBytes(maxUploadBytes) + "。");
     if (qs("app-update-upload-prepare-state")) qs("app-update-upload-prepare-state").textContent = "正在按当前架构匹配 Release 资产并读取 SHA256...";
-    var data = await postJson("/api/settings/app-update/upload/prepare", { file_name: String(file.name || "package.bin"), file_size: Number(file.size || 0) });
+    var data = await withSettingsAsyncTask("更新上传预检", "正在匹配架构与校验信息...", function() {
+      return postJson("/api/settings/app-update/upload/prepare", { file_name: String(file.name || "package.bin"), file_size: Number(file.size || 0) });
+    });
     appUpdateUploadMeta = Object.assign({}, data && data.prepare || {});
     renderAppUpdateState(data && data.state || appUpdateState);
     renderAppUpdateUploadModal();
@@ -1466,14 +1616,16 @@
       }
       setStatus("status-visual", "正在上传并校验安装包 SHA256...", false);
       if (qs("app-update-upload-prepare-state")) qs("app-update-upload-prepare-state").textContent = "正在上传文件并校验 SHA256，请不要关闭页面...";
-      const rsp = await requestJson("/api/settings/app-update/upload", {
-        method: "POST",
-        headers: pageHeaders({
-          "Content-Type": "application/octet-stream",
-          "X-LightRID-Upload-Name": encodeURIComponent(String(file.name || "package.bin")),
-          "X-LightRID-Upload-Token": String(appUpdateUploadMeta && appUpdateUploadMeta.token || "")
-        }),
-        body: file
+      const rsp = await withSettingsAsyncTask("更新上传", "正在上传并校验安装包...", function() {
+        return requestJson("/api/settings/app-update/upload", {
+          method: "POST",
+          headers: pageHeaders({
+            "Content-Type": "application/octet-stream",
+            "X-LightRID-Upload-Name": encodeURIComponent(String(file.name || "package.bin")),
+            "X-LightRID-Upload-Token": String(appUpdateUploadMeta && appUpdateUploadMeta.token || "")
+          }),
+          body: file
+        });
       });
       if (!rsp.response.ok || rsp.data.ok === false) {
         var err = new Error(rsp.data && rsp.data.error || "HTTP " + rsp.response.status);
@@ -1505,16 +1657,20 @@
       if (btn) btn.disabled = true;
       setStatus("status-visual", "正在准备安装已校验安装包...", false);
       renderAppUpdateState(Object.assign({}, appUpdateState, { installing: true, install_status: "preparing" }));
-      var rsp = await requestJson("/api/settings/app-update/start", {
-        method: "POST",
-        headers: pageHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ confirm: true })
+      var rsp = await withSettingsAsyncTask("更新安装", "正在启动更新进程...", function() {
+        return requestJson("/api/settings/app-update/start", {
+          method: "POST",
+          headers: pageHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ confirm: true })
+        });
       });
       var data = rsp.data || {};
       if (!rsp.response.ok || data.ok === false) {
         if (rsp.response.status === 403 && data.need_sudo) {
           var body = await privilegedBody({ confirm: true }, "安装已校验安装包需要停止/启动 systemd 并替换已安装文件。请输入 sudo 密码；密码只用于本次更新，不会保存。");
-          data = await postJson("/api/settings/app-update/start", body);
+          data = await withSettingsAsyncTask("更新安装", "正在提交 sudo 授权并安装...", function() {
+            return postJson("/api/settings/app-update/start", body);
+          });
         } else {
           var err = new Error(data && data.error || "HTTP " + rsp.response.status);
           err.state = data && data.state;
@@ -1731,6 +1887,43 @@
     var current = collectVisualPayload();
     return mergeCheckboxValues(base, current);
   }
+  function mergeNonCheckboxValues(base, current) {
+    if (typeof base === "boolean") return base;
+    if (Array.isArray(base) || Array.isArray(current)) {
+      var baseArr = Array.isArray(base) ? base : [];
+      var curArr = Array.isArray(current) ? current : [];
+      var out = [];
+      var maxLen = Math.max(baseArr.length, curArr.length);
+      for (var idx = 0; idx < maxLen; idx += 1) {
+        if (idx >= curArr.length) {
+          out.push(cloneJson(baseArr[idx]));
+        } else if (idx >= baseArr.length) {
+          out.push(cloneJson(curArr[idx]));
+        } else {
+          out.push(mergeNonCheckboxValues(baseArr[idx], curArr[idx]));
+        }
+      }
+      return out;
+    }
+    if (base && typeof base === "object") {
+      var outObj = cloneJson(base);
+      var curObj = current && typeof current === "object" ? current : {};
+      Object.keys(curObj).forEach(function(key) {
+        if (Object.prototype.hasOwnProperty.call(outObj, key)) {
+          outObj[key] = mergeNonCheckboxValues(outObj[key], curObj[key]);
+        } else {
+          outObj[key] = cloneJson(curObj[key]);
+        }
+      });
+      return outObj;
+    }
+    return current;
+  }
+  function collectVisualDraftPayload() {
+    var base = settingsState.visualInitial ? cloneJson(settingsState.visualInitial) : collectVisualPayload();
+    var current = collectVisualPayload();
+    return mergeNonCheckboxValues(base, current);
+  }
   function visualPayloadSections(payload) {
     payload = payload || {};
     return {
@@ -1782,7 +1975,7 @@
   }
   function updateVisualDraftState() {
     if (!settingsState.visualLoaded || !settingsState.visualInitial) return;
-    var current = collectVisualPayload();
+    var current = collectVisualDraftPayload();
     var initialSections = visualPayloadSections(settingsState.visualInitial);
     var currentSections = visualPayloadSections(current);
     setDraftUi({
@@ -1820,7 +2013,9 @@
       try {
         setVisualActionBusy(true);
         setStatus("status-visual", "正在保存勾选项...", false);
-        await saveVisual({ auto: true, checkboxOnly: true });
+        await withSettingsAsyncTask("勾选项保存", "正在保存勾选项...", function() {
+          return saveVisual({ auto: true, checkboxOnly: true });
+        });
       } catch (e) {
         setStatus("status-visual", e.message || e, true);
         showNotice(e.message || e, "warn", 3800);
@@ -2778,7 +2973,9 @@
       var btn = qs("btn-diagnostic-export");
       try {
         if (btn) btn.disabled = true;
-        await downloadQualityReport();
+        await withSettingsAsyncTask("诊断导出", "正在生成质量分析包...", function() {
+          return downloadQualityReport();
+        });
       } catch (e) {
         setStatus("status-visual", "质量分析包导出失败: " + (e.message || e), true);
         showNotice(e.message || e, "warn", 4200);
@@ -2787,17 +2984,17 @@
       }
     });
     on("btn-refresh-host", "click", function() {
-      withSettingsPageLoading("Station 设置", "正在读取设置", function() {
+      withSettingsAsyncTask("设置读取", "正在读取设置...", function() {
         return guarded(loadVisual, "status-visual");
       });
     });
     on("btn-refresh-runtime", "click", function() {
-      withSettingsPageLoading("运行数据", "正在读取运行状态", function() {
+      withSettingsAsyncTask("运行数据", "正在读取运行状态...", function() {
         return guarded(loadRuntimePanel, "status-runtime", "运行数据已刷新。", 1800, 3600);
       });
     });
     on("btn-reload-view", "click", function() {
-      withSettingsPageLoading("Station 设置", "正在读取设置", function() {
+      withSettingsAsyncTask("设置重载", "正在重新读取设置...", function() {
         return guarded(loadVisual, "status-visual", "设置已重新读取。", 2200);
       });
     });
@@ -2896,7 +3093,7 @@
   }
   function bindDataTransferActions() {
     on("btn-export-settings-file", "click", function() {
-      withSettingsPageLoading("设置文件", "正在导出设置文件", function() {
+      withSettingsAsyncTask("设置文件导出", "正在导出设置文件...", function() {
         return guarded(exportSettingsFile, "status-data-transfer", "设置文件已导出。", 2200, 3600);
       });
     });
@@ -2906,14 +3103,14 @@
     on("import-settings-file", "change", function(ev) {
       var file = ev && ev.target && ev.target.files && ev.target.files[0] ? ev.target.files[0] : null;
       if (!file) return;
-      withSettingsPageLoading("设置文件", "正在导入设置文件", function() {
+      withSettingsAsyncTask("设置文件导入", "正在导入设置文件...", function() {
         return guarded(function() {
           return importSettingsFileFromFile(file);
         }, "status-data-transfer", "", 0, 4200);
       });
     });
     on("btn-export-scan-data", "click", function() {
-      withSettingsPageLoading("扫描数据", "正在导出扫描数据", function() {
+      withSettingsAsyncTask("扫描数据导出", "正在导出扫描数据...", function() {
         return guarded(exportScanDataFile, "status-data-transfer", "扫描数据已导出。", 2200, 3600);
       });
     });
@@ -2923,14 +3120,14 @@
     on("import-scan-data-file", "change", function(ev) {
       var file = ev && ev.target && ev.target.files && ev.target.files[0] ? ev.target.files[0] : null;
       if (!file) return;
-      withSettingsPageLoading("扫描数据", "正在导入扫描数据", function() {
+      withSettingsAsyncTask("扫描数据导入", "正在导入扫描数据...", function() {
         return guarded(function() {
           return importScanDataFileFromFile(file);
         }, "status-data-transfer", "", 0, 4200);
       });
     });
     on("btn-reidentify-recent-history", "click", function() {
-      withSettingsPageLoading("历史包识别", "正在识别所有飞机近100包", function() {
+      withSettingsAsyncTask("历史包重解析", "正在识别所有飞机近100包...", function() {
         return guarded(reidentifyRecentHistoryPackets, "status-data-transfer", "所有飞机近100个存储包已识别。", 2400, 5200);
       });
     });
@@ -2943,20 +3140,22 @@
   }
   function bindCaptureActions() {
     on("btn-network-bind-refresh", "click", function() {
-      withSettingsPageLoading("网卡绑定", "正在扫描网卡", function() {
+      withSettingsAsyncTask("网卡扫描", "正在扫描网卡...", function() {
         return guarded(refreshNetworkBindings, "status-network-bind", "网卡列表已刷新。", 1800, 3600);
       });
     });
     on("btn-network-bind-save", "click", saveNetworkBindingsToDraft);
     on("btn-network-bind-apply", "click", function() {
-      withSettingsPageLoading("网卡绑定", "正在应用网卡绑定", function() {
+      withSettingsAsyncTask("网卡绑定应用", "正在应用网卡绑定...", function() {
         return guarded(applyNetworkBindings, "status-network-bind", "网卡绑定已应用。", 2600, 5200);
       });
     });
     on("network-bind-module", "toggle", function() {
       var host = qs("network-bind-module");
       if (host && host.open) {
-        withSettingsPageLoading("网卡绑定", "正在扫描网卡", refreshNetworkBindings).catch(function(e) {
+        withSettingsAsyncTask("网卡扫描", "正在扫描网卡...", function() {
+          return refreshNetworkBindings();
+        }).catch(function(e) {
           setStatus("status-network-bind", e.message || e, true);
         });
       }
@@ -3090,12 +3289,18 @@
   }
   function bindSystemServiceActions() {
     on("btn-service-refresh", "click", function() {
-      withSettingsPageLoading("systemd 服务", "正在读取服务状态", function() {
+      withSettingsAsyncTask("服务状态", "正在读取服务状态...", function() {
         return guarded(loadSystemServiceStatus, "status-system-service", "服务状态已刷新。", 1800, 3600);
       });
     });
     on("btn-service-register", "click", registerSystemdServiceFromSettings);
     on("btn-iw-install", "click", installIwFromSettings);
+    on("btn-security-ignore", "click", function() {
+      setRootSecurityIgnored(true);
+      renderRuntimeSecurityAlert(lastSystemServiceStatus || {}, lastSystemServiceStatus && lastSystemServiceStatus.security || {});
+      renderSystemServiceStatus(lastSystemServiceStatus || {});
+      showNotice("root 运行告警已手动忽略。", "ok", 2600);
+    });
     on("btn-security-repair", "click", repairRuntimeSecurityFromSettings);
     on("btn-elevate-cancel", "click", function() {
       closeElevate(null);
@@ -3115,17 +3320,17 @@
   }
   function bindRawActions() {
     on("btn-load-raw", "click", function() {
-      withSettingsPageLoading("原始配置", "正在读取原始配置", function() {
+      withSettingsAsyncTask("原始配置读取", "正在读取原始配置...", function() {
         return guarded(loadRaw, "status-raw", "原始配置已读取。", 2200);
       });
     });
     on("btn-save-raw", "click", function() {
-      withSettingsPageLoading("原始配置", "正在保存原始配置", function() {
+      withSettingsAsyncTask("原始配置保存", "正在保存原始配置...", function() {
         return guarded(saveRaw, "status-raw", "原始配置已保存。", 2600);
       });
     });
     on("btn-delete-raw", "click", function() {
-      withSettingsPageLoading("原始配置", "正在删除原始配置文件", function() {
+      withSettingsAsyncTask("原始配置删除", "正在删除原始配置文件...", function() {
         return guarded(deleteRawFile, "status-raw", "原始配置文件已删除。", 2600);
       });
     });
@@ -3143,7 +3348,7 @@
       settingsState.rawSelectedPath = path;
       settingsState.rawSelectedRel = btn.getAttribute("data-rel") || "";
       rawRefreshButtons();
-      withSettingsPageLoading("原始配置", "正在切换配置文件", function() {
+      withSettingsAsyncTask("原始配置切换", "正在切换配置文件...", function() {
         return guarded(function() {
           return rawLoadFile(path);
         }, "status-raw", "已切换配置文件。", 1800);
@@ -3153,40 +3358,40 @@
   function bindSaveActions() {
     on("btn-test-visual", "click", async function() {
       try {
-        showSettingsPageLoading("当前配置", "正在测试当前配置");
         setVisualActionBusy(true);
-        await testVisual();
+        await withSettingsAsyncTask("配置测试", "正在测试当前配置...", function() {
+          return testVisual();
+        });
       } catch (e) {
         setStatus("status-visual", e.message || e, true);
         showNotice(e.message || e, "warn", 3800);
       } finally {
-        hideSettingsPageLoading();
         setVisualActionBusy(false);
       }
     });
     on("btn-save-visual", "click", async function() {
       try {
-        showSettingsPageLoading("当前配置", "正在保存设置");
         setVisualActionBusy(true);
-        await saveVisual();
+        await withSettingsAsyncTask("配置保存", "正在保存设置...", function() {
+          return saveVisual();
+        });
       } catch (e) {
         setStatus("status-visual", e.message || e, true);
         showNotice(e.message || e, "warn", 3800);
       } finally {
-        hideSettingsPageLoading();
         setVisualActionBusy(false);
       }
     });
     on("btn-save-visual-direct", "click", async function() {
       try {
-        showSettingsPageLoading("当前配置", "正在保存设置");
         setVisualActionBusy(true);
-        await saveVisual();
+        await withSettingsAsyncTask("配置保存", "正在保存设置...", function() {
+          return saveVisual();
+        });
       } catch (e) {
         setStatus("status-visual", e.message || e, true);
         showNotice(e.message || e, "warn", 3800);
       } finally {
-        hideSettingsPageLoading();
         setVisualActionBusy(false);
       }
     });
@@ -3253,21 +3458,16 @@
     loadBrowserPrefs();
     withSettingsPageLoading("Station 设置", "正在读取设置", async function() {
       await loadVisual();
-      await refreshNetworkBindings().catch(function(e) {
-        setStatus("status-network-bind", e.message || e, true);
-      });
     }).catch(function(e) {
       setStatus("status-visual", e.message || e, true);
       showNotice(e.message || e, "warn", 3800);
     });
-    window.setInterval(function() {
-      loadRuntimePanel().catch(function() {
+    window.setTimeout(function() {
+      refreshNetworkBindings().catch(function(e) {
+        setStatus("status-network-bind", e.message || e, true);
       });
-    }, 2e3);
-    window.setInterval(function() {
-      loadMetrics().catch(function() {
-      });
-    }, 2e3);
+    }, 0);
+    connectSettingsRuntimeWs();
   }
   initializeSettingsPage();
 })();

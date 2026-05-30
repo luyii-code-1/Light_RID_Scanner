@@ -105,6 +105,19 @@ def raw_packet_string_to_bytes(raw_packet: str | bytes | bytearray) -> bytes:
         return b""
 
 
+def _rid_identifier_text(value, *, min_len: int = 4, max_len: int = 64) -> str:
+    try:
+        text = str(value or "").strip()
+    except Exception:
+        return ""
+    if not text or text.count("?") > len(text) // 2:
+        return ""
+    text = "".join(ch for ch in text if 32 <= ord(ch) <= 126).strip()
+    if len(text) < min_len or len(text) > max_len:
+        return ""
+    return text if re.fullmatch(r"[A-Za-z0-9]+", text) else ""
+
+
 def decode_basic_id(msg25: bytes) -> dict | None:
     if len(msg25) < ODID_MSG_SIZE:
         return None
@@ -119,10 +132,8 @@ def decode_basic_id(msg25: bytes) -> dict | None:
             text = raw.decode("ascii", errors="replace").strip()
         except Exception:
             return None
-        if not text or text.count("?") > len(text) // 2:
-            return None
-        text = "".join(ch if 32 <= ord(ch) <= 126 else "" for ch in text)
-        if len(text) < 4:
+        text = _rid_identifier_text(text, min_len=4, max_len=20)
+        if not text:
             return None
         return {"uas_id": text, "id_type": UA_ID_TYPE.get(id_type, f"Unk{id_type}")}
     except Exception:
@@ -383,10 +394,8 @@ def _rid_ascii(raw: bytes) -> str:
 
 
 def _new_fw_ssid_rid(ssid_sn: str | None) -> str:
-    text = str(ssid_sn or "").strip()
-    if len(text) != RID_NEW_FW_SN_LEN:
-        return ""
-    return text if re.fullmatch(r"[A-Za-z0-9]{20}", text) else ""
+    text = _rid_identifier_text(ssid_sn, min_len=RID_NEW_FW_SN_LEN, max_len=RID_NEW_FW_SN_LEN)
+    return text if len(text) == RID_NEW_FW_SN_LEN else ""
 
 
 def _dji_vendor_ssid_matches(sn: str | None, ssid_sn: str | None) -> bool:
@@ -1053,8 +1062,8 @@ def _gb46750_standard_packet_result(
     if content_pos < len(content):
         merged_warnings.append(f"GB46750 data content has {len(content) - content_pos} undecoded byte(s)")
 
-    sn = str(items.get(1, {}).get("value") or "").strip()
-    uas_id = str(items.get(2, {}).get("value") or "").strip()
+    sn = _rid_identifier_text(items.get(1, {}).get("value"), min_len=4, max_len=RID_NEW_FW_SN_LEN)
+    uas_id = _rid_identifier_text(items.get(2, {}).get("value"), min_len=4, max_len=20)
 
     if sn and not _dji_vendor_ssid_matches(sn, ssid_sn):
         merged_warnings.append("SSID RID does not match GB unique product ID")
@@ -1181,7 +1190,7 @@ def _parse_gb_vendor(vendor: bytes, ssid_sn: str | None = None) -> dict:
         )
 
     if _rid_vendor_is_odid_like_gb(vendor):
-        sn = _rid_ascii(vendor[10:30])
+        sn = _rid_identifier_text(_rid_ascii(vendor[10:30]), min_len=4, max_len=RID_NEW_FW_SN_LEN)
         warnings: list[str] = []
         if sn and not _dji_vendor_ssid_matches(sn, ssid_sn):
             warnings.append("SSID RID does not match GB SN")

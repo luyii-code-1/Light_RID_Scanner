@@ -44,6 +44,7 @@ jobs:
         with:
           token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -70,10 +71,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
           python pytools/build_release.py \
             --edition "${{ matrix.edition }}" \
             --target "${{ matrix.target }}" \
-            --release-tag "${{ env.RELEASE_TAG }}"
+            --release-tag "${{ env.RELEASE_TAG }}" \
+            --build-commit "${BUILD_COMMIT}"
           file "release/${{ matrix.edition }}/${{ matrix.target }}"/*
 
       - name: Prepare artifact
@@ -132,6 +135,7 @@ jobs:
         with:
           token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
 
       - name: Show runner info
         shell: bash
@@ -145,7 +149,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
           docker run --rm --platform linux/386 \
+            -e RELEASE_TAG="${{ env.RELEASE_TAG }}" \
+            -e BUILD_COMMIT="${BUILD_COMMIT}" \
             -v "$PWD:/work" \
             -w /work \
             python:3.12-bookworm \
@@ -155,7 +162,7 @@ jobs:
               python -c "import os, platform, struct; print(\"python_bits =\", struct.calcsize(\"P\") * 8); print(\"platform_machine =\", platform.machine()); print(\"uname_machine =\", os.uname().machine)"
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
-              python pytools/build_release.py --edition "${{ matrix.edition }}" --target x32 --release-tag "${{ env.RELEASE_TAG }}"
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target x32 --release-tag "$RELEASE_TAG" --build-commit "$BUILD_COMMIT"
               file "release/${{ matrix.edition }}/x32"/*'
 
       - name: Prepare artifact
@@ -214,6 +221,7 @@ jobs:
         with:
           token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -232,7 +240,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
           docker run --rm --platform linux/arm/v7 \
+            -e RELEASE_TAG="${{ env.RELEASE_TAG }}" \
+            -e BUILD_COMMIT="${BUILD_COMMIT}" \
             -v "$PWD:/work" \
             -w /work \
             arm32v7/python:3.12-bookworm \
@@ -242,7 +253,7 @@ jobs:
               python -c "import os, platform, struct; print(\"python_bits =\", struct.calcsize(\"P\") * 8); print(\"platform_machine =\", platform.machine()); print(\"uname_machine =\", os.uname().machine)"
               python -m pip install --upgrade pip
               pip install pyinstaller -r requirements.txt
-              python pytools/build_release.py --edition "${{ matrix.edition }}" --target armv7 --release-tag "${{ env.RELEASE_TAG }}"
+              python pytools/build_release.py --edition "${{ matrix.edition }}" --target armv7 --release-tag "$RELEASE_TAG" --build-commit "$BUILD_COMMIT"
               file "release/${{ matrix.edition }}/armv7"/*'
 
       - name: Prepare artifact

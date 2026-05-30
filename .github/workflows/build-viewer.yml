@@ -50,6 +50,7 @@ jobs:
         with:
           token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -75,7 +76,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          python pytools/build_viewer.py --target "${{ matrix.target }}"
+          BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
+          python pytools/build_viewer.py --target "${{ matrix.target }}" --release-tag "${{ env.RELEASE_TAG }}" --build-commit "${BUILD_COMMIT}"
 
       - name: Prepare artifact
         shell: bash
@@ -122,6 +124,7 @@ jobs:
         with:
           token: ${{ env.CI_REPO_TOKEN }}
           ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
 
       - name: Show runner info
         shell: bash
@@ -134,7 +137,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
           docker run --rm --platform linux/386 \
+            -e RELEASE_TAG="${{ env.RELEASE_TAG }}" \
+            -e BUILD_COMMIT="${BUILD_COMMIT}" \
             -v "$PWD:/work" \
             -w /work \
             python:3.12-bookworm \
@@ -143,7 +149,7 @@ jobs:
               apt-get install -y --no-install-recommends file
               python -m pip install --upgrade pip
               pip install pyinstaller
-              python pytools/build_viewer.py --target x32
+              python pytools/build_viewer.py --target x32 --release-tag "$RELEASE_TAG" --build-commit "$BUILD_COMMIT"
               file "release/viewer/x32"/*'
 
       - name: Prepare artifact

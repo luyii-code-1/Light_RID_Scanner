@@ -1,4 +1,111 @@
+PACKET_PARSE_QUEUE_MAX = 4096
+PACKET_PARSE_WORKERS = max(2, min(4, int(os.cpu_count() or 2)))
+packet_parse_queue = queue.Queue(maxsize=PACKET_PARSE_QUEUE_MAX)
+packet_parse_drop_count = 0
+packet_parse_worker_started = False
+RID_PARSE_FORMATS = {"GB46750_2025", "DJI_OLD_ODID"}
+RID_PARSE_SN_RE = re.compile(r"^[A-Za-z0-9]{4,64}$")
+
+
+def _rid_parser_sn_valid(value) -> bool:
+    try:
+        text = str(value or "").strip()
+    except Exception:
+        return False
+    return bool(text and RID_PARSE_SN_RE.fullmatch(text))
+
+
+def _rid_parser_has_coord(decoded: dict | None) -> bool:
+    if not isinstance(decoded, dict):
+        return False
+    loc = decoded.get("location") if isinstance(decoded.get("location"), dict) else None
+    if loc and _coord_pair_valid(loc.get("lat"), loc.get("lon")):
+        return True
+    sys_loc = decoded.get("system") if isinstance(decoded.get("system"), dict) else None
+    if sys_loc and _coord_pair_valid(sys_loc.get("pilot_lat"), sys_loc.get("pilot_lon")):
+        return True
+    meta = decoded.get("metadata") if isinstance(decoded.get("metadata"), dict) else {}
+    for key in ("operator_positions", "raw_coords"):
+        for item in list(meta.get(key) or []):
+            if not isinstance(item, dict):
+                continue
+            if _coord_pair_valid(item.get("lat"), item.get("lon")):
+                return True
+    return False
+
+
+def _rid_parser_hint(pkt_bytes: bytes, ssid_rid: str | None, payloads: list[bytes], gb_payloads: list) -> bool:
+    if ssid_rid:
+        return True
+    if gb_payloads or payloads:
+        return True
+    raw = bytes(pkt_bytes or b"")
+    return (DJI_RID_VENDOR_PREFIX in raw) or (ODID_OUI in raw)
+
+
+def _packet_clone_for_parse(pkt):
+    try:
+        return pkt.copy()
+    except Exception:
+        return pkt
+
+
+def _packet_parse_drop_one() -> bool:
+    try:
+        packet_parse_queue.get_nowait()
+        return True
+    except queue.Empty:
+        return False
+
+
+def _enqueue_packet_for_parse(pkt) -> None:
+    global packet_parse_drop_count
+    item = _packet_clone_for_parse(pkt)
+    while True:
+        try:
+            packet_parse_queue.put_nowait(item)
+            _packet_parse_diag_note_queue(packet_parse_queue.qsize())
+            return
+        except queue.Full:
+            dropped = _packet_parse_drop_one()
+            if not dropped:
+                return
+            packet_parse_drop_count += 1
+            if packet_parse_drop_count == 1 or (packet_parse_drop_count % 50) == 0:
+                _log(
+                    f"[WARN] packet parse queue full, dropped {packet_parse_drop_count} frame(s); "
+                    f"queue={packet_parse_queue.qsize()}/{PACKET_PARSE_QUEUE_MAX}"
+                )
+
+
+def _packet_parse_worker_loop() -> None:
+    while True:
+        pkt = packet_parse_queue.get()
+        started_at = time.perf_counter()
+        queue_depth = packet_parse_queue.qsize()
+        try:
+            _parse_frame_impl(pkt)
+        except Exception as ex:
+            if DEBUG_MODE:
+                _scan(f"[ERR] parse worker: {ex}")
+        finally:
+            _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=queue_depth)
+
+
+def start_packet_parse_worker() -> None:
+    global packet_parse_worker_started
+    if packet_parse_worker_started:
+        return
+    packet_parse_worker_started = True
+    for _ in range(PACKET_PARSE_WORKERS):
+        Thread(target=_packet_parse_worker_loop, daemon=True).start()
+
+
 def parse_frame(pkt) -> None:
+    _enqueue_packet_for_parse(pkt)
+
+
+def _parse_frame_impl(pkt) -> None:
     global ap_seq
     try:
         if not pkt.haslayer(Dot11): return
@@ -90,11 +197,74 @@ def parse_frame(pkt) -> None:
             _scan(f"[FRAME] {subtype_name} src={src_mac} {rssi_s} {ch_s}{ssid_s}{odid_s}")
 
         is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
+        pkt_bytes = b""
+        try:
+            pkt_bytes = bytes(pkt)
+        except Exception:
+            pkt_bytes = b""
+        rid_parser_hint = _rid_parser_hint(pkt_bytes, ssid_rid, payloads, gb_payloads)
+        if not rid_parser_hint:
+            payloads = []
+            gb_payloads = []
         frame_hex = ""
         try:
-            frame_hex = _hex_preview(bytes(pkt), max_bytes=220)
+            frame_hex = _hex_preview(pkt_bytes, max_bytes=220)
         except Exception:
             frame_hex = ""
+        parsed_packets = []
+        if rid_parser_hint:
+            try:
+                parsed_batch = parse_rid_payloads(
+                    pkt_bytes,
+                    mode="auto",
+                    ssid_sn=(ssid_rid or None),
+                    model_hint=None,
+                )
+                parsed_packets = list(parsed_batch.get("packets") or []) if parsed_batch.get("ok") else []
+            except Exception:
+                parsed_packets = []
+
+        if parsed_packets:
+            _notify_hit(ch if not ch_assumed or ch == current_channel else 0)
+            for parsed in parsed_packets:
+                if not isinstance(parsed, dict):
+                    continue
+                decoded = parsed.get("decoded") if isinstance(parsed.get("decoded"), dict) else rid_parse_result_to_decoded(parsed)
+                if not isinstance(decoded, dict):
+                    continue
+                fmt = str(parsed.get("format") or "")
+                sn = str(parsed.get("sn") or ((decoded.get("basic_id") or {}).get("uas_id") or "")).strip()
+                if fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(sn) or not _rid_parser_has_coord(decoded):
+                    continue
+                body_hex = str(parsed.get("body_hex") or "")
+                try:
+                    body_bytes = bytes.fromhex(body_hex) if body_hex else bytes(pkt)
+                except Exception:
+                    body_bytes = bytes(pkt)
+                sig = zlib.crc32(body_bytes) & 0xFFFFFFFF
+                state_update(
+                    src_mac,
+                    decoded,
+                    rssi=rssi,
+                    ch=ch,
+                    ch_assumed=ch_assumed,
+                    pl_sig=sig,
+                    scan_type=("phone" if is_wifi_fast else "rid"),
+                    ssid=ssid,
+                    capture_type=subtype_name,
+                    raw_pkt_hex=(body_hex or frame_hex),
+                    firmware_type=("new" if fmt == "GB46750_2025" else "old"),
+                )
+                if DEBUG_MODE:
+                    b = decoded.get("basic_id")
+                    l = decoded.get("location")
+                    s = decoded.get("system")
+                    if b: _scan(f"  -> Parsed BasicID: {b}")
+                    if l and l.get("lat") is not None and l.get("lon") is not None:
+                        _scan(f"  -> Parsed Location: lat={l.get('lat'):.5f} lon={l.get('lon'):.5f}")
+                    if s and s.get("pilot_lat") is not None and s.get("pilot_lon") is not None:
+                        _scan(f"  -> Parsed System: lat={s.get('pilot_lat'):.5f} lon={s.get('pilot_lon'):.5f}")
+            return
 
         if not payloads and not gb_payloads:
             # Even without ODID payload, if SSID contains RID SN, still refresh last_seen_ts.
@@ -138,6 +308,15 @@ def parse_frame(pkt) -> None:
                         "location": decoded.get("location"),
                         "system": decoded.get("system"),
                     }
+                if not is_wifi_fast:
+                    decoded["metadata"] = {
+                        "format": "DJI_OLD_ODID",
+                        "rid_format": "DJI_OLD_ODID",
+                        "dji_rid_kind": "DJI_OLD_ODID",
+                    }
+                    legacy_sn = str(((decoded.get("basic_id") or {}).get("uas_id")) or ssid_rid or mac_to_basic.get(src_mac, {}).get("basic", {}).get("uas_id") or "").strip()
+                    if not _rid_parser_sn_valid(legacy_sn) or not _rid_parser_has_coord(decoded):
+                        continue
                 state_update(src_mac, decoded, rssi=rssi, ch=ch,
                              ch_assumed=ch_assumed, pl_sig=sig,
                              scan_type=("phone" if is_wifi_fast else "rid"),
@@ -154,6 +333,11 @@ def parse_frame(pkt) -> None:
                     if s: _scan(f"  -> System(pilot): lat={s.get('pilot_lat')} lon={s.get('pilot_lon')} type={s.get('pilot_loc_type_text')}")
         for body, decoded in gb_payloads:
             if not body or not decoded:
+                continue
+            meta = decoded.get("metadata") if isinstance(decoded.get("metadata"), dict) else {}
+            gb_sn = str(((decoded.get("basic_id") or {}).get("uas_id")) or ssid_rid or "").strip()
+            gb_fmt = str(meta.get("format") or meta.get("rid_format") or "")
+            if gb_fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(gb_sn) or not _rid_parser_has_coord(decoded):
                 continue
             sig = _gb_payload_sig(body)
             state_update(src_mac, decoded, rssi=rssi, ch=ch,
@@ -724,6 +908,7 @@ def main() -> None:
     Thread(target=http_server_thread, daemon=True).start()
     Thread(target=history_persist_loop, daemon=True).start()
     Thread(target=host_metrics_loop, daemon=True).start()
+    start_packet_parse_worker()
     start_hw_worker()
     start_notify_worker()
     start_model_update_worker()

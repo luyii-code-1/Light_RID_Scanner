@@ -171,6 +171,17 @@ class RidParserRoleTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["tracks"]["1581FANLC258U029RTN6"]["aircraft"]), 2)
         self.assertGreaterEqual(len(result["tracks"]["1581FANLC258U029RTN6"]["operator"]), 2)
 
+    def test_invalid_basic_id_serial_is_rejected(self):
+        payload = bytearray(25)
+        payload[0] = 0x00
+        payload[1] = 0x01
+        payload[2:6] = b".HP:"
+
+        result = parse_rid_payload(bytes(payload), "dji_old_odid")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["format"], "UNKNOWN")
+
     def test_track_store_dedups_same_packet_hash(self):
         store = self.common_ns["_empty_track_store"]()
         append = self.common_ns["_track_store_append_sample"]
@@ -250,6 +261,60 @@ class RidParserRoleTests(unittest.TestCase):
         self.assertIn("var hasLegacyTrack = Array.isArray(payload.track);", source)
         self.assertIn("var hasDualTrack = Array.isArray(payload.aircraft) || Array.isArray(payload.operator);", source)
         self.assertIn("trackCache[payload.sn] = normalizeTrackCacheEntry(payload.tracks || payload);", source)
+
+    def test_state_update_requires_valid_format_sn_and_coord_for_new_rid_target(self):
+        state_table = self.process_ns["state_table"]
+        history_table = self.process_ns["history_table"]
+        mac_to_basic = self.process_ns["mac_to_basic"]
+        mac_to_ssid_sn = self.process_ns["mac_to_ssid_sn"]
+        state_update = self.process_ns["state_update"]
+
+        state_table.clear()
+        history_table.clear()
+        mac_to_basic.clear()
+        mac_to_ssid_sn.clear()
+
+        state_update(
+            "aa:bb:cc:dd:ee:ff",
+            {
+                "basic_id": {"uas_id": "1581F8DBW25B800B3417", "id_type": "Serial"},
+                "location": None,
+                "system": None,
+                "metadata": {"format": "DJI_OLD_ODID", "rid_format": "DJI_OLD_ODID"},
+            },
+            rssi=-42,
+            ch=6,
+            ch_assumed=False,
+            pl_sig=123,
+            scan_type="rid",
+            ssid="RID-1581F8DBW25B800B3417",
+            capture_type="Beacon",
+            raw_pkt_hex="00",
+            firmware_type="old",
+        )
+
+        self.assertNotIn("1581F8DBW25B800B3417", state_table)
+
+        state_update(
+            "aa:bb:cc:dd:ee:11",
+            {
+                "basic_id": {"uas_id": ".HP:", "id_type": "Serial"},
+                "location": {"lat": 30.0, "lon": 121.0, "alt_geodetic": 20.0},
+                "system": None,
+                "metadata": {"format": "DJI_OLD_ODID", "rid_format": "DJI_OLD_ODID"},
+            },
+            rssi=-41,
+            ch=6,
+            ch_assumed=False,
+            pl_sig=124,
+            scan_type="rid",
+            ssid="RID-1581F8DBW25B800B3417",
+            capture_type="Beacon",
+            raw_pkt_hex="00",
+            firmware_type="old",
+        )
+
+        self.assertEqual({}, state_table)
 
     def test_reidentify_history_packet_for_sn_no_longer_uses_undefined_track_points(self):
         history_table = self.process_ns["history_table"]
@@ -355,6 +420,70 @@ class RidParserRoleTests(unittest.TestCase):
                 self.assertTrue(append(store, item))
         self.assertEqual(len(store["aircraft"]), 120)
         self.assertEqual(len(store["operator"]), 120)
+
+    def test_history_touch_keeps_live_track_while_aircraft_is_online(self):
+        history_table = self.process_ns["history_table"]
+        touch = self.process_ns["_history_touch"]
+        self.process_ns["_resolve_model_name"] = lambda sn, scan_type=None, current_model=None: current_model or "N/A"
+        history_table.clear()
+        try:
+            live_entry = {
+                "sn": "RID-LIVE-1",
+                "tracks": {
+                    "aircraft": [{
+                        "track_type": "aircraft",
+                        "sample_type": "aircraft",
+                        "sn": "RID-LIVE-1",
+                        "lat": 30.1,
+                        "lon": 121.1,
+                        "timestamp_ms": 1000,
+                        "receive_time_ms": 1000,
+                    }],
+                    "operator": [],
+                    "last_aircraft": {
+                        "track_type": "aircraft",
+                        "sample_type": "aircraft",
+                        "sn": "RID-LIVE-1",
+                        "lat": 30.1,
+                        "lon": 121.1,
+                        "timestamp_ms": 1000,
+                        "receive_time_ms": 1000,
+                    },
+                    "last_operator": None,
+                },
+                "track_updated_wall_ts": 1.0,
+                "raw_packets": [],
+            }
+            touch(live_entry, 1.0, 1.0)
+            hist = history_table["RID-LIVE-1"]
+            self.assertEqual(1, len(hist["tracks"]["aircraft"]))
+            self.assertEqual(1, len(hist["track"]))
+            self.assertEqual(1.0, hist["track_updated_wall_ts"])
+        finally:
+            history_table.clear()
+
+    def test_history_storage_raw_packet_roundtrips_parsed_snapshot(self):
+        ns = common_namespace()
+        with tempfile.TemporaryDirectory(prefix="rid_raw_packet_store_") as tmpdir:
+            db_path = os.path.join(tmpdir, "rid_storage.db")
+            ns["HISTORY_STORE_PATH"] = db_path
+            ns["_history_storage_append_raw_packet"]("RID-STORE-1", {
+                "ts": "2026-01-01 00:00:00",
+                "_wall_ts": 1.0,
+                "capture_type": "Beacon",
+                "firmware_type": "new",
+                "uas_id": "RID-STORE-1",
+                "hex": "fa0bbc0d",
+                "parse_mode": "live",
+                "parse_format": "GB46750_2025",
+                "parsed": {"location": {"lat": 30.1, "lon": 121.1}},
+            }, db_path)
+            packets = ns["_history_storage_fetch_raw_packets"]("RID-STORE-1", path=db_path)
+            self.assertEqual(1, len(packets))
+            self.assertEqual("live", packets[0]["parse_mode"])
+            self.assertEqual("GB46750_2025", packets[0]["parse_format"])
+            self.assertEqual(30.1, packets[0]["parsed"]["location"]["lat"])
+            ns["_history_db_close_locked"]()
 
     def test_reidentify_preserves_longer_existing_aircraft_track_for_legacy_dji(self):
         history_table = self.process_ns["history_table"]

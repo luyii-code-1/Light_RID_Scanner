@@ -163,32 +163,65 @@ def resolve_release_tag(cli_tag: str | None = None) -> str:
     explicit = str(cli_tag or "").strip()
     if explicit:
         return explicit
-    env_tag = str(os.environ.get("RELEASE_TAG") or "").strip()
-    if env_tag:
-        return env_tag
+    for key in ("RELEASE_TAG", "GITHUB_EVENT_RELEASE_TAG_NAME"):
+        env_tag = str(os.environ.get(key) or "").strip()
+        if env_tag:
+            return env_tag
+    ref_type = str(os.environ.get("GITHUB_REF_TYPE") or "").strip().lower()
+    ref_name = str(os.environ.get("GITHUB_REF_NAME") or "").strip()
+    if ref_type == "tag" and ref_name:
+        return ref_name
+    ref = str(os.environ.get("GITHUB_REF") or "").strip()
+    if ref.startswith("refs/tags/"):
+        return ref.split("/", 2)[-1].strip()
     return exact_git_tag()
 
-def prepare_build_info(*, release_tag: str = "") -> None:
+def resolve_build_commit(cli_commit: str | None = None) -> str:
+    explicit = str(cli_commit or "").strip()
+    if explicit:
+        return explicit
+    for key in ("BUILD_COMMIT", "GITHUB_SHA"):
+        env_commit = str(os.environ.get(key) or "").strip()
+        if env_commit:
+            return env_commit
+    return git_short_head()
+
+def prepare_build_info(*, release_tag: str = "", build_commit: str = "") -> None:
     prev = read_build_info()
-    commit = git_short_head()
-    tag = str(release_tag or "").strip()
+    commit = resolve_build_commit(build_commit)
+    tag = exact_git_tag()
+    release_tag_value = str(release_tag or "").strip()
     try:
         prev_build = int(prev.get("build") or 0)
     except Exception:
         prev_build = 0
-    build = prev_build + 1 if str(prev.get("commit") or "").strip() == commit else 1
+    prev_release_tag = str(prev.get("release_tag") or "").strip()
+    same_commit = str(prev.get("commit") or "").strip() == commit
+    same_release_tag = prev_release_tag == release_tag_value
+    build = prev_build + 1 if (same_commit and same_release_tag) else 1
     payload = {
         "commit": commit,
         "tag": tag,
+        "release_tag": release_tag_value,
         "build": build,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "dirty": git_dirty(),
     }
     BUILD_INFO_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"build version: commit:{commit}#{build} tag:{tag or '-'}")
+    print(
+        f"build version: commit:{commit}#{build} "
+        f"source_tag:{tag or '-'} release_tag:{release_tag_value or '-'}"
+    )
 
 
-def build_binary(edition: str, target: str, *, clean: bool = True, release_tag: str = "") -> Path:
+def build_binary(
+    edition: str,
+    target: str,
+    *,
+    clean: bool = True,
+    release_tag: str = "",
+    build_commit: str = "",
+) -> Path:
     validate_target_runtime(target)
 
     entry = EDITION_ENTRYPOINTS[edition]
@@ -207,7 +240,7 @@ def build_binary(edition: str, target: str, *, clean: bool = True, release_tag: 
         shutil.rmtree(work_dir, ignore_errors=True)
 
     dist_dir.mkdir(parents=True, exist_ok=True)
-    prepare_build_info(release_tag=release_tag)
+    prepare_build_info(release_tag=release_tag, build_commit=build_commit)
 
     env = dict(os.environ)
     env["LIGHT_RID_EDITION"] = edition
@@ -293,6 +326,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pi-config", default=str(ROOT / "tools" / "pi.local.json"))
     p.add_argument("--no-restart", action="store_true")
     p.add_argument("--release-tag", default="", help="release tag to embed into rid_build_info.json")
+    p.add_argument("--build-commit", default="", help="commit id to embed into rid_build_info.json")
     return p.parse_args()
 
 
@@ -300,8 +334,15 @@ def main() -> int:
     args = parse_args()
     target = TARGET_ALIASES.get(args.target, args.target)
     release_tag = resolve_release_tag(args.release_tag)
+    build_commit = resolve_build_commit(args.build_commit)
 
-    artifact = build_binary(args.edition, target, clean=not args.no_clean, release_tag=release_tag)
+    artifact = build_binary(
+        args.edition,
+        target,
+        clean=not args.no_clean,
+        release_tag=release_tag,
+        build_commit=build_commit,
+    )
     print(f"artifact: {artifact}")
 
     if args.sync_pi:

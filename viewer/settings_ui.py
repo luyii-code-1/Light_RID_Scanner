@@ -26,6 +26,10 @@ def build_settings_page() -> str:
 .viewer-settings-root .card{border-radius:22px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
 .viewer-settings-root .status{white-space:pre-line}
 .viewer-settings-root .stat-card{border-radius:18px;background:color-mix(in srgb,var(--surface-tonal, #17283d) 72%,var(--card))}
+body.theme-dark .viewer-settings-root .topbar,
+body.theme-dark .viewer-settings-root .draft-bar,
+body.theme-dark .viewer-settings-root .card{background:color-mix(in srgb,var(--card) 96%,#08111d)}
+body.theme-dark .viewer-settings-root .stat-card{background:color-mix(in srgb,var(--surface-tonal, #12253b) 76%,var(--card))}
 body.theme-light .viewer-settings-root .topbar{box-shadow:0 10px 28px rgba(15,23,42,.08)}
 body.theme-light .viewer-settings-root .draft-bar{box-shadow:0 8px 24px rgba(15,23,42,.06)}
 body.theme-light .viewer-settings-root .card{box-shadow:0 8px 24px rgba(15,23,42,.08)}

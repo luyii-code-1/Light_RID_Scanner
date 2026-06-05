@@ -512,17 +512,81 @@ async function requestJson(url, opts){
   return {response:r, data:d};
 }
 async function reidentifyRecentHistoryPackets(){
-  setStatus('status-data-transfer', '正在重新识别所有飞机最近保存的 100 个数据包...', false);
+  setStatus('status-data-transfer', '正在将最近历史包按 128 条一批加入重解析队列...', false);
   var data = await postJson('/api/settings/history/reidentify-recent', {limit:100});
-  var msg = '历史包批量识别完成。飞机 ' + Number(data.updated_aircraft || 0) + '/' + Number(data.aircraft_count || 0)
-    + '，数据包 ' + Number(data.decoded || 0) + '/' + Number(data.packet_count || 0);
+  var state = historyReidentifyWorkflowState(data);
+  setStatus('status-data-transfer', historyReidentifyWorkflowText(state), false);
+  state = await waitHistoryReidentifyWorkflow(state);
+  var msg = '历史包重解析完成。飞机 ' + Number(state.updated_aircraft || 0) + '/' + Number(state.aircraft_total || 0)
+    + '，数据包 ' + Number(state.decoded || 0) + '/' + Number(state.total || 0);
   var extra = [];
-  if(Number(data.migrated || 0) > 0) extra.push('SN迁移 ' + Number(data.migrated || 0));
-  if(Number(data.skipped || 0) > 0) extra.push('跳过 ' + Number(data.skipped || 0));
-  if(Number(data.failed || 0) > 0) extra.push('失败 ' + Number(data.failed || 0));
+  if(Number(state.migrated || 0) > 0) extra.push('SN迁移 ' + Number(state.migrated || 0));
+  if(Number(state.skipped || 0) > 0) extra.push('跳过 ' + Number(state.skipped || 0));
+  if(Number(state.failed || 0) > 0) extra.push('失败 ' + Number(state.failed || 0));
   if(extra.length) msg += '（' + extra.join('，') + '）';
   setStatus('status-data-transfer', msg, false);
-  showNotice('最近 100 个历史包已重新识别。', 'ok', 3600);
+  showNotice('最近 100 个历史包已完成后台重解析。', 'ok', 3600);
+}
+function historyReidentifyWorkflowState(data){
+  var workflow = (data && data.workflow && typeof data.workflow === 'object') ? data.workflow : data;
+  return (workflow && typeof workflow === 'object') ? workflow : {};
+}
+function historyReidentifyWorkflowDone(state){
+  state = historyReidentifyWorkflowState(state);
+  return !state.running && (state.status === 'completed' || state.status === 'failed');
+}
+function historyReidentifyWorkflowText(state){
+  state = historyReidentifyWorkflowState(state);
+  var total = Number(state.total || 0);
+  var completed = Number(state.completed || 0);
+  var pending = Number(state.pending || Math.max(0, total - completed) || 0);
+  var queueDepth = Number(state.queue_depth != null ? state.queue_depth : pending);
+  var batchSize = Number(state.batch_size || 128);
+  var activeBatch = Number(state.active_batch || 0);
+  var batchTotal = Number(state.batches_total || 0);
+  var rate = Number(state.rate_per_sec || 0);
+  var parts = [];
+  if(total > 0){
+    parts.push('已处理 ' + completed + '/' + total);
+  }
+  if(batchTotal > 0){
+    parts.push('批次 ' + activeBatch + '/' + batchTotal + '（' + batchSize + '/批）');
+  }
+  parts.push('队列剩余 ' + pending);
+  parts.push('解析队列 ' + queueDepth);
+  if(queueDepth !== pending) parts.push('总剩余 ' + pending);
+  if(rate > 0){
+    parts.push('速度 ' + rate.toFixed(2) + ' 包/秒');
+  }
+  if(state.status === 'failed'){
+    return '历史包重解析失败：' + String(state.last_error || state.message || '未知错误');
+  }
+  if(state.status === 'completed'){
+    return '历史包重解析已完成。' + (parts.length ? ' ' + parts.join(' | ') : '');
+  }
+  return '历史包后台重解析中。' + (parts.length ? ' ' + parts.join(' | ') : '');
+}
+function historyReidentifyWait(ms){
+  return new Promise(function(resolve){ window.setTimeout(resolve, Math.max(120, Number(ms || 800))); });
+}
+async function historyReidentifyStatus(){
+  return await getJson('/api/settings/history/reidentify-status');
+}
+async function waitHistoryReidentifyWorkflow(initialState){
+  var state = historyReidentifyWorkflowState(initialState);
+  for(var i = 0; i < 900; i += 1){
+    if(!historyReidentifyWorkflowDone(state)){
+      await historyReidentifyWait(800);
+      state = historyReidentifyWorkflowState(await historyReidentifyStatus());
+      setStatus('status-data-transfer', historyReidentifyWorkflowText(state), state.status === 'failed');
+      continue;
+    }
+    if(state.status === 'failed'){
+      throw new Error(String(state.last_error || state.message || '历史包重解析失败'));
+    }
+    return state;
+  }
+  throw new Error('历史包重解析等待超时');
 }
 function closeElevate(value){
   var modal = qs('elevate-modal');
@@ -932,6 +996,9 @@ function renderSettingsRuntime(data){
   data = data || {};
   renderSettingsApSnapshot(data);
   renderSettingsRuntimeLog(data);
+  if(data.workflow && (data.workflow.running || data.workflow.status === 'completed' || data.workflow.status === 'failed')){
+    setStatus('status-data-transfer', historyReidentifyWorkflowText(data.workflow), data.workflow.status === 'failed');
+  }
   if(data.metrics && Array.isArray(data.metrics.items)){
     metricsState.items = data.metrics.items;
     drawMetricsChart();
@@ -957,6 +1024,9 @@ function connectSettingsRuntimeWs(){
       var data = JSON.parse(String((ev && ev.data) || '{}'));
       if(data && data.kind === 'settings_runtime'){
         renderSettingsApSnapshot(data);
+        if(data.workflow && (data.workflow.running || data.workflow.status === 'completed' || data.workflow.status === 'failed')){
+          setStatus('status-data-transfer', historyReidentifyWorkflowText(data.workflow), data.workflow.status === 'failed');
+        }
       }
     }catch(_e){}
   };
@@ -1964,12 +2034,29 @@ function openReauth(action){
   qs('reauth-user').value = '';
   qs('reauth-pass').value = '';
   setStatus('reauth-status', '二次验证使用网页登录账号和密码。', false);
+  setReauthBusy(false);
   qs('reauth-modal').classList.add('show');
   window.setTimeout(function(){ try{ qs('reauth-user').focus(); }catch(_e){} }, 30);
 }
 function closeReauth(){
   reauthAction = null;
+  setReauthBusy(false);
   qs('reauth-modal').classList.remove('show');
+}
+function setReauthBusy(busy, text){
+  ['btn-reauth-confirm','btn-reauth-cancel','reauth-user','reauth-pass'].forEach(function(id){
+    var el = qs(id);
+    if(el) el.disabled = !!busy;
+  });
+  if(text) setStatus('reauth-status', text, false);
+}
+function reauthTaskLabel(action){
+  action = String(action || '');
+  if(action === 'login-link') return {title:'SSO 登录链接', detail:'正在验证账号密码并生成登录链接...'};
+  if(action === 'api-token-create') return {title:'API Token', detail:'正在验证账号密码并生成 Token...'};
+  if(action === 'raw-unlock') return {title:'原始配置解锁', detail:'正在验证账号密码并解锁原始配置...'};
+  if(action === 'passkey-create') return {title:'通行密钥', detail:'正在验证账号密码并登记通行密钥...'};
+  return {title:'二次验证', detail:'正在验证账号密码...'};
 }
 function showOneTimeSecret(title, secret, note){
   oneTimeSecretValue = String(secret || '');
@@ -3044,35 +3131,44 @@ async function handleLoginLinkListClick(ev){
   }
 }
 async function confirmReauthAction(){
+  var action = reauthAction || 'copy';
+  var label = reauthTaskLabel(action);
+  setReauthBusy(true, label.detail);
   try{
-    var action = reauthAction || 'copy';
-    if(action === 'login-link'){
-      await createLoginLinkWithCreds();
-      setStatus('status-visual', 'SSO 登录链接已生成，只会在弹窗里显示一次。', false);
-      showNotice('SSO 登录链接已生成。', 'ok', 2600);
-    }else if(action === 'api-token-create'){
-      await createApiTokenWithCreds();
-      setStatus('status-visual', 'API Token 已生成，只会在弹窗里显示一次。', false);
-      showNotice('API Token 已生成。', 'ok', 2600);
-    }else if(action === 'raw-unlock'){
-      var user = String(qs('reauth-user').value || '').trim();
-      var pass = String(qs('reauth-pass').value || '');
-      if(!user || !pass) throw new Error('请输入网页登录账号和密码');
-      const data = await postJson('/api/settings/raw/unlock', {username:user, password:pass});
-      if(!data.ok) throw new Error(data.error || '原始配置解锁失败');
-      settingsState.rawUnlocked = true;
-      rawSetLocked(false, '');
-      rawRefreshButtons();
-      showNotice('原始配置已解锁。', 'ok', 2600);
-      await loadRaw().catch(function(){});
-    }else if(action === 'passkey-create'){
-      await createPasskeyWithCreds();
-      if(qs('passkey-state')) qs('passkey-state').textContent = '通行密钥已添加，可直接用于网页登录。';
-    }else{
-      throw new Error('不支持的二次验证操作');
-    }
+    await withSettingsAsyncTask(label.title, label.detail, async function(task){
+      if(action === 'login-link'){
+        if(task) task.update('正在提交账号密码并生成 SSO 登录链接...');
+        await createLoginLinkWithCreds();
+        setStatus('status-visual', 'SSO 登录链接已生成，只会在弹窗里显示一次。', false);
+        showNotice('SSO 登录链接已生成。', 'ok', 2600);
+      }else if(action === 'api-token-create'){
+        if(task) task.update('正在提交账号密码并生成 API Token...');
+        await createApiTokenWithCreds();
+        setStatus('status-visual', 'API Token 已生成，只会在弹窗里显示一次。', false);
+        showNotice('API Token 已生成。', 'ok', 2600);
+      }else if(action === 'raw-unlock'){
+        var user = String(qs('reauth-user').value || '').trim();
+        var pass = String(qs('reauth-pass').value || '');
+        if(!user || !pass) throw new Error('请输入网页登录账号和密码');
+        if(task) task.update('正在验证账号密码并读取原始配置...');
+        const data = await postJson('/api/settings/raw/unlock', {username:user, password:pass});
+        if(!data.ok) throw new Error(data.error || '原始配置解锁失败');
+        settingsState.rawUnlocked = true;
+        rawSetLocked(false, '');
+        rawRefreshButtons();
+        showNotice('原始配置已解锁。', 'ok', 2600);
+        await loadRaw().catch(function(){});
+      }else if(action === 'passkey-create'){
+        if(task) task.update('正在调用浏览器通行密钥登记流程...');
+        await createPasskeyWithCreds();
+        if(qs('passkey-state')) qs('passkey-state').textContent = '通行密钥已添加，可直接用于网页登录。';
+      }else{
+        throw new Error('不支持的二次验证操作');
+      }
+    });
     closeReauth();
   }catch(e){
+    setReauthBusy(false);
     setStatus('reauth-status', e.message || e, true);
     showNotice(e.message || e, 'warn', 3600);
   }

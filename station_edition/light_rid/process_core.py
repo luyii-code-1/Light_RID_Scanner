@@ -859,14 +859,41 @@ def _history_apply_reidentified_locked(
             ("speed", "speed_ms"),
             ("vspeed", "vspeed_ms"),
             ("move_dir", "direction_deg"),
-            ("alt_relative", "alt_relative"),
-            ("alt_geoid", "alt_geoid"),
+            ("alt_relative", "relative_alt"),
+            ("alt_geoid", "alt_geodetic"),
             ("alt_baro", "alt_baro"),
         ):
             if src_key in loc:
                 record[key] = loc.get(src_key)
+        if record["firmware_type"] == "new":
+            for key, src_key in (
+                ("track_deg", "direction_deg"),
+                ("ground_speed", "speed_ms"),
+                ("vertical_speed", "vspeed_ms"),
+                ("alt_relative", "relative_alt"),
+                ("alt_geoid", "alt_geodetic"),
+                ("alt_baro", "alt_baro"),
+                ("horizontal_accuracy", "horizontal_accuracy"),
+                ("vertical_accuracy", "vertical_accuracy"),
+                ("speed_accuracy", "speed_accuracy"),
+                ("horizontal_accuracy_text", "horizontal_accuracy_text"),
+                ("vertical_accuracy_text", "vertical_accuracy_text"),
+                ("speed_accuracy_text", "speed_accuracy_text"),
+                ("timestamp_ms", "timestamp_ms"),
+                ("timestamp_accuracy", "timestamp_accuracy"),
+                ("timestamp_accuracy_text", "timestamp_accuracy_text"),
+            ):
+                if loc.get(src_key) is not None:
+                    record[key] = loc.get(src_key)
     elif record["firmware_type"] == "new":
-        for key in ("lat", "lon", "alt", "speed", "vspeed", "move_dir", "alt_relative", "alt_geoid", "alt_baro"):
+        for key in (
+            "lat", "lon", "alt", "speed", "vspeed", "move_dir",
+            "track_deg", "ground_speed", "vertical_speed",
+            "alt_relative", "alt_geoid", "alt_baro",
+            "horizontal_accuracy", "vertical_accuracy", "speed_accuracy",
+            "horizontal_accuracy_text", "vertical_accuracy_text", "speed_accuracy_text",
+            "timestamp_ms", "timestamp_accuracy", "timestamp_accuracy_text",
+        ):
             record[key] = None
     if isinstance(sys_loc, dict):
         record["pilot_lat"] = sys_loc.get("pilot_lat")
@@ -945,6 +972,14 @@ def reidentify_recent_history_packets(limit: int | None = None) -> dict:
         candidates = _history_recent_raw_packet_candidates_locked(effective_limit)
     if not candidates:
         return {"ok": False, "error": "no history raw packet"}
+    return _reidentify_recent_history_packets_sync(candidates, effective_limit)
+
+def _reidentify_recent_history_packets_sync(
+    candidates: list[dict],
+    effective_limit: int,
+    *,
+    progress_cb=None,
+) -> dict:
     decoded_count = 0
     skipped_count = 0
     failed_count = 0
@@ -953,7 +988,8 @@ def reidentify_recent_history_packets(limit: int | None = None) -> dict:
     formats: dict[str, int] = {}
     errors: list[dict] = []
     aircraft_seen = {str(item.get("sn") or "") for item in candidates if str(item.get("sn") or "")}
-    for item in candidates:
+    for index, item in enumerate(candidates, 1):
+        started_at = time.perf_counter()
         target_sn = str(item.get("sn") or "")
         hist = item.get("hist") if isinstance(item.get("hist"), dict) else {}
         raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
@@ -962,15 +998,22 @@ def reidentify_recent_history_packets(limit: int | None = None) -> dict:
             skipped_count += 1
             if len(errors) < 8:
                 errors.append({"sn": target_sn, "error": "raw packet has no usable hex"})
+            _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=max(0, len(candidates) - index))
+            if progress_cb:
+                progress_cb(index, decoded_count, skipped_count, failed_count, migrated_count, len(updated_sns), formats, errors)
             continue
         decoded, firmware_type, body, used_mode = _history_decode_raw_packet(data, hist, target_sn, "auto")
         if not decoded:
             failed_count += 1
             if len(errors) < 8:
                 errors.append({"sn": target_sn, "error": "raw packet could not be decoded"})
+            _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=max(0, len(candidates) - index))
+            if progress_cb:
+                progress_cb(index, decoded_count, skipped_count, failed_count, migrated_count, len(updated_sns), formats, errors)
             continue
         with state_lock:
             record = _history_apply_reidentified_locked(target_sn, hist, raw, decoded, firmware_type, body, used_mode=used_mode)
+        _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=max(0, len(candidates) - index))
         decoded_count += 1
         sn_now = str(record.get("sn") or target_sn)
         updated_sns.add(sn_now)
@@ -978,6 +1021,8 @@ def reidentify_recent_history_packets(limit: int | None = None) -> dict:
             migrated_count += 1
         fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or used_mode or "unknown")
         formats[fmt] = int(formats.get(fmt, 0)) + 1
+        if progress_cb:
+            progress_cb(index, decoded_count, skipped_count, failed_count, migrated_count, len(updated_sns), formats, errors)
     saved = save_history_store(force=True)
     _log(
         "[INFO] history recent packets reidentified: "
@@ -997,6 +1042,300 @@ def reidentify_recent_history_packets(limit: int | None = None) -> dict:
         "formats": formats,
         "errors": errors,
         "saved": bool(saved),
+    }
+
+def _history_reparse_queue_depth() -> int:
+    try:
+        return max(0, int(history_reparse_queue.qsize()))
+    except Exception:
+        return 0
+
+
+def _history_reparse_clear_pending_queue() -> int:
+    drained = 0
+    while True:
+        try:
+            history_reparse_queue.get_nowait()
+            drained += 1
+        except queue.Empty:
+            break
+        except Exception:
+            break
+    return drained
+
+
+def _history_reparse_task_active(task_id: str) -> bool:
+    with history_reparse_lock:
+        return bool(history_reparse_state.get("running")) and str(history_reparse_state.get("task_id") or "") == str(task_id or "")
+
+
+def _history_reparse_note_result(
+    task_id: str,
+    *,
+    index: int,
+    batch_size: int,
+    updated_sn: str = "",
+    fmt: str = "",
+    error: str = "",
+    decoded: bool = False,
+    skipped: bool = False,
+    failed: bool = False,
+    migrated: bool = False,
+) -> dict:
+    now_wall = time.time()
+    with history_reparse_runtime_lock:
+        if decoded and updated_sn:
+            history_reparse_runtime_updated_sns.add(str(updated_sn))
+        updated_aircraft = len(history_reparse_runtime_updated_sns)
+    with history_reparse_lock:
+        if (not bool(history_reparse_state.get("running"))) or str(history_reparse_state.get("task_id") or "") != str(task_id or ""):
+            return _history_reparse_workflow_snapshot()
+        total = max(0, int(history_reparse_state.get("total") or 0))
+        step = max(0, min(total, int(index or 0)))
+        history_reparse_state["completed"] = max(int(history_reparse_state.get("completed") or 0), step)
+        if decoded:
+            history_reparse_state["decoded"] = int(history_reparse_state.get("decoded") or 0) + 1
+        if skipped:
+            history_reparse_state["skipped"] = int(history_reparse_state.get("skipped") or 0) + 1
+        if failed:
+            history_reparse_state["failed"] = int(history_reparse_state.get("failed") or 0) + 1
+        if migrated:
+            history_reparse_state["migrated"] = int(history_reparse_state.get("migrated") or 0) + 1
+        history_reparse_state["updated_aircraft"] = updated_aircraft
+        if fmt:
+            formats = dict(history_reparse_state.get("formats") or {})
+            formats[str(fmt)] = int(formats.get(str(fmt)) or 0) + 1
+            history_reparse_state["formats"] = formats
+        if error:
+            errors = list(history_reparse_state.get("errors") or [])
+            if len(errors) < 8:
+                errors.append({"index": step, "error": str(error), "sn": str(updated_sn or "")})
+            history_reparse_state["errors"] = errors
+            history_reparse_state["last_error"] = str(error)
+        active_batch = int(math.ceil(float(step or 1) / float(max(1, int(batch_size or 1))))) if step > 0 else 0
+        history_reparse_state["active_batch"] = active_batch
+        history_reparse_state["active_batch_size"] = (
+            min(max(1, int(batch_size or 1)), max(0, total - ((active_batch - 1) * max(1, int(batch_size or 1)))))
+            if active_batch > 0 else 0
+        )
+        history_reparse_state["message"] = f"processing {history_reparse_state['completed']}/{total}"
+        history_reparse_state["updated_wall"] = now_wall
+    return _history_reparse_workflow_snapshot()
+
+
+def _history_reparse_finish_if_ready(task_id: str) -> bool:
+    with history_reparse_lock:
+        if (not bool(history_reparse_state.get("running"))) or str(history_reparse_state.get("task_id") or "") != str(task_id or ""):
+            return False
+        total = max(0, int(history_reparse_state.get("total") or 0))
+        completed = max(0, int(history_reparse_state.get("completed") or 0))
+        producer_done = bool(history_reparse_state.get("producer_done"))
+        batch_size = max(1, int(history_reparse_state.get("batch_size") or HISTORY_REPARSE_BATCH_SIZE))
+        decoded = max(0, int(history_reparse_state.get("decoded") or 0))
+        skipped = max(0, int(history_reparse_state.get("skipped") or 0))
+        failed = max(0, int(history_reparse_state.get("failed") or 0))
+        migrated = max(0, int(history_reparse_state.get("migrated") or 0))
+    if (not producer_done) or completed < total:
+        return False
+    with history_reparse_runtime_lock:
+        updated_aircraft = len(history_reparse_runtime_updated_sns)
+    saved = save_history_store(force=True)
+    _log(
+        "[INFO] history recent packets reidentified: "
+        f"aircraft={updated_aircraft} packets={decoded}/{total} "
+        f"skipped={skipped} failed={failed} migrated={migrated}"
+    )
+    _history_reparse_workflow_finish(
+        ok=True,
+        message="history reparse completed",
+        completed=completed,
+        decoded=decoded,
+        skipped=skipped,
+        failed=failed,
+        migrated=migrated,
+        updated_aircraft=updated_aircraft,
+        saved=bool(saved),
+        producer_done=True,
+        active_batch=int(math.ceil(float(total) / float(batch_size))) if total > 0 else 0,
+    )
+    return True
+
+
+def _history_reparse_process_item(item: dict) -> None:
+    task_id = str(item.get("task_id") or "")
+    if not task_id or not _history_reparse_task_active(task_id):
+        return
+    index = max(0, int(item.get("index") or 0))
+    batch_size = max(1, int(item.get("batch_size") or HISTORY_REPARSE_BATCH_SIZE))
+    target_sn = str(item.get("sn") or "")
+    hist = item.get("hist") if isinstance(item.get("hist"), dict) else {}
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    started_at = time.perf_counter()
+    updated_sn = target_sn
+    fmt = ""
+    err = ""
+    decoded_ok = False
+    skipped = False
+    failed = False
+    migrated = False
+    try:
+        data = _history_raw_hex_to_bytes(str(raw.get("hex") or ""))
+        if not data:
+            skipped = True
+            err = "raw packet has no usable hex"
+            return
+        decoded, firmware_type, body, used_mode = _history_decode_raw_packet(data, hist, target_sn, "auto")
+        if not decoded:
+            failed = True
+            err = "raw packet could not be decoded"
+            return
+        with state_lock:
+            record = _history_apply_reidentified_locked(target_sn, hist, raw, decoded, firmware_type, body, used_mode=used_mode)
+        decoded_ok = True
+        updated_sn = str(record.get("sn") or target_sn)
+        migrated = bool(updated_sn and updated_sn != target_sn)
+        fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or used_mode or "unknown")
+    except Exception as exc:
+        failed = True
+        err = str(exc)
+        _log(f"[WARN] history reparse item failed: {exc}")
+    finally:
+        _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=_history_reparse_queue_depth())
+        _history_reparse_note_result(
+            task_id,
+            index=index,
+            batch_size=batch_size,
+            updated_sn=updated_sn if decoded_ok else target_sn,
+            fmt=fmt,
+            error=err,
+            decoded=decoded_ok,
+            skipped=skipped,
+            failed=failed,
+            migrated=migrated,
+        )
+        _history_reparse_finish_if_ready(task_id)
+
+
+def _history_reparse_worker_loop() -> None:
+    while True:
+        item = history_reparse_queue.get()
+        try:
+            if isinstance(item, dict):
+                _history_reparse_process_item(item)
+        except Exception as exc:
+            _log(f"[WARN] history reparse worker error: {exc}")
+            task_id = str(item.get("task_id") or "") if isinstance(item, dict) else ""
+            if task_id and _history_reparse_task_active(task_id):
+                _history_reparse_workflow_finish(
+                    ok=False,
+                    message="history reparse failed",
+                    error=str(exc),
+                )
+
+
+def start_history_reparse_worker() -> None:
+    global history_reparse_worker_started
+    if history_reparse_worker_started:
+        return
+    history_reparse_worker_started = True
+    Thread(target=_history_reparse_worker_loop, daemon=True).start()
+
+
+def _recent_history_reidentify_producer(candidates: list[dict], effective_limit: int, task_id: str) -> None:
+    total = len(candidates)
+    batch_size = max(1, int(HISTORY_REPARSE_BATCH_SIZE or 128))
+    try:
+        _history_reparse_workflow_update(
+            message="queueing batches",
+            active_batch=0,
+            active_batch_size=0,
+            enqueued=0,
+            producer_done=False,
+        )
+        for batch_start in range(0, total, batch_size):
+            if not _history_reparse_task_active(task_id):
+                return
+            batch = candidates[batch_start: batch_start + batch_size]
+            active_batch = int((batch_start // batch_size) + 1)
+            _history_reparse_workflow_update(
+                active_batch=active_batch,
+                active_batch_size=len(batch),
+                message=f"queueing {min(total, batch_start + len(batch))}/{total}",
+            )
+            for offset, item in enumerate(batch, 1):
+                history_reparse_queue.put({
+                    "task_id": task_id,
+                    "index": batch_start + offset,
+                    "batch_size": batch_size,
+                    "effective_limit": effective_limit,
+                    "sn": str(item.get("sn") or ""),
+                    "hist": dict(item.get("hist") or {}) if isinstance(item.get("hist"), dict) else {},
+                    "raw": dict(item.get("raw") or {}) if isinstance(item.get("raw"), dict) else {},
+                })
+            _history_reparse_workflow_update(
+                enqueued=batch_start + len(batch),
+                active_batch=active_batch,
+                active_batch_size=len(batch),
+                message=f"queued {batch_start + len(batch)}/{total}",
+            )
+        _history_reparse_workflow_update(
+            producer_done=True,
+            message=f"queued {total}/{total}, processing",
+        )
+        _history_reparse_finish_if_ready(task_id)
+    except Exception as exc:
+        _log(f"[WARN] history reparse producer failed: {exc}")
+        if _history_reparse_task_active(task_id):
+            _history_reparse_workflow_finish(
+                ok=False,
+                message="history reparse failed",
+                error=str(exc),
+            )
+
+def start_recent_history_reidentify_workflow(limit: int | None = None) -> dict:
+    try:
+        store_limit = _track_store_points_limit()
+        effective_limit = max(1, min(int(limit or store_limit), store_limit))
+    except Exception:
+        effective_limit = _track_store_points_limit()
+    with state_lock:
+        candidates = _history_recent_raw_packet_candidates_locked(effective_limit)
+    if not candidates:
+        return {"ok": False, "error": "no history raw packet", "workflow": _history_reparse_workflow_snapshot()}
+    start_history_reparse_worker()
+    _history_reparse_clear_pending_queue()
+    with history_reparse_runtime_lock:
+        history_reparse_runtime_updated_sns.clear()
+    aircraft_total = len({str(item.get("sn") or "") for item in candidates if str(item.get("sn") or "")})
+    started, workflow = _history_reparse_workflow_start(
+        kind="history_recent",
+        title="最近历史重解析",
+        limit=effective_limit,
+        total=len(candidates),
+        aircraft_total=aircraft_total,
+        batch_size=HISTORY_REPARSE_BATCH_SIZE,
+    )
+    if not started:
+        return {
+            "ok": True,
+            "started": False,
+            "busy": True,
+            "message": str(workflow.get("message") or "history reparse already running"),
+            "workflow": workflow,
+        }
+    task_id = str(workflow.get("task_id") or "")
+    Thread(target=lambda: _recent_history_reidentify_producer(candidates, effective_limit, task_id), daemon=True).start()
+    return {
+        "ok": True,
+        "started": True,
+        "message": f"queued {len(candidates)} packets in batches of {int(HISTORY_REPARSE_BATCH_SIZE)}",
+        "workflow": _history_reparse_workflow_snapshot(),
+    }
+
+def history_reparse_workflow_status() -> dict:
+    return {
+        "ok": True,
+        "workflow": _history_reparse_workflow_snapshot(),
     }
 
 def reidentify_latest_history_packet() -> dict:
@@ -1023,6 +1362,28 @@ def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict
     if not raw_packets:
         return {"ok": False, "error": "no raw packet for aircraft", "sn": target_sn, "mode": mode_key}
 
+    workflow_task_id = ""
+    workflow_started = False
+    with history_reparse_runtime_lock:
+        history_reparse_runtime_updated_sns.clear()
+    workflow_started, workflow = _history_reparse_workflow_start(
+        kind="history_single",
+        title=f"历史重解析 {target_sn}",
+        limit=len(raw_packets),
+        total=len(raw_packets),
+        aircraft_total=1,
+        batch_size=max(1, len(raw_packets)),
+    )
+    if workflow_started:
+        workflow_task_id = str(workflow.get("task_id") or "")
+        _history_reparse_workflow_update(
+            message=f"processing {target_sn}",
+            producer_done=True,
+            enqueued=len(raw_packets),
+            active_batch=1,
+            active_batch_size=len(raw_packets),
+        )
+
     decoded_count = 0
     skipped_count = 0
     failed_count = 0
@@ -1034,17 +1395,44 @@ def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict
     record: dict | None = None
     rebuilt_tracks = _empty_track_store()
     for index, raw in enumerate(raw_packets):
+        decoded_ok = False
+        skipped_ok = False
+        failed_ok = False
+        packet_fmt = ""
+        packet_err = ""
         data = _history_raw_hex_to_bytes(str(raw.get("hex") or ""))
         if not data:
             skipped_count += 1
+            skipped_ok = True
+            packet_err = "raw packet has no usable hex"
             if len(errors) < 8:
-                errors.append({"packet_index": index, "error": "raw packet has no usable hex"})
+                errors.append({"packet_index": index, "error": packet_err})
+            if workflow_task_id:
+                _history_reparse_note_result(
+                    workflow_task_id,
+                    index=index + 1,
+                    batch_size=max(1, len(raw_packets)),
+                    updated_sn=sn_now,
+                    error=packet_err,
+                    skipped=skipped_ok,
+                )
             continue
         decoded, firmware_type, body, used_mode = _history_decode_raw_packet(data, hist_copy, sn_now, mode_key)
         if not decoded:
             failed_count += 1
+            failed_ok = True
+            packet_err = "raw packet could not be decoded with selected mode"
             if len(errors) < 8:
-                errors.append({"packet_index": index, "error": "raw packet could not be decoded with selected mode"})
+                errors.append({"packet_index": index, "error": packet_err})
+            if workflow_task_id:
+                _history_reparse_note_result(
+                    workflow_task_id,
+                    index=index + 1,
+                    batch_size=max(1, len(raw_packets)),
+                    updated_sn=sn_now,
+                    error=packet_err,
+                    failed=failed_ok,
+                )
             continue
         receive_time_ms = None
         try:
@@ -1067,13 +1455,36 @@ def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict
                 update_track=False,
             )
         decoded_count += 1
+        decoded_ok = True
         sn_now = str(record.get("sn") or sn_now)
         hist_copy = dict(record)
         fmt_item = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or used_mode or "unknown")
+        packet_fmt = fmt_item
         formats[fmt_item] = int(formats.get(fmt_item, 0)) + 1
         used_key = str(used_mode or mode_key or "auto")
         used_modes[used_key] = int(used_modes.get(used_key, 0)) + 1
+        if workflow_task_id:
+            _history_reparse_note_result(
+                workflow_task_id,
+                index=index + 1,
+                batch_size=max(1, len(raw_packets)),
+                updated_sn=sn_now,
+                fmt=packet_fmt,
+                decoded=decoded_ok,
+            )
     if not record:
+        if workflow_task_id:
+            _history_reparse_workflow_finish(
+                ok=False,
+                message="history reparse failed",
+                error="no raw packet could be decoded with selected mode",
+                completed=len(raw_packets),
+                decoded=decoded_count,
+                skipped=skipped_count,
+                failed=failed_count,
+                producer_done=True,
+                active_batch=1,
+            )
         return {
             "ok": False,
             "error": "no raw packet could be decoded with selected mode",
@@ -1084,6 +1495,7 @@ def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict
             "skipped": skipped_count,
             "failed": failed_count,
             "errors": errors,
+            "workflow": _history_reparse_workflow_snapshot(),
         }
 
     final_tracks, before_counts, rebuilt_counts, preserve_existing_longer_tracks, preserved_track_types = _history_reidentify_finalize_tracks(
@@ -1121,6 +1533,20 @@ def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict
         f"mode={mode_key} used={used_summary} decoded={decoded_count}/{len(raw_packets)} "
         f"format={fmt}"
     )
+    if workflow_task_id:
+        _history_reparse_workflow_finish(
+            ok=True,
+            message="history reparse completed",
+            completed=len(raw_packets),
+            decoded=decoded_count,
+            skipped=skipped_count,
+            failed=failed_count,
+            migrated=1 if sn_now != target_sn else 0,
+            updated_aircraft=1,
+            saved=bool(saved),
+            producer_done=True,
+            active_batch=1,
+        )
     return {
         "ok": True,
         "sn": target_sn,
@@ -1145,6 +1571,7 @@ def reidentify_history_packet_for_sn(sn: str, mode: str | None = "auto") -> dict
         "firmware_type": record.get("firmware_type"),
         "format": fmt,
         "saved": bool(saved),
+        "workflow": _history_reparse_workflow_snapshot(),
         "refresh": True,
         "message": f"reparsed {sn_now} with {mode_key}; metadata and trajectory refreshed",
     }
@@ -1580,6 +2007,7 @@ def _ws_settings_runtime_payload() -> dict:
         "aps": aps,
         "aps_seq": aps_seq,
         "aps_total": aps_total,
+        "workflow": _history_reparse_workflow_snapshot(),
     }
 
 def _ws_push_loop() -> None:
@@ -1843,6 +2271,7 @@ def _state_snapshot() -> dict:
             "alert_zone": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zone"),
             "alert_zones": _normalize_web_cfg({"web": {"alarm_zone": WEB_CFG.get("alarm_zone"), "alarm_zones": WEB_CFG.get("alarm_zones")}}).get("alarm_zones"),
             "app_update": _app_update_status_payload(consume_notice=True),
+            "workflow": _history_reparse_workflow_snapshot(),
             "settings_path": "/settings",
         },
     }
@@ -3258,6 +3687,8 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "GET", "path": "/api/logs/export?type=all|runtime|operation|scan|scan_diff|ap|system", "desc": "Built-in page log export"},
         {"method": "POST", "path": "/api/v1/history/clear", "desc": "Clear history cache"},
         {"method": "POST", "path": "/api/v1/history/delete", "desc": "Delete one history item"},
+        {"method": "GET", "path": "/api/v1/history/reidentify-status", "desc": "Background history reidentify workflow status"},
+        {"method": "POST", "path": "/api/v1/history/reidentify-recent", "desc": "Queue recent history raw packets for background reidentify"},
         {"method": "POST", "path": "/api/v1/tracks/clear", "desc": "Clear tracks"},
         {"method": "POST", "path": "/api/v1/config/reload", "desc": "Reload config file"},
     ]

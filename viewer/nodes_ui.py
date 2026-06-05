@@ -63,7 +63,7 @@ def build_nodes_page() -> str:
         <div class="section-head">
           <div>
             <h2>批量远程管理</h2>
-            <div class="section-copy">对勾选节点执行重启、更新识别库和重解析。</div>
+            <div class="section-copy">对勾选节点执行重启、更新识别库等远程维护任务。</div>
           </div>
         </div>
         <div class="row-actions" style="margin-top:14px">
@@ -71,7 +71,6 @@ def build_nodes_page() -> str:
           <button class="btn ghost" id="btn-select-online" type="button">仅在线</button>
           <button class="btn warn" id="btn-remote-restart" type="button">重启程序</button>
           <button class="btn" id="btn-remote-models" type="button">更新识别库</button>
-          <button class="btn" id="btn-remote-reparse" type="button">强制重解析</button>
         </div>
         <div id="bulk-status" class="status">-</div>
       </div>
@@ -162,6 +161,9 @@ def build_nodes_page() -> str:
 .detail-row .v{word-break:break-word;font:600 13px/1.45 var(--font-ui)}
 .node-load-chart{display:none;width:100%;height:360px;margin-top:14px;border:1px solid color-mix(in srgb,var(--border) 84%,transparent);border-radius:18px;background:color-mix(in srgb,var(--card2) 96%,transparent)}
 .node-load-chart.show{display:block}
+body.theme-dark .node-topbar,
+body.theme-dark .node-glass-card{background:color-mix(in srgb,var(--card) 96%,#08111d)}
+body.theme-dark .node-metric{background:color-mix(in srgb,var(--surface-tonal, #12253b) 76%,var(--card))}
 body.theme-light .node-topbar{box-shadow:0 10px 28px rgba(15,23,42,.08)}
 body.theme-light .node-glass-card{box-shadow:0 8px 24px rgba(15,23,42,.08);background:color-mix(in srgb,var(--card) 96%,white)}
 body.theme-light .node-sort-btn{background:color-mix(in srgb,var(--card2) 92%,white)}
@@ -397,7 +399,6 @@ async function remoteOp(op){
   if(!ids.length && state.selectedId) ids = [state.selectedId];
   if(!ids.length){ setStatus('bulk-status','请先勾选节点，或先选中一个节点。',true); return; }
   if(op === 'restart' && !confirm('确认重启 ' + ids.length + ' 个节点的主程序？')) return;
-  if(op === 'force_reparse' && !confirm('确认要求 ' + ids.length + ' 个节点强制重新解析最近存储包？')) return;
   setStatus('bulk-status', '正在执行...', false);
   var d = await post('/api/nodes/remote', {node_ids:ids, operation:op});
   var rows = d.results || [];
@@ -432,7 +433,6 @@ qs('btn-select-all').onclick = function(){ (state.nodes || []).forEach(function(
 qs('btn-select-online').onclick = function(){ (state.nodes || []).forEach(function(n){ state.checkedIds[Number(n.id || 0)] = !!n.ok; }); renderLists(); };
 qs('btn-remote-restart').onclick = function(){ remoteOp('restart').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 qs('btn-remote-models').onclick = function(){ remoteOp('update_models').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
-qs('btn-remote-reparse').onclick = function(){ remoteOp('force_reparse').catch(function(e){ setStatus('bulk-status', e.message || e, true); }); };
 applyTheme(loadTheme());
 if(window.__RID_NODE_CENTER_BRIDGE__ && typeof window.__RID_NODE_CENTER_BRIDGE__.mount === 'function'){ window.__RID_NODE_CENTER_BRIDGE__.mount(); }
 withViewerPageLoading('Viewer 节点列表', '正在读取数据', loadAll).catch(function(e){ setStatus('bulk-status', e.message || e, true); });

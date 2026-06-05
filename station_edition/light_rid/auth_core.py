@@ -210,6 +210,7 @@ def _settings_runtime_payload(limit: int = 180) -> dict:
         "aps": aps,
         "aps_seq": aps_seq,
         "aps_total": aps_total,
+        "workflow": _history_reparse_workflow_snapshot(),
         "metrics": _host_metrics_payload(24 * 3600),
         "event_logs": event_logs,
         "operation_logs": operation_logs,
@@ -223,6 +224,7 @@ def _settings_runtime_payload(limit: int = 180) -> dict:
 def _diagnostics_summary_payload() -> dict:
     host = _host_resource_snapshot()
     parser = _packet_parse_diag_snapshot()
+    workflow = _history_reparse_workflow_snapshot()
     cpu_percent = host.get("cpu_percent")
     load1 = host.get("load1")
     cpu_count = max(1, int(host.get("cpu_count") or os.cpu_count() or 1))
@@ -244,6 +246,7 @@ def _diagnostics_summary_payload() -> dict:
             "load_percent": load_percent,
         },
         "parser": parser,
+        "workflow": workflow,
     }
 
 def _logs_snapshot(log_type: str = "runtime", limit: int = 500) -> dict:

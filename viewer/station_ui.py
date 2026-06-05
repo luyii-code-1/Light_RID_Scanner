@@ -51,7 +51,6 @@ def _viewer_patch_js() -> str:
     return r"""
 (function(){
   document.body.classList.add('viewer-mode');
-  window.LIGHT_RID_DETAIL_REPARSE_API = '/api/nodes/reparse';
   var viewerThemeBound = false;
   var viewerDataLoaded = false;
   var viewerLoadingStartedAt = 0;
@@ -66,6 +65,9 @@ def _viewer_patch_js() -> str:
   function removeClosestById(id, selector){
     var node = qs(id);
     if(node && node.closest) removeNode(node.closest(selector));
+  }
+  function stripDetailReparseUi(){
+    Array.prototype.slice.call(document.querySelectorAll('.detail-reparse-box')).forEach(removeNode);
   }
   function patchTitle(){
     try{ document.title = 'Light RID Node Center'; }catch(_e){}
@@ -102,6 +104,10 @@ def _viewer_patch_js() -> str:
     });
   }
   function patchViewerFunctions(){
+    if(typeof window.detailReparseControls === 'function' && !window.detailReparseControls.__viewerDisabled){
+      window.detailReparseControls = function(){ return ''; };
+      window.detailReparseControls.__viewerDisabled = true;
+    }
     if(typeof window.buildInfoHtml === 'function' && !window.buildInfoHtml.__viewerPatched){
       var oldInfo = window.buildInfoHtml;
       window.buildInfoHtml = function(e){
@@ -249,6 +255,7 @@ def _viewer_patch_js() -> str:
     ['btn-freeze','btn-web-notify','btn-clear-history','btn-adv-open','btn-hw-assistant','btn-logs','adv-modal','notify-center-button','notify-center-panel'].forEach(removeId);
     removeClosestById('ap-list', '.panel');
     removeClosestById('ap-list-count', '.panel');
+    stripDetailReparseUi();
     var settings = qs('btn-settings');
     if(settings && settings.getAttribute('data-viewer-bound') !== '1'){
       settings.setAttribute('data-viewer-bound','1');
@@ -292,6 +299,7 @@ def build_station_viewer_page() -> str:
     viewer_css = """
 .viewer-base-label{margin:8px 0 6px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:color-mix(in srgb,var(--blue) 8%,var(--panel2));color:var(--txt);font:600 12px/1.35 var(--font-ui);white-space:normal;word-break:break-word}
 body.theme-light .viewer-base-label{background:color-mix(in srgb,var(--blue) 7%,var(--panel2))}
+.viewer-mode .detail-reparse-box{display:none !important}
 .viewer-loading-state{color:var(--dim);font-weight:650}
 .banner-stack{top:74px;width:auto;max-width:calc(100vw - 28px);align-items:center}
 .banner{width:min(420px,calc(100vw - 32px));min-height:78px;border-radius:var(--radius-lg)}

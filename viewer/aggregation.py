@@ -499,7 +499,7 @@ def run_node_operation(node: dict[str, Any], operation: str) -> dict[str, Any]:
         return post_node_json(node, "/api/admin/restart", {"save": False, "args": ""})
     if op == "update_models":
         return post_node_json(node, "/api/settings/models/update", {"url": ""})
-    if op in {"reidentify_recent", "force_reparse"}:
+    if op == "reidentify_recent":
         return post_node_json(node, "/api/v1/history/reidentify-recent", {"limit": 100})
     return {"ok": False, "error": f"unsupported operation: {operation}"}
 

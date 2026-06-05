@@ -484,6 +484,11 @@ restart_pending = False
 hw_worker_lock = Lock()
 hw_worker_started = False
 hw_task_queue: "queue.Queue[dict]" = queue.Queue(maxsize=128)
+HISTORY_REPARSE_QUEUE_MAX = 65536
+history_reparse_queue: "queue.Queue[dict]" = queue.Queue(maxsize=HISTORY_REPARSE_QUEUE_MAX)
+history_reparse_runtime_lock = Lock()
+history_reparse_runtime_updated_sns: set[str] = set()
+history_reparse_worker_started = False
 
 sniff_health_lock = Lock()
 sniff_last_pkt_mono: float = 0.0
@@ -500,6 +505,38 @@ packet_parse_diag_state: dict[str, float | int] = {
     "max_ms": 0.0,
     "high_water": 0,
     "last_done_wall": 0.0,
+}
+HISTORY_REPARSE_BATCH_SIZE = 128
+history_reparse_lock = Lock()
+history_reparse_state: dict[str, object] = {
+    "task_id": "",
+    "kind": "",
+    "title": "",
+    "status": "idle",
+    "running": False,
+    "limit": 0,
+    "total": 0,
+    "completed": 0,
+    "decoded": 0,
+    "skipped": 0,
+    "failed": 0,
+    "migrated": 0,
+    "saved": False,
+    "aircraft_total": 0,
+    "updated_aircraft": 0,
+    "enqueued": 0,
+    "producer_done": False,
+    "batch_size": HISTORY_REPARSE_BATCH_SIZE,
+    "batches_total": 0,
+    "active_batch": 0,
+    "active_batch_size": 0,
+    "message": "",
+    "last_error": "",
+    "started_wall": 0.0,
+    "updated_wall": 0.0,
+    "finished_wall": 0.0,
+    "formats": {},
+    "errors": [],
 }
 
 # Runtime parameters (set in `main()`)
@@ -1736,8 +1773,11 @@ def _packet_parse_diag_note_parse(duration_ms: float | None, queue_depth: int | 
 
 def _packet_parse_diag_snapshot() -> dict:
     q = globals().get("packet_parse_queue")
+    rq = globals().get("history_reparse_queue")
     qsize = 0
     qmax = int(globals().get("PACKET_PARSE_QUEUE_MAX") or 0)
+    reparse_qsize = 0
+    reparse_qmax = int(globals().get("HISTORY_REPARSE_QUEUE_MAX") or 0)
     if q is not None:
         try:
             qsize = max(0, int(q.qsize()))
@@ -1748,6 +1788,16 @@ def _packet_parse_diag_snapshot() -> dict:
                 qmax = max(0, int(q.maxsize))
             except Exception:
                 qmax = 0
+    if rq is not None:
+        try:
+            reparse_qsize = max(0, int(rq.qsize()))
+        except Exception:
+            reparse_qsize = 0
+        if not reparse_qmax:
+            try:
+                reparse_qmax = max(0, int(rq.maxsize))
+            except Exception:
+                reparse_qmax = 0
     workers = max(0, int(globals().get("PACKET_PARSE_WORKERS") or 0))
     drops = max(0, int(globals().get("packet_parse_drop_count") or 0))
     with packet_parse_diag_lock:
@@ -1765,6 +1815,11 @@ def _packet_parse_diag_snapshot() -> dict:
         "queue_max": qmax,
         "queue_usage_pct": usage_pct,
         "queue_high_water": high_water,
+        "live_queue_size": qsize,
+        "live_queue_max": qmax,
+        "reparse_queue_size": reparse_qsize,
+        "reparse_queue_max": reparse_qmax,
+        "combined_queue_size": qsize + reparse_qsize,
         "workers": workers,
         "dropped": drops,
         "samples": int(state.get("samples") or 0),
@@ -1773,6 +1828,131 @@ def _packet_parse_diag_snapshot() -> dict:
         "max_parse_ms": round(float(state.get("max_ms") or 0.0), 3) if state.get("samples") else None,
         "last_done_wall": float(state.get("last_done_wall") or 0.0),
     }
+
+def _history_reparse_workflow_snapshot() -> dict:
+    with history_reparse_lock:
+        state = dict(history_reparse_state)
+        state["formats"] = dict(history_reparse_state.get("formats") or {})
+        state["errors"] = list(history_reparse_state.get("errors") or [])
+    queue_depth = 0
+    try:
+        queue_depth = max(0, int(history_reparse_queue.qsize()))
+    except Exception:
+        queue_depth = 0
+    total = max(0, int(state.get("total") or 0))
+    completed = max(0, min(total, int(state.get("completed") or 0)))
+    batch_size = max(1, int(state.get("batch_size") or HISTORY_REPARSE_BATCH_SIZE))
+    pending = max(0, total - completed)
+    batches_total = max(0, int(state.get("batches_total") or 0))
+    if not batches_total and total > 0:
+        batches_total = int(math.ceil(float(total) / float(batch_size)))
+    running = bool(state.get("running"))
+    active_batch = max(0, int(state.get("active_batch") or 0))
+    progress_pct = 0.0
+    if total > 0:
+        progress_pct = round(max(0.0, min(100.0, (float(completed) / float(total)) * 100.0)), 1)
+    now_wall = time.time()
+    started_wall = float(state.get("started_wall") or 0.0)
+    finished_wall = float(state.get("finished_wall") or 0.0)
+    elapsed_sec = 0.0
+    if started_wall > 0.0:
+        end_wall = now_wall if running else (finished_wall or now_wall)
+        elapsed_sec = max(0.0, end_wall - started_wall)
+    rate_per_sec = None
+    if elapsed_sec > 0.0 and completed > 0:
+        rate_per_sec = round(float(completed) / elapsed_sec, 2)
+    decoded_rate_per_sec = None
+    decoded = max(0, int(state.get("decoded") or 0))
+    if elapsed_sec > 0.0 and decoded > 0:
+        decoded_rate_per_sec = round(float(decoded) / elapsed_sec, 2)
+    eta_sec = None
+    if running and rate_per_sec and rate_per_sec > 0.0 and pending > 0:
+        eta_sec = round(float(pending) / float(rate_per_sec), 1)
+    state["total"] = total
+    state["completed"] = completed
+    state["pending"] = pending
+    state["batch_size"] = batch_size
+    state["batches_total"] = batches_total
+    state["batches_pending"] = max(0, int(math.ceil(float(pending) / float(batch_size)))) if pending else 0
+    state["active_batch"] = active_batch
+    state["queue_depth"] = queue_depth
+    state["progress_pct"] = progress_pct
+    state["elapsed_sec"] = round(elapsed_sec, 1) if elapsed_sec > 0.0 else 0.0
+    state["rate_per_sec"] = rate_per_sec
+    state["decoded_rate_per_sec"] = decoded_rate_per_sec
+    state["eta_sec"] = eta_sec
+    return state
+
+def _history_reparse_workflow_start(
+    *,
+    kind: str,
+    title: str,
+    limit: int,
+    total: int,
+    aircraft_total: int,
+    batch_size: int = HISTORY_REPARSE_BATCH_SIZE,
+) -> tuple[bool, dict]:
+    now_wall = time.time()
+    busy = False
+    with history_reparse_lock:
+        if bool(history_reparse_state.get("running")):
+            busy = True
+        else:
+            history_reparse_state.clear()
+            history_reparse_state.update({
+                "task_id": f"history-reparse-{int(now_wall * 1000)}",
+                "kind": str(kind or "history_recent"),
+                "title": str(title or "历史重解析"),
+                "status": "running",
+                "running": True,
+                "limit": max(0, int(limit or 0)),
+                "total": max(0, int(total or 0)),
+                "completed": 0,
+                "decoded": 0,
+                "skipped": 0,
+                "failed": 0,
+                "migrated": 0,
+                "saved": False,
+                "aircraft_total": max(0, int(aircraft_total or 0)),
+                "updated_aircraft": 0,
+                "enqueued": 0,
+                "producer_done": False,
+                "batch_size": max(1, int(batch_size or HISTORY_REPARSE_BATCH_SIZE)),
+                "batches_total": int(math.ceil(float(max(0, int(total or 0))) / float(max(1, int(batch_size or HISTORY_REPARSE_BATCH_SIZE))))) if total else 0,
+                "active_batch": 0,
+                "active_batch_size": 0,
+                "message": "queued",
+                "last_error": "",
+                "started_wall": now_wall,
+                "updated_wall": now_wall,
+                "finished_wall": 0.0,
+                "formats": {},
+                "errors": [],
+            })
+    return (not busy), _history_reparse_workflow_snapshot()
+
+def _history_reparse_workflow_update(**payload) -> dict:
+    now_wall = time.time()
+    with history_reparse_lock:
+        for key, value in (payload or {}).items():
+            if key == "formats":
+                history_reparse_state["formats"] = dict(value or {})
+            elif key == "errors":
+                history_reparse_state["errors"] = list(value or [])
+            else:
+                history_reparse_state[key] = value
+        history_reparse_state["updated_wall"] = now_wall
+    return _history_reparse_workflow_snapshot()
+
+def _history_reparse_workflow_finish(*, ok: bool, message: str = "", error: str = "", **payload) -> dict:
+    final_payload = dict(payload or {})
+    final_payload["running"] = False
+    final_payload["status"] = "completed" if ok else "failed"
+    final_payload["message"] = str(message or ("completed" if ok else error or "failed"))
+    final_payload["last_error"] = "" if ok else str(error or message or "failed")
+    final_payload["finished_wall"] = time.time()
+    final_payload["active_batch_size"] = 0
+    return _history_reparse_workflow_update(**final_payload)
 
 def _history_storage_normalize_import_item(raw: dict) -> dict:
     item = dict(raw if isinstance(raw, dict) else {})

@@ -909,6 +909,7 @@ def main() -> None:
     Thread(target=history_persist_loop, daemon=True).start()
     Thread(target=host_metrics_loop, daemon=True).start()
     start_packet_parse_worker()
+    start_history_reparse_worker()
     start_hw_worker()
     start_notify_worker()
     start_model_update_worker()

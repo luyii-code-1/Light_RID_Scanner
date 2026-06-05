@@ -33,7 +33,6 @@ from viewer.aggregation import (
     create_node_sso_url,
     fetch_node_metrics,
     fetch_node_track,
-    reparse_node_aircraft,
     run_node_operation,
     test_node_communication,
     viewer_loading_snapshot,
@@ -734,12 +733,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     return
                 payload = create_node_sso_url(node)
                 self._send_json(payload, 200 if payload.get("ok", True) else 400)
-                return
-            if path == "/api/nodes/reparse":
-                sn = str(body.get("sn") or "").strip()
-                mode = str(body.get("mode") or "auto")
-                payload = reparse_node_aircraft(self.store, sn, mode=mode)
-                self._send_json(payload, 200 if payload.get("ok") else 400)
                 return
             if path == "/api/nodes/remote":
                 ids = body.get("node_ids")

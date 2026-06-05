@@ -891,6 +891,7 @@ var wsOnline = false;
 var wsLatencyMs = null;
 var diagnosticSummary = null;
 var diagnosticPollTimer = null;
+var workflowPopupBound = false;
 var replayState = {sn:null,snList:[],points:[],min:null,max:null,start:null,end:null,cursor:null,startIndex:0,endIndex:null,cursorIndex:null,playing:false,speed:1,timer:null,userRange:false};
 var replayMarkers = {};
 var replayUiSig = '';
@@ -1280,6 +1281,13 @@ function trackFetchUrl(sn){
   url += '&limit=' + encodeURIComponent(String(TRACK_HISTORY_FETCH_LIMIT));
   return url;
 }
+function syncTrackLoadingUi(){
+  var nodes = document.querySelectorAll('[data-track-loading-sn]');
+  for(var i=0;i<nodes.length;i++){
+    var sn = String(nodes[i].getAttribute('data-track-loading-sn') || '');
+    nodes[i].classList.toggle('show', !!trackLoading[sn]);
+  }
+}
 async function ensureTrackLoaded(sn, force, opts){
   sn = String(sn || '');
   if(!sn) return;
@@ -1290,6 +1298,7 @@ async function ensureTrackLoaded(sn, force, opts){
   if(trackCache[sn] && !force && meta.scope === scope) return;
   var taskId = (opts && opts.interactive) ? window.beginAsyncTask(opts.title || '轨迹详情', opts.detail || ('正在加载轨迹详情: ' + sn)) : null;
   trackLoading[sn] = true;
+  syncTrackLoadingUi();
   try{
     var data = await getJson(trackFetchUrl(sn));
     var cacheEntry = mergeTrackCachePayload(data);
@@ -1313,6 +1322,7 @@ async function ensureTrackLoaded(sn, force, opts){
     if(taskId) window.finishAsyncTask(taskId, false, (_e && _e.message) ? _e.message : _e);
   }finally{
     delete trackLoading[sn];
+    syncTrackLoadingUi();
   }
 }
 function syncSelectedFromRows(rows){
@@ -2089,9 +2099,118 @@ function noteWsSample(data){
       wsLatencyMs = Math.round(sample);
     }
   }
+  updateWorkflowIndicator();
   if(qs('main-more-menu') && qs('main-more-menu').classList.contains('diagnostic-open')){
     renderDiagnosticPopup();
   }
+}
+function workflowState(){
+  return (metaState && typeof metaState.workflow === 'object' && metaState.workflow) ? metaState.workflow : {};
+}
+function workflowProgressPct(state){
+  state = state || {};
+  var pct = Number(state.progress_pct || 0);
+  if(!isFinite(pct)) pct = 0;
+  return Math.max(0, Math.min(100, pct));
+}
+function workflowSummaryText(state){
+  state = state || {};
+  if(state.status === 'failed'){
+    return '失败';
+  }
+  if(state.status === 'completed'){
+    return '完成';
+  }
+  if(state.running){
+    return '进行中';
+  }
+  return '空闲';
+}
+function workflowTitleText(state){
+  state = state || {};
+  var pct = workflowProgressPct(state);
+  if(state.running){
+    var speed = Number(state.rate_per_sec || 0);
+    return '历史重解析进行中：' + pct.toFixed(1) + '%'
+      + (speed > 0 ? (' | ' + speed.toFixed(2) + ' 包/秒') : '');
+  }
+  if(state.status === 'completed'){
+    return '最近一次历史重解析已完成';
+  }
+  if(state.status === 'failed'){
+    return '历史重解析失败：' + String(state.last_error || state.message || '未知错误');
+  }
+  return '当前没有后台重解析工作流';
+}
+function workflowQueueDisplay(state){
+  state = state || {};
+  var total = Number(state.total || 0);
+  var completed = Number(state.completed || 0);
+  var pending = Number(state.pending || Math.max(0, total - completed) || 0);
+  var queueDepth = Number(state.queue_depth != null ? state.queue_depth : 0);
+  if(!isFinite(queueDepth)) queueDepth = 0;
+  if(!isFinite(pending)) pending = 0;
+  if(total <= 0 && queueDepth <= 0 && pending <= 0) return '-';
+  if(!state.running && total > 0) return String(Math.max(0, completed)) + ' / ' + String(Math.max(0, total));
+  return String(Math.max(0, queueDepth)) + ' / ' + String(Math.max(0, pending));
+}
+function renderWorkflowPopup(){
+  var pop = qs('main-workflow-pop');
+  if(!pop) return;
+  var state = workflowState();
+  var total = Number(state.total || 0);
+  var completed = Number(state.completed || 0);
+  var pending = Number(state.pending || Math.max(0, total - completed) || 0);
+  var batchText = '-';
+  if(Number(state.batches_total || 0) > 0){
+    batchText = String(Number(state.active_batch || 0)) + '/' + String(Number(state.batches_total || 0))
+      + '（' + String(Number(state.batch_size || 128)) + '/批）';
+  }
+  var speedText = '-';
+  if(Number(state.rate_per_sec || 0) > 0){
+    speedText = Number(state.rate_per_sec || 0).toFixed(2) + ' 包/秒';
+  }
+  if(Number(state.decoded_rate_per_sec || 0) > 0){
+    speedText = (speedText === '-' ? '' : speedText + ' | ') + '成功 ' + Number(state.decoded_rate_per_sec || 0).toFixed(2) + ' 包/秒';
+  }
+  var detail = [];
+  if(total > 0){
+    detail.push('已处理 ' + completed + '/' + total);
+    detail.push('剩余 ' + pending);
+  }else{
+    detail.push('当前没有排队任务');
+  }
+  if(Number(state.updated_aircraft || 0) > 0 || Number(state.aircraft_total || 0) > 0){
+    detail.push('飞机 ' + Number(state.updated_aircraft || 0) + '/' + Number(state.aircraft_total || 0));
+  }
+  if(Number(state.failed || 0) > 0) detail.push('失败 ' + Number(state.failed || 0));
+  if(Number(state.skipped || 0) > 0) detail.push('跳过 ' + Number(state.skipped || 0));
+  if(Number(state.migrated || 0) > 0) detail.push('SN迁移 ' + Number(state.migrated || 0));
+  pop.innerHTML =
+    '<div class="main-workflow-head">工作流</div>'
+    + '<div class="main-workflow-row"><div class="main-workflow-label">状态</div><div class="main-workflow-value">' + esc(workflowSummaryText(state)) + '</div><div class="main-workflow-sub">' + esc(String(state.message || workflowTitleText(state) || '-')) + '</div></div>'
+    + '<div class="main-workflow-row"><div class="main-workflow-label">' + esc(state.running ? '排队 / 剩余' : '处理进度') + '</div><div class="main-workflow-value">' + esc(workflowQueueDisplay(state)) + '</div><div class="main-workflow-sub">' + esc(detail.join(' | ')) + '</div></div>'
+    + '<div class="main-workflow-row"><div class="main-workflow-label">批次</div><div class="main-workflow-value">' + esc(batchText) + '</div><div class="main-workflow-sub">后台按 128 条一批推进重解析</div></div>'
+    + '<div class="main-workflow-row"><div class="main-workflow-label">速度</div><div class="main-workflow-value">' + esc(speedText) + '</div><div class="main-workflow-sub">' + esc(state.eta_sec ? ('预计剩余 ' + Number(state.eta_sec).toFixed(1) + ' 秒') : '等待更多进度样本') + '</div></div>';
+}
+function updateWorkflowIndicator(){
+  var btn = qs('btn-main-workflow');
+  var ring = qs('main-workflow-ring');
+  if(!btn || !ring) return;
+  var state = workflowState();
+  var pct = workflowProgressPct(state);
+  ring.style.setProperty('--wf-progress', pct + '%');
+  ring.classList.toggle('running', !!state.running);
+  ring.classList.toggle('done', !state.running && state.status === 'completed');
+  ring.classList.toggle('failed', state.status === 'failed');
+  btn.setAttribute('title', workflowTitleText(state));
+  renderWorkflowPopup();
+}
+function setWorkflowPopupVisible(on){
+  var wrap = qs('main-workflow-wrap');
+  if(!wrap) return;
+  wrap.classList.toggle('open', !!on);
+  if(on) renderWorkflowPopup();
 }
 function fmtDiagNum(v, digits, suffix){
   if(v == null || v === '' || !isFinite(Number(v))) return '-';
@@ -2102,8 +2221,9 @@ function renderDiagnosticPopup(){
   if(!pop) return;
   var host = (diagnosticSummary && diagnosticSummary.host) || {};
   var parser = (diagnosticSummary && diagnosticSummary.parser) || {};
+  var workflow = (diagnosticSummary && diagnosticSummary.workflow) || {};
   var wsText = wsOnline ? fmtDiagNum(wsLatencyMs, 0, ' ms') : '断开';
-  var queueText = fmtDiagNum(parser.queue_size, 0, '') + ' / ' + fmtDiagNum(parser.queue_max, 0, '');
+  var queueText = fmtDiagNum(parser.live_queue_size, 0, '') + ' / ' + fmtDiagNum(parser.live_queue_max, 0, '');
   if(parser.queue_usage_pct != null && isFinite(Number(parser.queue_usage_pct))){
     queueText += ' (' + fmtDiagNum(parser.queue_usage_pct, 1, '%') + ')';
   }
@@ -2111,6 +2231,13 @@ function renderDiagnosticPopup(){
   if(parser.queue_high_water != null) queueMeta.push('高水位 ' + fmtDiagNum(parser.queue_high_water, 0, ''));
   if(parser.workers != null) queueMeta.push('线程 ' + fmtDiagNum(parser.workers, 0, ''));
   if(parser.dropped != null) queueMeta.push('丢包 ' + fmtDiagNum(parser.dropped, 0, ''));
+  var workflowQueueText = workflowQueueDisplay(workflow);
+  var reparseQueueText = workflowQueueText !== '-' ? workflowQueueText : fmtDiagNum(parser.reparse_queue_size, 0, '');
+  var reparseMeta = [];
+  if(Number(workflow.pending || 0) > 0) reparseMeta.push('总剩余 ' + fmtDiagNum(workflow.pending, 0, ''));
+  if(Number(workflow.total || 0) > 0) reparseMeta.push('已处理 ' + fmtDiagNum(workflow.completed, 0, '') + ' / ' + fmtDiagNum(workflow.total, 0, ''));
+  if(Number(workflow.batches_total || 0) > 0) reparseMeta.push('批次 ' + fmtDiagNum(workflow.active_batch, 0, '') + ' / ' + fmtDiagNum(workflow.batches_total, 0, ''));
+  if(Number(workflow.rate_per_sec || 0) > 0) reparseMeta.push('速度 ' + Number(workflow.rate_per_sec || 0).toFixed(2) + ' 包/秒');
   var parseMeta = [];
   if(parser.last_parse_ms != null) parseMeta.push('本次 ' + fmtDiagNum(parser.last_parse_ms, 3, ' ms'));
   if(parser.max_parse_ms != null) parseMeta.push('最大 ' + fmtDiagNum(parser.max_parse_ms, 3, ' ms'));
@@ -2126,7 +2253,8 @@ function renderDiagnosticPopup(){
     '<div class="main-diagnostic-head">诊断</div>'
     + '<div class="main-diagnostic-body">'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">WS 延迟</div><div class="main-diagnostic-value">' + esc(wsText) + '</div><div class="main-diagnostic-sub">最近一次服务端推送</div></div>'
-    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">解析队列</div><div class="main-diagnostic-value">' + esc(queueText) + '</div><div class="main-diagnostic-sub">' + esc(queueMeta.join(' | ') || '-') + '</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">实时解析队列</div><div class="main-diagnostic-value">' + esc(queueText) + '</div><div class="main-diagnostic-sub">' + esc(queueMeta.join(' | ') || '-') + '</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">重解析队列</div><div class="main-diagnostic-value">' + esc(reparseQueueText) + '</div><div class="main-diagnostic-sub">' + esc(reparseMeta.join(' | ') || String(workflow.message || '-')) + '</div></div>'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">解析耗时</div><div class="main-diagnostic-value">' + esc(fmtDiagNum(parser.avg_parse_ms, 3, ' ms')) + '</div><div class="main-diagnostic-sub">' + esc(parseMeta.join(' | ') || '-') + '</div></div>'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机 CPU</div><div class="main-diagnostic-value">' + esc(hostCpu.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">当前主机 CPU 信息</div></div>'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机负载</div><div class="main-diagnostic-value">' + esc(loadMeta.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">load average 与核数折算</div></div>'
@@ -2632,8 +2760,9 @@ function renderMapMiniList(list){
     var model = String(e.model || 'N/A');
     var checked = isHistoryTrackVisible(sn) ? ' checked' : '';
     var chip = '<span class="track-color-chip" style="--track-color:'+escAttr(trackColorForSn(sn))+';'+(checked ? '' : 'display:none')+'" title="轨迹颜色"></span>';
+    var loadBar = '<span class="track-load-bar'+(trackLoading[sn] ? ' show' : '')+'" data-track-loading-sn="'+escAttr(sn)+'" title="轨迹加载中"></span>';
     html += '<label class="mini-item"><input class="mini-sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+
-      chip+'<span class="mono">#'+(idx+1)+'</span><span class="sn" title="'+esc(sn)+'">'+esc(sn)+'</span><span class="mini-model" title="'+esc(model)+'">'+esc(model)+'</span></label>';
+      chip+loadBar+'<span class="mono">#'+(idx+1)+'</span><span class="sn" title="'+esc(sn)+'">'+esc(sn)+'</span><span class="mini-model" title="'+esc(model)+'">'+esc(model)+'</span></label>';
   });
   box.innerHTML = html;
   var cbs = box.querySelectorAll('.mini-sel-sn');
@@ -2688,6 +2817,7 @@ function syncTableSelectionUi(){
     allCb.checked = (total > 0 && checked === total);
     allCb.indeterminate = (checked > 0 && checked < total);
   }
+  syncTrackLoadingUi();
 }
 
 function buildExtraUi(){
@@ -3955,8 +4085,9 @@ function renderDroneTable(list){
       var uasCls = fieldCellAttrs(sn, 'uas_id', 'mono');
       var checked = selected ? ' checked' : '';
       var chip = '<span class="track-color-chip" style="--track-color:'+escAttr(trackColorForSn(sn))+';'+(selected ? '' : 'display:none')+'" title="轨迹颜色"></span>';
+      var loadBar = '<span class="track-load-bar'+(trackLoading[sn] ? ' show' : '')+'" data-track-loading-sn="'+escAttr(sn)+'" title="轨迹加载中"></span>';
       rows += '<tr class="'+cls+' data-row" data-sn="'+escAttr(sn)+'">'+
-        '<td><div class="sel-wrap track-sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+chip+'</div></td>'+
+        '<td><div class="sel-wrap track-sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+chip+loadBar+'</div></td>'+
         '<td class="idx-cell">'+(idx+1)+'</td>'+
         '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制SN">⧉</button></div></td>'+
         '<td'+modelCls+'>'+esc(e.model || 'N/A')+'</td>'+
@@ -5066,59 +5197,7 @@ function clearReplayMarkers(){
   });
 }
 function updateReplayMarkers(){
-  if(!map) return;
-  var selected = Array.isArray(replayState.snList) ? replayState.snList : [];
-  if(currentAppPage() !== 'history' || !replaySyncPaused || !selected.length || replayState.start == null || replayWindowEnd() == null){
-    clearReplayMarkers();
-    return;
-  }
-  var active = {};
-  var end = Number(replayWindowEnd());
-  var start = Number(replayState.start);
-  selected.forEach(function(replaySn, idx){
-    replaySn = String(replaySn || '');
-    if(!replaySn) return;
-    var tr = replayTrackPointsForSn(replaySn);
-    var point = null;
-    var prevPoint = null;
-    for(var i=0;i<tr.length;i++){
-      var p = tr[i] || {};
-      var ts = _trackTsSec(p);
-      if(ts == null || ts < start || ts > end) continue;
-      if(!validMapCoord(p.lat, p.lon)) continue;
-      if(point) prevPoint = point;
-      point = p;
-    }
-    if(point){
-      var lat = Number(point.lat), lon = Number(point.lon);
-      if(isFinite(lat) && isFinite(lon)){
-        active[replaySn] = true;
-        var pos = toMapLatLng(lat, lon);
-        var col = trackColorForSn(replaySn);
-        var heading = null;
-        if(prevPoint && isFinite(Number(prevPoint.lat)) && isFinite(Number(prevPoint.lon))){
-          var hs = calcHeadingByLatLon(Number(prevPoint.lat), Number(prevPoint.lon), lat, lon, 0.5);
-          if(hs.ok) heading = hs.heading;
-        }
-        var popup = '<b>'+esc(replaySn)+'</b><br>重放位置<br>'+fmtReplayTime(point.ts);
-        var icon = droneIcon(col, false, heading, true, idx + 1, false);
-        if(replayMarkers[replaySn] && replayMarkers[replaySn].setIcon){
-          replayMarkers[replaySn].setLatLng(pos).setIcon(icon).setPopupContent(popup);
-        }else{
-          if(replayMarkers[replaySn]){
-            try{ map.removeLayer(replayMarkers[replaySn]); }catch(_e){}
-          }
-          replayMarkers[replaySn] = L.marker(pos, {icon: icon}).addTo(map).bindPopup(popup);
-        }
-      }
-    }
-  });
-  Object.keys(replayMarkers).forEach(function(sn){
-    if(!active[sn]){
-      map.removeLayer(replayMarkers[sn]);
-      delete replayMarkers[sn];
-    }
-  });
+  clearReplayMarkers();
 }
 
 function droneIcon(color, lost, headingDeg, selected, indexNo, alarm){
@@ -5819,6 +5898,52 @@ header.app-shell-header::-webkit-scrollbar{height:6px}
   align-items:center;
   gap:10px;
 }
+.main-version-wrap{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.main-workflow-wrap{position:relative;display:inline-flex;align-items:center}
+.main-workflow-btn{
+  width:26px;height:26px;padding:0;border:0;background:transparent;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;border-radius:999px;
+}
+.main-workflow-btn:focus-visible{
+  outline:2px solid color-mix(in srgb,var(--blue) 55%,transparent);
+  outline-offset:2px;
+}
+.main-workflow-ring{
+  --wf-progress:0%;
+  --wf-color:color-mix(in srgb,var(--border) 84%,transparent);
+  width:22px;height:22px;border-radius:999px;position:relative;display:block;
+  background:
+    radial-gradient(circle at center, var(--panel) 51%, transparent 53%),
+    conic-gradient(var(--wf-color) 0 var(--wf-progress), color-mix(in srgb,var(--border) 82%,transparent) 0 100%);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--border) 86%,transparent);
+}
+.main-workflow-ring::after{
+  content:"";
+  position:absolute;inset:7px;border-radius:999px;background:color-mix(in srgb,var(--wf-color) 72%, var(--panel));
+}
+.main-workflow-ring.running{--wf-color:var(--blue);animation:workflowPulse 1.5s ease-in-out infinite}
+.main-workflow-ring.done{--wf-color:#10b981}
+.main-workflow-ring.failed{--wf-color:#ef4444}
+.main-workflow-pop{
+  position:absolute;left:50%;top:calc(100% + 8px);transform:translateX(-50%);
+  display:none;width:min(320px,calc(100vw - 24px));min-height:152px;padding:10px;border:1px solid var(--border);
+  border-radius:14px;background:var(--panel);box-shadow:0 14px 30px rgba(15,23,42,.14);z-index:46;
+  overflow:hidden;
+}
+.main-workflow-wrap.open .main-workflow-pop{display:grid;gap:8px}
+.main-workflow-head{font:700 12px/1 var(--font-ui);color:var(--txt);min-width:0}
+.main-workflow-row{display:grid;gap:4px;min-width:0;padding:8px 9px;border:1px solid color-mix(in srgb,var(--border) 94%,transparent);border-radius:10px;background:color-mix(in srgb,var(--panel2) 88%,transparent);overflow:hidden}
+.main-workflow-label{font:700 11px/1.2 var(--font-ui);color:var(--muted);letter-spacing:.02em;min-width:0}
+.main-workflow-value{font:700 13px/1.25 var(--font-mono);color:var(--txt);min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.main-workflow-sub{font:600 11px/1.45 var(--font-ui);color:var(--dim);min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+@keyframes workflowPulse{
+  0%,100%{transform:scale(1)}
+  50%{transform:scale(1.06)}
+}
 header.app-shell-header h1{
   margin:0;
   font:600 20px/1 var(--font-ui);
@@ -5992,6 +6117,20 @@ body[data-page="history"] .app-page[data-page="history"]{display:block}
 .history-map-slot #map{height:100%}
 .track-sel-wrap{gap:6px}
 .track-color-chip{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--track-color,#1f9dff);box-shadow:0 0 0 2px color-mix(in srgb, var(--track-color,#1f9dff) 24%, transparent);flex:0 0 auto}
+.track-load-bar{
+  display:none;position:relative;overflow:hidden;flex:0 0 auto;
+  width:18px;height:4px;border-radius:999px;background:color-mix(in srgb,var(--border) 82%,transparent)
+}
+.track-load-bar::after{
+  content:"";position:absolute;left:-45%;top:0;bottom:0;width:45%;
+  border-radius:999px;background:linear-gradient(90deg, transparent, var(--blue), transparent);
+  animation:trackLoadBar 1s linear infinite
+}
+.track-load-bar.show{display:inline-block}
+@keyframes trackLoadBar{
+  from{transform:translateX(0)}
+  to{transform:translateX(260%)}
+}
 .track-replay-card{
   display:none;
   position:absolute;
@@ -6304,13 +6443,37 @@ _MAIN_PAGE_PATCH_JS = r"""
       title.parentNode.insertBefore(titleBlock, title);
       titleBlock.appendChild(title);
       var versionLabel = header.querySelector('.app-version-label');
-      if(versionLabel) titleBlock.appendChild(versionLabel);
+      if(versionLabel){
+        var versionWrap = document.createElement('div');
+        versionWrap.className = 'main-version-wrap';
+        versionWrap.appendChild(versionLabel);
+        var workflowWrap = document.createElement('div');
+        workflowWrap.id = 'main-workflow-wrap';
+        workflowWrap.className = 'main-workflow-wrap';
+        workflowWrap.innerHTML = '<button id="btn-main-workflow" class="main-workflow-btn" type="button" aria-label="工作流"><span id="main-workflow-ring" class="main-workflow-ring"></span></button><div id="main-workflow-pop" class="main-workflow-pop"></div>';
+        versionWrap.appendChild(workflowWrap);
+        titleBlock.appendChild(versionWrap);
+        var workflowBtn = workflowWrap.querySelector('#btn-main-workflow');
+        if(workflowBtn){
+          workflowBtn.addEventListener('click', function(ev){
+            ev.stopPropagation();
+            setWorkflowPopupVisible(!workflowWrap.classList.contains('open'));
+          });
+        }
+        if(!workflowPopupBound){
+          document.addEventListener('click', function(){
+            setWorkflowPopupVisible(false);
+          });
+          workflowPopupBound = true;
+        }
+      }
       var sub = document.createElement('div');
       sub.id = 'main-title-sub';
       sub.className = 'main-title-sub';
       sub.textContent = '地图、列表、日志。';
       titleBlock.appendChild(sub);
     }
+    updateWorkflowIndicator();
     var statsWrap = header.querySelector('.head-stats');
     if(statsWrap && !qs('main-shell-top')){
       var titleBlockNode = header.querySelector('.main-title-block') || title;
@@ -7077,6 +7240,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     _origApplyMeta(meta);
     ensureMainPages();
     neutralizeLegacyCollapsers();
+    updateWorkflowIndicator();
     drawAlarmZones();
   };
   var _origOnData = onData;
@@ -7095,6 +7259,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     zoneAlarmSnSet = zoneHitSnSet(drones);
     refreshReplayBounds(true);
     _origUpdateMap(drones);
+    clearReplayMarkers();
     drawAlarmZones();
     setZoneAlarm(drones);
     renderReplayCard();
@@ -7626,7 +7791,8 @@ body{padding:10px}
   <div class="hint">独立窗口诊断页，显示 WS 延迟、解析队列、解析耗时、主机 CPU 与负载。</div>
   <div class="grid">
     <div class="item"><div class="label">WS 延迟</div><div class="value" id="diag-ws">-</div><div class="sub" id="diag-ws-sub">等待连接</div></div>
-    <div class="item"><div class="label">解析队列</div><div class="value" id="diag-queue">-</div><div class="sub" id="diag-queue-sub">-</div></div>
+    <div class="item"><div class="label">实时解析队列</div><div class="value" id="diag-queue">-</div><div class="sub" id="diag-queue-sub">-</div></div>
+    <div class="item"><div class="label">重解析队列</div><div class="value" id="diag-reparse">-</div><div class="sub" id="diag-reparse-sub">-</div></div>
     <div class="item"><div class="label">解析耗时</div><div class="value" id="diag-parse">-</div><div class="sub" id="diag-parse-sub">-</div></div>
     <div class="item"><div class="label">主机 CPU</div><div class="value" id="diag-cpu">-</div><div class="sub" id="diag-cpu-sub">-</div></div>
     <div class="item"><div class="label">主机负载</div><div class="value" id="diag-load">-</div><div class="sub" id="diag-load-sub">-</div></div>
@@ -7652,6 +7818,18 @@ function setStatus(text, err){
 function fmt(v, digits, suffix){
   if(v == null || v === '' || !isFinite(Number(v))) return '-';
   return Number(v).toFixed(Math.max(0, Number(digits || 0))) + String(suffix || '');
+}
+function workflowQueueDisplay(workflow){
+  workflow = workflow || {};
+  var total = Number(workflow.total || 0);
+  var completed = Number(workflow.completed || 0);
+  var pending = Number(workflow.pending || Math.max(0, total - completed) || 0);
+  var queueDepth = Number(workflow.queue_depth != null ? workflow.queue_depth : 0);
+  if(!isFinite(queueDepth)) queueDepth = 0;
+  if(!isFinite(pending)) pending = 0;
+  if(total <= 0 && queueDepth <= 0 && pending <= 0) return '-';
+  if(!workflow.running && total > 0) return String(Math.max(0, completed)) + ' / ' + String(Math.max(0, total));
+  return String(Math.max(0, queueDepth)) + ' / ' + String(Math.max(0, pending));
 }
 function setText(id, text){
   var el = qs(id);
@@ -7680,13 +7858,23 @@ function renderSummary(data){
   data = data || {};
   var host = data.host || {};
   var parser = data.parser || {};
-  var queueText = fmt(parser.queue_size, 0, '') + ' / ' + fmt(parser.queue_max, 0, '');
+  var workflow = data.workflow || {};
+  var queueText = fmt(parser.live_queue_size, 0, '') + ' / ' + fmt(parser.live_queue_max, 0, '');
   if(parser.queue_usage_pct != null && isFinite(Number(parser.queue_usage_pct))) queueText += ' (' + fmt(parser.queue_usage_pct, 1, '%') + ')';
   setText('diag-queue', queueText);
   setText('diag-queue-sub', [
     parser.queue_high_water != null ? ('高水位 ' + fmt(parser.queue_high_water, 0, '')) : '',
     parser.workers != null ? ('线程 ' + fmt(parser.workers, 0, '')) : '',
     parser.dropped != null ? ('丢包 ' + fmt(parser.dropped, 0, '')) : ''
+  ].filter(Boolean).join(' | ') || '-');
+  var reparseQueueText = workflowQueueDisplay(workflow);
+  setText('diag-reparse', reparseQueueText !== '-' ? reparseQueueText : fmt(parser.reparse_queue_size, 0, ''));
+  setText('diag-reparse-sub', [
+    Number(workflow.pending || 0) > 0 ? ('总剩余 ' + fmt(workflow.pending, 0, '')) : '',
+    workflow.total != null ? ('已处理 ' + fmt(workflow.completed, 0, '') + ' / ' + fmt(workflow.total, 0, '')) : '',
+    workflow.batches_total != null && Number(workflow.batches_total || 0) > 0 ? ('批次 ' + fmt(workflow.active_batch, 0, '') + ' / ' + fmt(workflow.batches_total, 0, '')) : '',
+    Number(workflow.rate_per_sec || 0) > 0 ? ('速度 ' + Number(workflow.rate_per_sec || 0).toFixed(2) + ' 包/秒') : '',
+    workflow.message ? String(workflow.message) : ''
   ].filter(Boolean).join(' | ') || '-');
   setText('diag-parse', fmt(parser.avg_parse_ms, 3, ' ms'));
   setText('diag-parse-sub', [
@@ -8695,6 +8883,11 @@ def http_server_thread() -> None:
                 except Exception:
                     limit = 180
                 self._send_json(_settings_runtime_payload(limit=limit), 200)
+            elif path in ("/api/history/reidentify-status", "/api/settings/history/reidentify-status", "/api/v1/history/reidentify-status"):
+                payload = history_reparse_workflow_status()
+                if path.startswith("/api/v1/"):
+                    payload["api"] = _api_meta()
+                self._send_json(payload, 200)
             elif path == "/api/diagnostics/summary":
                 self._send_json(_diagnostics_summary_payload(), 200)
             elif path == "/api/settings/metrics":
@@ -9178,9 +9371,13 @@ def http_server_thread() -> None:
                 except Exception:
                     limit = _track_store_points_limit()
                 try:
-                    rsp = reidentify_recent_history_packets(limit=limit)
+                    rsp = start_recent_history_reidentify_workflow(limit=limit)
                     rsp["api"] = _api_meta()
-                    summary = f"aircraft={rsp.get('updated_aircraft')}/{rsp.get('aircraft_count')} packets={rsp.get('decoded')}/{rsp.get('packet_count')}"
+                    workflow = rsp.get("workflow") if isinstance(rsp.get("workflow"), dict) else {}
+                    summary = (
+                        f"started={bool(rsp.get('started'))} total={workflow.get('total')} "
+                        f"pending={workflow.get('pending')} batch={workflow.get('batch_size')}"
+                    )
                     _op_log("api-v1-history-reidentify-recent", str(rsp.get("error") or summary), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                     self._send_json(rsp, 200 if rsp.get("ok") else 400)
                 except Exception as e:
@@ -9227,8 +9424,12 @@ def http_server_thread() -> None:
                 except Exception:
                     limit = _track_store_points_limit()
                 try:
-                    rsp = reidentify_recent_history_packets(limit=limit)
-                    summary = f"aircraft={rsp.get('updated_aircraft')}/{rsp.get('aircraft_count')} packets={rsp.get('decoded')}/{rsp.get('packet_count')}"
+                    rsp = start_recent_history_reidentify_workflow(limit=limit)
+                    workflow = rsp.get("workflow") if isinstance(rsp.get("workflow"), dict) else {}
+                    summary = (
+                        f"started={bool(rsp.get('started'))} total={workflow.get('total')} "
+                        f"pending={workflow.get('pending')} batch={workflow.get('batch_size')}"
+                    )
                     _op_log("history-reidentify-recent", str(rsp.get("error") or summary), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                     self._send_json(rsp, 200 if rsp.get("ok") else 400)
                 except Exception as e:

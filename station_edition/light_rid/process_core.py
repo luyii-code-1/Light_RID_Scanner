@@ -40,7 +40,6 @@ SCAN_DIFF_LABELS = {
     "raw_coords": "raw_coords",
 }
 SCAN_DIFF_NOISE_FIELDS = {"rssi", "pl_sig", "raw_packets_count"}
-RID_TARGET_FORMATS = {"GB46750_2025", "DJI_OLD_ODID"}
 RID_TARGET_SN_RE = re.compile(r"^[A-Za-z0-9]{4,64}$")
 
 
@@ -73,6 +72,10 @@ def _decoded_has_valid_coord(loc: dict | None, sys_loc: dict | None, meta: dict 
             except Exception:
                 continue
     return False
+
+
+def _rid_realtime_candidate_valid(has_valid_coord: bool) -> bool:
+    return bool(has_valid_coord)
 
 def _scan_diff_round(value):
     try:
@@ -1622,7 +1625,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         if scan_type_key == "rid":
             if not _rid_target_sn_valid(sn):
                 return
-            if existing_entry is None and (parser_format not in RID_TARGET_FORMATS or not rid_coord_ok):
+            if existing_entry is None and not _rid_realtime_candidate_valid(rid_coord_ok):
                 return
         # MAC -> SN migration
         if sn != mac_key and mac_key in state_table and sn not in state_table:

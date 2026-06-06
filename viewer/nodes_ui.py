@@ -397,7 +397,7 @@ async function createSso(){
 async function remoteOp(op){
   var ids = selectedIds();
   if(!ids.length && state.selectedId) ids = [state.selectedId];
-  if(!ids.length){ setStatus('bulk-status','请先勾选节点，或先选中一个节点。',true); return; }
+  if(!ids.length){ setStatus('bulk-status','请选择节点',true); return; }
   if(op === 'restart' && !confirm('确认重启 ' + ids.length + ' 个节点的主程序？')) return;
   setStatus('bulk-status', '正在执行...', false);
   var d = await post('/api/nodes/remote', {node_ids:ids, operation:op});

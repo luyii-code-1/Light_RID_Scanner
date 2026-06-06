@@ -262,12 +262,18 @@ class RidParserRoleTests(unittest.TestCase):
         self.assertIn("var hasDualTrack = Array.isArray(payload.aircraft) || Array.isArray(payload.operator);", source)
         self.assertIn("trackCache[payload.sn] = normalizeTrackCacheEntry(payload.tracks || payload);", source)
 
-    def test_state_update_requires_valid_format_sn_and_coord_for_new_rid_target(self):
+    def test_state_update_requires_valid_sn_and_coord_for_new_rid_target(self):
         state_table = self.process_ns["state_table"]
         history_table = self.process_ns["history_table"]
         mac_to_basic = self.process_ns["mac_to_basic"]
         mac_to_ssid_sn = self.process_ns["mac_to_ssid_sn"]
         state_update = self.process_ns["state_update"]
+        self.process_ns["_fmt"] = lambda value, *args: "-" if value is None else str(value)
+        self.process_ns["_notification_add"] = lambda *args, **kwargs: None
+        self.process_ns["_notify_online_text"] = lambda *args, **kwargs: ""
+        self.process_ns["_notify_zone_alarm_text"] = lambda *args, **kwargs: ""
+        self.process_ns["queue_online_notification"] = lambda *args, **kwargs: None
+        self.process_ns["queue_zone_alarm_notification"] = lambda *args, **kwargs: None
 
         state_table.clear()
         history_table.clear()
@@ -289,7 +295,7 @@ class RidParserRoleTests(unittest.TestCase):
             scan_type="rid",
             ssid="RID-1581F8DBW25B800B3417",
             capture_type="Beacon",
-            raw_pkt_hex="00",
+            raw_pkt_hex=None,
             firmware_type="old",
         )
 
@@ -310,11 +316,44 @@ class RidParserRoleTests(unittest.TestCase):
             scan_type="rid",
             ssid="RID-1581F8DBW25B800B3417",
             capture_type="Beacon",
-            raw_pkt_hex="00",
+            raw_pkt_hex=None,
             firmware_type="old",
         )
 
         self.assertEqual({}, state_table)
+
+        state_update(
+            "aa:bb:cc:dd:ee:22",
+            {
+                "basic_id": {"uas_id": "1581F8DBW25B800B3417", "id_type": "Serial"},
+                "location": {"lat": 30.0, "lon": 121.0, "alt_geodetic": 20.0},
+                "system": None,
+                "metadata": {"format": "DJI_ENTERPRISE_PRIVATE", "rid_format": "DJI_ENTERPRISE_PRIVATE"},
+            },
+            rssi=-40,
+            ch=6,
+            ch_assumed=False,
+            pl_sig=125,
+            scan_type="rid",
+            ssid="RID-1581F8DBW25B800B3417",
+            capture_type="Beacon",
+            raw_pkt_hex=None,
+            firmware_type="old",
+        )
+
+        self.assertIn("1581F8DBW25B800B3417", state_table)
+        hist = history_table["1581F8DBW25B800B3417"]
+        self.assertEqual(1, len(hist["tracks"]["aircraft"]))
+        self.assertEqual(30.0, hist["tracks"]["aircraft"][0]["lat"])
+
+    def test_track_get_route_applies_limit_to_dual_tracks_payload(self):
+        source = Path("station_edition/light_rid/web_server.py").read_text(encoding="utf-8")
+
+        self.assertIn('aircraft_query = dict(query)', source)
+        self.assertIn('aircraft_query["track_type"] = ["aircraft"]', source)
+        self.assertIn('operator_query["track_type"] = ["operator"]', source)
+        self.assertIn('"aircraft": _track_for_query(tracks, aircraft_query, firmware_type=firmware_type)', source)
+        self.assertIn('"operator": _track_for_query(tracks, operator_query, firmware_type=firmware_type)', source)
 
     def test_reidentify_history_packet_for_sn_no_longer_uses_undefined_track_points(self):
         history_table = self.process_ns["history_table"]

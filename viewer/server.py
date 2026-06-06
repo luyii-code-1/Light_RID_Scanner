@@ -271,7 +271,7 @@ button:active{{transform:scale(.97)}}
 const nextPath = {next_url!r};
 document.getElementById('back').onclick = function(){{ location.href = nextPath || '/'; }};
 document.getElementById('accept').onclick = async function(){{
-  if(!document.getElementById('agree').checked){{ document.getElementById('status').textContent='请先勾选同意许可协议。'; return; }}
+  if(!document.getElementById('agree').checked){{ document.getElementById('status').textContent='请阅读并同意许可协议'; return; }}
   const r = await fetch('/api/eula/accept', {{method:'POST', headers:{{'Content-Type':'application/json','X-LightRID-Page':'1'}}, body:'{{}}'}});
   const d = await r.json().catch(()=>({{}}));
   if(!r.ok || d.ok === false){{ document.getElementById('status').textContent=d.error||('HTTP '+r.status); return; }}

@@ -4530,7 +4530,7 @@ def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None, web
         if not passkey_ready:
             return "关闭账号密码登录前，至少先准备一把可用 PassKey"
     if bool(auth.get("enabled")) and (not _auth_hashes_present(auth)):
-        return "启用网页登录鉴权前，必须先设置网页登录账号和密码"
+        return "启用网页登录前，需先设置账号和密码"
     api_rule_err = _access_rule_empty_error(
         "API ",
         bool(api.get("whitelist_enabled")) and _api_tokens_have_secret(api),
@@ -4549,11 +4549,11 @@ def _validate_security_sections(auth_cfg: dict | None, api_cfg: dict | None, web
         return web_rule_err
     if bool(api.get("enabled")):
         if not bool(auth.get("enabled")):
-            return "启用外部 API 前，必须先启用网页登录鉴权"
+            return "启用外部 API 前，需先启用网页登录"
         if not _auth_hashes_present(auth):
-            return "启用外部 API 前，必须先设置网页登录账号和密码"
+            return "启用外部 API 前，需先设置账号和密码"
         if not _api_tokens_have_secret(api):
-            return "启用外部 API 前，必须先设置 API Token"
+            return "启用外部 API 前，需先设置 API Token"
     return None
 
 def _prepare_security_cfg_for_save(cfg: dict | None) -> tuple[dict, str | None]:

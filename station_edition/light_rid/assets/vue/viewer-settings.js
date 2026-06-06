@@ -7678,7 +7678,7 @@ SSO：${data.auth.sso_configured ? "已配置" : "未配置"}`;
                       textField("网页登录账号", this.state.draft.auth.username, (value) => this.state.draft.auth.username = value),
                       textField("网页登录密码", this.state.draft.auth.password, (value) => this.state.draft.auth.password = value, { type: "password", placeholder: "留空即不修改" })
                     ]),
-                    h("div", { class: "checks" }, [checkboxField("auth-enabled", "启用网页登录鉴权", this.state.draft.auth.enabled, (checked) => this.state.draft.auth.enabled = checked)])
+                    h("div", { class: "checks" }, [checkboxField("auth-enabled", "启用网页登录", this.state.draft.auth.enabled, (checked) => this.state.draft.auth.enabled = checked)])
                   ]),
                   h("div", { class: "access-subcard full" }, [
                     h("div", { class: "access-subhead" }, [h("div", [h("div", { class: "access-subtitle" }, "SSO check 登录"), h("div", { class: "access-subcopy" }, "本机快捷登录入口，地址格式为 /?check=...。")])]),

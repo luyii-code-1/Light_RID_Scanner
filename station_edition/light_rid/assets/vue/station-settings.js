@@ -617,7 +617,7 @@
     return new Promise(function(resolve) {
       elevateResolve = resolve;
       if (qs("elevate-copy")) qs("elevate-copy").textContent = String(message || "需要管理员权限");
-      if (qs("elevate-status")) setStatus("elevate-status", "密码只用于这次操作，不会写入配置文件或浏览器存储。", false);
+      if (qs("elevate-status")) setStatus("elevate-status", "密码仅本次操作使用", false);
       if (qs("elevate-modal")) qs("elevate-modal").classList.add("show");
       window.setTimeout(function() {
         if (qs("elevate-pass")) qs("elevate-pass").focus();
@@ -792,18 +792,18 @@
     }
     if (qs("passkey-state")) {
       if (!authEnabled || !authConfigured) {
-        qs("passkey-state").textContent = "先配好网页登录账号和密码，再来这里登记通行密钥。";
+        qs("passkey-state").textContent = "需先配置账号密码";
       } else if (!allowPasskey) {
-        qs("passkey-state").textContent = "PassKey 登录当前已关闭；已登记的密钥会保留，但暂时不会生效。";
+        qs("passkey-state").textContent = "PassKey 登录已关闭";
       } else {
         qs("passkey-state").textContent = "已登记的通行密钥可以直接登录网页。";
       }
     }
     if (qs("login-link-state")) {
       if (!authEnabled || !authConfigured) {
-        qs("login-link-state").textContent = "填好网页登录账号和密码后，就可以生成 SSO 链接。";
+        qs("login-link-state").textContent = "需先配置账号密码";
       } else {
-        qs("login-link-state").textContent = "命中有效 SSO 链接时，会优先于密码和 PassKey 登录。";
+        qs("login-link-state").textContent = "SSO 链接优先于其他登录方式。";
       }
     }
     if (qs("btn-login-link-create")) qs("btn-login-link-create").disabled = !(authEnabled && authConfigured);
@@ -857,7 +857,7 @@
     var lines = [];
     if (data.supported) {
       if (data.registered && data.unit_matches === false) lines.push("当前服务文件和本页生成的启动参数不一致，可点“注册/更新服务”修正。");
-      if (data.running_as_root) lines.push("安全提醒：当前网页服务仍在用 root 运行，建议一键修复为 rid 专用账号。");
+      if (data.running_as_root) lines.push("安全提醒：当前运行权限过高，建议在设置中修复。");
       if (data.registered && !data.service_uses_dedicated_user) lines.push("安全提醒：当前服务文件还没有声明 rid 专用账号。");
     } else {
       lines.push("systemd 不可用" + (data.reason ? "，" + String(data.reason) : ""));
@@ -906,13 +906,13 @@
     }
     if (qs("runtime-security-copy")) {
       if (runningRoot) {
-        qs("runtime-security-copy").textContent = "当前网页服务和采集进程还在用 root 运行，风险较高。点“一键修复”后，会创建或确认 rid 账号，并把 systemd 服务切到 rid 账号运行。";
+        qs("runtime-security-copy").textContent = "当前运行权限过高，建议执行一键修复。";
       } else if (sec && sec.risk === "missing-capabilities") {
-        qs("runtime-security-copy").textContent = "当前进程不是 root，但缺少采集所需的网络能力。执行“一键修复”后，会让 systemd 以 rid 账号和所需能力启动服务。";
+        qs("runtime-security-copy").textContent = "缺少采集所需的网络能力，请执行一键修复。";
       } else if (!serviceOk) {
-        qs("runtime-security-copy").textContent = "当前进程不是 root，但 systemd 服务还没确认切到 rid 专用账号。需要 root 或临时 sudo 提权来完成修复。";
+        qs("runtime-security-copy").textContent = "服务尚未使用专用账号运行，需管理员权限修复。";
       } else {
-        qs("runtime-security-copy").textContent = "当前服务已经使用 rid 专用账号，采集所需网络能力也已由 systemd 提供。";
+        qs("runtime-security-copy").textContent = "当前服务使用专用账号运行，网络能力正常。";
       }
     }
   }
@@ -926,11 +926,11 @@
     var btn = qs("btn-service-register");
     try {
       if (btn) btn.disabled = true;
-      setStatus("status-system-service", "正在注册 systemd 服务...", false);
+      setStatus("status-system-service", "正在注册系统服务…", false);
       const body = await privilegedBody({ confirm: true }, "注册或更新服务需要管理员权限");
       const data = await postJson("/api/settings/systemd/register", body);
       renderSystemServiceStatus(data && data.status || {});
-      showNotice(data.message || "systemd 服务已注册。", "ok", 3600);
+      showNotice(data.message || "系统服务已注册。", "ok", 3600);
     } catch (e) {
       setStatus("status-system-service", "注册失败: " + (e.message || e), true);
       showNotice(e.message || e, "warn", 4200);
@@ -1538,7 +1538,7 @@
       if (stagedSource) lines.push("来源: " + stagedSource);
       if (stagedSha) lines.push("SHA256: " + stagedSha.slice(0, 12) + "…");
     } else if (state.last_error) lines.push("检查/更新失败: " + String(state.last_error));
-    else if (state.checked) lines.push(state.update_available ? "发现新版本，先下载或上传安装包，校验通过后再安装。" : "当前已是检查到的最新版本。");
+    else if (state.checked) lines.push(state.update_available ? "发现新版本，下载或上传安装包后即可安装。" : "当前已是检查到的最新版本。");
     else lines.push("启用后会自动检查 GitHub Release；下载、上传和安装都需要手动确认。");
     if (state.install_supported === false && state.support_reason) lines.push("当前环境: " + String(state.support_reason));
     if (state.asset_name) lines.push("匹配资产: " + String(state.asset_name));
@@ -1582,7 +1582,7 @@
               }, 3e3);
               return;
             }
-            setStatus("status-visual", "更新进程已启动，但暂时无法重新连回服务。请稍后手动刷新页面确认结果。", true);
+            setStatus("status-visual", "更新已启动，请稍后刷新页面确认。", true);
             return;
           }
           setStatus("status-visual", e.message || e, true);
@@ -1739,7 +1739,7 @@
       var data = rsp.data || {};
       if (!rsp.response.ok || data.ok === false) {
         if (rsp.response.status === 403 && data.need_sudo) {
-          var body = await privilegedBody({ confirm: true }, "安装已校验安装包需要停止/启动 systemd 并替换已安装文件。请输入 sudo 密码；密码只用于本次更新，不会保存。");
+          var body = await privilegedBody({ confirm: true }, "安装更新需要管理员权限");
           data = await withSettingsAsyncTask("更新安装", "正在提交 sudo 授权并安装...", function() {
             return postJson("/api/settings/app-update/start", body);
           });
@@ -2525,7 +2525,7 @@
     var expireText = d.expires_at ? "有效期至 " + fmtMetricTime(d.expires_at) : "无限时间";
     qs("login-link-state").textContent = "校验码 " + String(d.check || "-").slice(0, 10) + "... 已加入列表；" + expireText + (d.single_use ? "；单次登录。" : "。");
     renderLoginLinks(d.links || []);
-    showOneTimeSecret("SSO 登录链接", url, "这个链接只在本次弹窗显示，关闭后只能删除记录再重新生成。");
+    showOneTimeSecret("SSO 登录链接", url, "链接仅显示一次。");
     return d;
   }
   function fillIfaceOptions(items, selected) {
@@ -2692,7 +2692,7 @@
   }
   async function applyNetworkBindings() {
     if (settingsState.visualDirty) {
-      throw new Error("请先保存当前设置，再应用网卡绑定到系统。");
+      throw new Error("请先保存当前设置");
     }
     if (!confirm("将按已保存配置调整网卡状态、AP 地址、hostapd 和内置 DHCP。继续？")) return;
     const body = await privilegedBody({ confirm: true }, "应用网卡绑定需要管理员权限");
@@ -3397,7 +3397,7 @@
       setRootSecurityIgnored(true);
       renderRuntimeSecurityAlert(lastSystemServiceStatus || {}, lastSystemServiceStatus && lastSystemServiceStatus.security || {});
       renderSystemServiceStatus(lastSystemServiceStatus || {});
-      showNotice("root 运行告警已手动忽略。", "ok", 2600);
+      showNotice("已忽略权限告警。", "ok", 2600);
     });
     on("btn-security-repair", "click", repairRuntimeSecurityFromSettings);
     on("btn-elevate-cancel", "click", function() {

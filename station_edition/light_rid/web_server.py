@@ -2423,8 +2423,8 @@ async function toolsExportAllDetails(){
 async function toolsExportSingleTrack(){
   var sn = _pickToolSn();
   if(!sn){
-    setToolsStatus('请先在“历史/轨迹”中选择飞机，或勾选目标飞机');
-    showBanner('请先选择飞机再导出轨迹', 'warn', 3200);
+    setToolsStatus('请选择无人机');
+    showBanner('请选择无人机再导出', 'warn', 3200);
     return;
   }
   setToolsStatus('导出轨迹中: ' + sn);
@@ -3569,7 +3569,7 @@ async function deleteHistoryForSn(sn, opts){
   opts = opts || {};
   sn = String(sn || '').trim();
   if(!sn){
-    if(opts.statusEl) opts.statusEl.textContent = '请先选择飞机';
+    if(opts.statusEl) opts.statusEl.textContent = '请选择无人机';
     return false;
   }
   if(deleteHistorySnBusy[sn]) return false;
@@ -3614,7 +3614,7 @@ async function clearTrackBySelect(){
   var st = qs('track-mgr-status');
   var sn = sel ? String(sel.value || '').trim() : '';
   if(!sn){
-    if(st) st.textContent = '请先选择飞机';
+    if(st) st.textContent = '请选择无人机';
     return;
   }
   if(!confirm('清空该飞机轨迹？\\n' + sn)) return;
@@ -3717,7 +3717,7 @@ async function saveConfigEditor(){
 function primeConfigEditorStatus(){
   var st = qs('config-editor-status');
   if(!st) return;
-  st.textContent = '原始配置改为手动读取。如需编辑，请先到 Settings / 原始配置 验证密码。';
+  st.textContent = '请先在原始配置页验证密码。';
 }
 
 async function loadConfigEditorLegacy(){
@@ -3732,7 +3732,7 @@ async function loadConfigEditorLegacy(){
   }catch(e){
     var msg = ((e && e.message) ? e.message : e);
     if(String(msg || '').indexOf('raw config unlock required') >= 0){
-      if(st) st.textContent = '请先到 Settings / 原始配置 验证密码，然后再读取这里的配置。';
+      if(st) st.textContent = '请先在原始配置页验证密码。';
       return;
     }
     if(st) st.textContent = '读取失败: ' + msg;
@@ -7557,7 +7557,7 @@ button:disabled{{opacity:.58;cursor:not-allowed}}
   </div>
   <article class="license" id="eula-scroll" tabindex="0" aria-label="许可协议正文">{eula_html}</article>
   <section class="accept">
-    <div class="read-state" id="read-state">请先阅读 EULA，5 秒后才能勾选同意。</div>
+    <div class="read-state" id="read-state">请阅读 EULA 后继续</div>
     <label class="check"><input id="agree" type="checkbox" disabled> <span>我已完整阅读并同意以上许可协议，确认继续使用本软件。</span></label>
     <div class="actions">
       <button class="warn" id="decline" type="button">不同意</button>
@@ -7583,7 +7583,7 @@ function updateReadState(){{
   if(!ready){{
     qs('agree').checked = false;
     qs('accept').disabled = true;
-    qs('read-state').textContent = '请先阅读 EULA，' + Math.ceil(left / 1000) + ' 秒后才能勾选同意。';
+    qs('read-state').textContent = '请阅读 EULA 后继续（' + Math.ceil(left / 1000) + 's）';
   }}else{{
     qs('read-state').textContent = '已达到阅读等待时间，可以勾选同意。';
     qs('accept').disabled = !qs('agree').checked;
@@ -7599,7 +7599,7 @@ setTimeout(updateReadState, 60);
 qs('agree').addEventListener('change', function(){{ updateReadState(); }});
 qs('decline').addEventListener('click', function(){{ setStatus('你还没有同意许可协议，当前不会进入系统。', true); }});
 qs('accept').addEventListener('click', async function(){{
-  if(readWaitLeft() > 0){{ setStatus('请先阅读 EULA，等待时间结束后再继续。', true); return; }}
+  if(readWaitLeft() > 0){{ setStatus('请阅读 EULA 后继续', true); return; }}
   if(!qs('agree').checked){{ setStatus('请先勾选同意许可协议。', true); return; }}
   var btn = qs('accept');
   btn.disabled = true;
@@ -9002,6 +9002,10 @@ def http_server_thread() -> None:
                     tracks = _sanitize_tracks(src)
                     full_track = _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=firmware_type)
                     track = _track_for_query(tracks, query, firmware_type=firmware_type)
+                    aircraft_query = dict(query)
+                    aircraft_query["track_type"] = ["aircraft"]
+                    operator_query = dict(query)
+                    operator_query["track_type"] = ["operator"]
                 self._send_json({
                     "ok": True,
                     "sn": sn,
@@ -9009,8 +9013,8 @@ def http_server_thread() -> None:
                     "count_total": len(full_track),
                     "track": track,
                     "tracks": {
-                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=firmware_type),
-                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=firmware_type),
+                        "aircraft": _track_for_query(tracks, aircraft_query, firmware_type=firmware_type),
+                        "operator": _track_for_query(tracks, operator_query, firmware_type=firmware_type),
                     },
                 }, 200)
             elif path == "/api/tools/export/all":
@@ -10040,4 +10044,3 @@ def http_server_thread() -> None:
 # -----------------------------------------------------------------------------
 # parse_frame
 # -----------------------------------------------------------------------------
-

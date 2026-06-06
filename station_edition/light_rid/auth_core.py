@@ -1293,7 +1293,7 @@ def _auth_mark_sso_used(check: str | None) -> bool:
 
 def _build_sso_link_payload(body: dict | None, *, require_reauth: bool = True, headers=None, client_ip: str | None = None) -> tuple[dict, int]:
     if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
-        return {"ok": False, "error": "网页登录鉴权未启用或未完成配置"}, 400
+        return {"ok": False, "error": "网页登录未启用"}, 400
     src = body if isinstance(body, dict) else {}
     subject = str(src.get("username") or "-")
     if require_reauth:

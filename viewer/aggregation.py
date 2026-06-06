@@ -52,13 +52,15 @@ def _request_json(
     *,
     method: str = "GET",
     body: dict[str, Any] | None = None,
+    page_request: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None, int | None]:
     url = base_url.rstrip("/") + path
     headers = {
         "Accept": "application/json",
         "User-Agent": f"LightRIDNodeCenter/{APP_VERSION}",
-        "X-LightRID-Page": "1",
     }
+    if page_request:
+        headers["X-LightRID-Page"] = "1"
     if token:
         headers["X-API-Token"] = token
         headers["Authorization"] = "Bearer " + token
@@ -70,9 +72,25 @@ def _request_json(
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
             raw = resp.read(MAX_JSON_BYTES + 1)
+            code = int(resp.status)
             if len(raw) > MAX_JSON_BYTES:
-                return None, "response too large", int(resp.status)
-            return json.loads(raw.decode("utf-8", "replace")), None, int(resp.status)
+                return None, "response too large", code
+            text = raw.decode("utf-8", "replace")
+            try:
+                payload = json.loads(text)
+            except Exception:
+                ctype = str(resp.headers.get("Content-Type") or "").strip()
+                snippet = " ".join(text.strip().split())[:160]
+                detail = f"invalid JSON response from {path} (HTTP {code}"
+                if ctype:
+                    detail += f", {ctype}"
+                detail += ")"
+                if snippet:
+                    detail += f": {snippet}"
+                return None, detail, code
+            if not isinstance(payload, dict):
+                return None, f"invalid API response from {path}: JSON root is not an object", code
+            return payload, None, code
     except urllib.error.HTTPError as exc:
         msg = exc.read(8192).decode("utf-8", "replace")
         try:
@@ -86,12 +104,26 @@ def _request_json(
         return None, str(exc), None
 
 
-def _fetch_json(base_url: str, token: str, path: str) -> tuple[dict[str, Any] | None, str | None, int | None]:
-    return _request_json(base_url, token, path)
+def _fetch_json(
+    base_url: str,
+    token: str,
+    path: str,
+    *,
+    page_request: bool = False,
+) -> tuple[dict[str, Any] | None, str | None, int | None]:
+    return _request_json(base_url, token, path, page_request=page_request)
 
 
 def _payload_ok(payload: dict[str, Any] | None) -> bool:
     return isinstance(payload, dict) and payload.get("ok", True) is not False
+
+
+def _payload_error(payload: dict[str, Any] | None, fallback: str = "invalid API response") -> str:
+    if isinstance(payload, dict):
+        msg = str(payload.get("error") or payload.get("message") or "").strip()
+        if msg:
+            return msg
+    return fallback
 
 
 def test_node_communication(node: dict[str, Any]) -> dict[str, Any]:
@@ -101,6 +133,7 @@ def test_node_communication(node: dict[str, Any]) -> dict[str, Any]:
     api_root = base_url.rstrip("/") + "/api/v1"
     root, root_err, root_code = _fetch_json(base_url, token, "/api/v1")
     if not _payload_ok(root):
+        err = root_err or _payload_error(root)
         return {
             "id": node.get("id", 0),
             "name": node.get("name") or base_url,
@@ -108,7 +141,7 @@ def test_node_communication(node: dict[str, Any]) -> dict[str, Any]:
             "api_root": api_root,
             "enabled": bool(node.get("enabled", True)),
             "ok": False,
-            "error": "api root failed: " + (root_err or "invalid API response"),
+            "error": "api root failed: " + err,
             "status_code": root_code,
             "latency_ms": int((time.time() - started) * 1000),
             "station": {"name": node.get("name") or base_url, "lat": None, "lon": None, "zoom": 13},
@@ -119,6 +152,7 @@ def test_node_communication(node: dict[str, Any]) -> dict[str, Any]:
         }
     snapshot, snap_err, snap_code = _fetch_json(base_url, token, "/api/v1/snapshot")
     if not _payload_ok(snapshot):
+        err = snap_err or _payload_error(snapshot)
         return {
             "id": node.get("id", 0),
             "name": node.get("name") or base_url,
@@ -126,7 +160,7 @@ def test_node_communication(node: dict[str, Any]) -> dict[str, Any]:
             "api_root": api_root,
             "enabled": bool(node.get("enabled", True)),
             "ok": False,
-            "error": "snapshot API failed: " + (snap_err or "invalid API response"),
+            "error": "snapshot API failed: " + err,
             "status_code": snap_code,
             "latency_ms": int((time.time() - started) * 1000),
             "station": {"name": node.get("name") or base_url, "lat": None, "lon": None, "zoom": 13},
@@ -297,6 +331,8 @@ def fetch_node_live(node: dict[str, Any], *, include_hw: bool = False) -> dict[s
     health: dict[str, Any] | None = None
     health_err: str | None = None
     health_code: int | None = None
+    if snapshot is not None and not _payload_ok(snapshot) and not snap_err:
+        snap_err = _payload_error(snapshot, "invalid API response")
     if snapshot is None:
         health, health_err, health_code = _fetch_json(base_url, token, "/api/health")
     hw_payload: dict[str, Any] | None = None
@@ -312,6 +348,7 @@ def fetch_node_live(node: dict[str, Any], *, include_hw: bool = False) -> dict[s
             snap_code = drones_code
     station = _station_position_from_snapshot(snapshot or {})
     ok = snapshot is not None and _payload_ok(snapshot)
+    snapshot_error = snap_err or _payload_error(snapshot, "")
     service = (health or {}).get("service") if isinstance((health or {}).get("service"), dict) else {}
     hw_data = (hw_payload or {}).get("data") if isinstance((hw_payload or {}).get("data"), dict) else {}
     host = hw_data.get("host") if isinstance(hw_data.get("host"), dict) else {}
@@ -334,7 +371,7 @@ def fetch_node_live(node: dict[str, Any], *, include_hw: bool = False) -> dict[s
         "base_url": base_url,
         "enabled": bool(node.get("enabled")),
         "ok": ok,
-        "error": None if ok else (snap_err or health_err or "request failed"),
+        "error": None if ok else (snapshot_error or health_err or "request failed"),
         "status_code": snap_code or health_code,
         "latency_ms": int((time.time() - started) * 1000),
         "station": station,
@@ -460,6 +497,7 @@ def fetch_node_metrics(node: dict[str, Any], window: str = "12h") -> dict[str, A
             str(node.get("base_url") or ""),
             str(node.get("token") or ""),
             "/api/settings/metrics?window=" + urllib.parse.quote(raw, safe=""),
+            page_request=True,
         )
     if payload is None:
         if str(err or "").strip().lower() == "login required":

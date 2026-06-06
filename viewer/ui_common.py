@@ -108,18 +108,18 @@ function viewerPageLoadingState(target, timeoutSec){
   var elapsed = Math.floor((Date.now() - viewerPageLoadingStartedAt) / 1000);
   var limit = Math.max(5, Number(timeoutSec || 15) || 15);
   var remain = Math.max(0, limit - elapsed);
-  var name = String(target || '\u9875\u9762\u6570\u636e');
+  var name = String(target || '\u6570\u636e');
   if(remain > 0){
     return {
       target: name,
-      detail: '\u6b63\u5728\u8bfb\u53d6 ' + name,
-      status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u9884\u8ba1 ' + remain + 's \u540e\u63d0\u793a\u8d85\u65f6'
+      detail: '\u6b63\u5728\u8bfb\u53d6 ' + name + '\u2026',
+      status: elapsed + 's'
     };
   }
   return {
     target: name,
-    detail: '\u8bfb\u53d6 ' + name + ' \u8d85\u65f6\uff0c\u4ecd\u5728\u7b49\u5f85\u8fd4\u56de',
-    status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u6682\u4e0d\u5173\u95ed\u9875\u9762'
+    detail: '\u7b49\u5f85 ' + name + ' \u54cd\u5e94\u2026',
+    status: elapsed + 's'
   };
 }
 function viewerPageLoadingText(target, timeoutSec){
@@ -138,7 +138,7 @@ function showViewerPageLoading(target, title, timeoutSec){
     host = document.createElement('div');
     host.id = 'rid-loading-overlay';
     host.className = 'rid-loading-overlay';
-    host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title"></div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u5f53\u524d\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u8be6\u7ec6\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
+    host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title"></div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
     document.body.appendChild(host);
   }
   var titleEl = host.querySelector('.rid-loading-title');
@@ -147,7 +147,7 @@ function showViewerPageLoading(target, title, timeoutSec){
   var statusEl = host.querySelector('[data-role="status"]');
   function tick(){
     var state = viewerPageLoadingState(target, timeoutSec);
-    if(titleEl) titleEl.textContent = String(title || '\u6b63\u5728\u8bfb\u53d6\u6570\u636e');
+    if(titleEl) titleEl.textContent = String(title || '\u8bfb\u53d6\u4e2d');
     if(copyEl) copyEl.textContent = state.detail;
     if(targetEl) targetEl.textContent = state.target;
     if(statusEl) statusEl.textContent = state.status;

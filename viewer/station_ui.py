@@ -164,13 +164,13 @@ def _viewer_patch_js() -> str:
     var remain = Math.max(0, viewerLoadingTimeoutSec - elapsed);
     if(remain > 0){
       return {
-        detail: '\u6b63\u5728\u5411 ' + viewerLoadingTargetText + ' \u83b7\u53d6\u6570\u636e',
-        status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u9884\u8ba1 ' + remain + 's \u540e\u63d0\u793a\u8d85\u65f6'
+        detail: '\u6b63\u5728\u4ece ' + viewerLoadingTargetText + ' \u8bfb\u53d6',
+        status: '' + elapsed + 's'
       };
     }
     return {
-      detail: '\u5411 ' + viewerLoadingTargetText + ' \u83b7\u53d6\u6570\u636e\u8d85\u65f6\uff0c\u4ecd\u5728\u7b49\u5f85\u8fd4\u56de',
-      status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u6682\u4e0d\u5173\u95ed\u9875\u9762'
+      detail: '\u7b49\u5f85 ' + viewerLoadingTargetText + ' \u54cd\u5e94',
+      status: '' + elapsed + 's'
     };
   }
   function ensureLoadingOverlay(state){
@@ -179,13 +179,13 @@ def _viewer_patch_js() -> str:
       host = document.createElement('div');
       host.id = 'rid-loading-overlay';
       host.className = 'rid-loading-overlay';
-      host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"><div class="rid-loading-spinner-core"><div class="rid-loading-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title">\u6b63\u5728\u8bfb\u53d6\u6570\u636e</div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u5f53\u524d\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u8be6\u7ec6\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
+      host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"><div class="rid-loading-spinner-core"><div class="rid-loading-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title">\u8bfb\u53d6\u4e2d</div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
       document.body.appendChild(host);
     }
     var title = host.querySelector('.rid-loading-title');
     var copy = host.querySelector('.rid-loading-copy');
     if(copy) copy.textContent = state.detail;
-    if(title) title.textContent = '\u6b63\u5728\u8bfb\u53d6\u6570\u636e';
+    if(title) title.textContent = '\u8bfb\u53d6\u4e2d';
     var target = host.querySelector('[data-role="target"]');
     if(target) target.textContent = viewerLoadingTargetText;
     var status = host.querySelector('[data-role="status"]');
@@ -215,7 +215,7 @@ def _viewer_patch_js() -> str:
     if(status) status.textContent = '读取中';
     var ts = qs('cur-ts');
     if(ts) ts.textContent = '读取中';
-    if(status) status.textContent = '\u6b63\u5728\u8bfb\u53d6\u6570\u636e';
+    if(status) status.textContent = '\u8bfb\u53d6\u4e2d';
     if(ts) ts.textContent = '\u8bfb\u53d6\u4e2d';
     var logbox = qs('logbox');
     if(logbox && !logbox.childElementCount){

@@ -45,7 +45,7 @@ def normalize_base_url(value: str) -> str:
     if any(ch.isspace() for ch in raw):
         raise ValueError("API address must not contain whitespace")
     if not raw:
-        raise ValueError("API 地址不能为空")
+        raise ValueError("API 地址必填")
     if "://" not in raw:
         raw = "http://" + raw
     parsed = urlparse(raw)
@@ -169,16 +169,16 @@ class ConfigStore:
         sso_hash = current["sso_check_hash"]
         if password:
             if len(password) < 4:
-                raise ValueError("密码至少 4 位")
+                raise ValueError("密码长度不足")
             password_hash = hash_secret(password)
         if sso_check:
             if len(sso_check) < 12:
-                raise ValueError("SSO check 至少 12 位")
+                raise ValueError("Check 码长度不足")
             sso_hash = hash_secret(sso_check)
         if enabled and not password_hash and not (sso_enabled and sso_hash):
-            raise ValueError("启用登录前必须至少配置密码登录或 SSO 登录")
+            raise ValueError("至少启用一种登录方式")
         if enabled and not sso_enabled and not password_hash:
-            raise ValueError("不能关闭最后一个可用登录方式")
+            raise ValueError("必须保留一种登录方式")
         self.set_setting("auth.enabled", "1" if enabled else "0")
         self.set_setting("auth.username", username)
         self.set_setting("auth.password_hash", password_hash)
@@ -279,9 +279,9 @@ class ConfigStore:
         lat = _float_or_none(src.get("base_lat"))
         lon = _float_or_none(src.get("base_lon"))
         if lat is not None and not (-90 <= lat <= 90):
-            raise ValueError("默认纬度超出范围")
+            raise ValueError("纬度无效")
         if lon is not None and not (-180 <= lon <= 180):
-            raise ValueError("默认经度超出范围")
+            raise ValueError("经度无效")
         self.set_setting("map.base_name", name)
         self.set_setting("map.base_lat", "" if lat is None else str(lat))
         self.set_setting("map.base_lon", "" if lon is None else str(lon))

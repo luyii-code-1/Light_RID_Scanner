@@ -127,9 +127,9 @@ function viewerPageLoadingText(target, timeoutSec){
   var elapsed = Math.floor((Date.now() - viewerPageLoadingStartedAt) / 1000);
   var limit = Math.max(5, Number(timeoutSec || 15) || 15);
   var remain = Math.max(0, limit - elapsed);
-  var name = String(target || '页面数据');
-  if(remain > 0) return '正在读取' + name + '，预计 ' + remain + 's 后提示超时';
-  return name + ' 返回较慢，仍在等待';
+  var name = String(target || '数据');
+  if(remain > 0) return '正在读取 ' + name + '…';
+  return '等待 ' + name + ' 响应…';
 }
 function showViewerPageLoading(target, title, timeoutSec){
   viewerPageLoadingStartedAt = Date.now();

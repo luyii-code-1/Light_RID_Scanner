@@ -2190,8 +2190,8 @@ function renderWorkflowPopup(){
     '<div class="main-workflow-head">工作流</div>'
     + '<div class="main-workflow-row"><div class="main-workflow-label">状态</div><div class="main-workflow-value">' + esc(workflowSummaryText(state)) + '</div><div class="main-workflow-sub">' + esc(String(state.message || workflowTitleText(state) || '-')) + '</div></div>'
     + '<div class="main-workflow-row"><div class="main-workflow-label">' + esc(state.running ? '排队 / 剩余' : '处理进度') + '</div><div class="main-workflow-value">' + esc(workflowQueueDisplay(state)) + '</div><div class="main-workflow-sub">' + esc(detail.join(' | ')) + '</div></div>'
-    + '<div class="main-workflow-row"><div class="main-workflow-label">批次</div><div class="main-workflow-value">' + esc(batchText) + '</div><div class="main-workflow-sub">后台按 128 条一批推进重解析</div></div>'
-    + '<div class="main-workflow-row"><div class="main-workflow-label">速度</div><div class="main-workflow-value">' + esc(speedText) + '</div><div class="main-workflow-sub">' + esc(state.eta_sec ? ('预计剩余 ' + Number(state.eta_sec).toFixed(1) + ' 秒') : '等待更多进度样本') + '</div></div>';
+    + '<div class="main-workflow-row"><div class="main-workflow-label">批次</div><div class="main-workflow-value">' + esc(batchText) + '</div><div class="main-workflow-sub">批量处理中</div></div>'
+    + '<div class="main-workflow-row"><div class="main-workflow-label">速度</div><div class="main-workflow-value">' + esc(speedText) + '</div><div class="main-workflow-sub">' + esc(state.eta_sec ? ('预计剩余 ' + Number(state.eta_sec).toFixed(1) + ' 秒') : '估算中') + '</div></div>';
 }
 function updateWorkflowIndicator(){
   var btn = qs('btn-main-workflow');
@@ -2252,12 +2252,12 @@ function renderDiagnosticPopup(){
   pop.innerHTML =
     '<div class="main-diagnostic-head">诊断</div>'
     + '<div class="main-diagnostic-body">'
-    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">WS 延迟</div><div class="main-diagnostic-value">' + esc(wsText) + '</div><div class="main-diagnostic-sub">最近一次服务端推送</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">WS 延迟</div><div class="main-diagnostic-value">' + esc(wsText) + '</div><div class="main-diagnostic-sub">最近推送</div></div>'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">实时解析队列</div><div class="main-diagnostic-value">' + esc(queueText) + '</div><div class="main-diagnostic-sub">' + esc(queueMeta.join(' | ') || '-') + '</div></div>'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">重解析队列</div><div class="main-diagnostic-value">' + esc(reparseQueueText) + '</div><div class="main-diagnostic-sub">' + esc(reparseMeta.join(' | ') || String(workflow.message || '-')) + '</div></div>'
     + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">解析耗时</div><div class="main-diagnostic-value">' + esc(fmtDiagNum(parser.avg_parse_ms, 3, ' ms')) + '</div><div class="main-diagnostic-sub">' + esc(parseMeta.join(' | ') || '-') + '</div></div>'
-    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机 CPU</div><div class="main-diagnostic-value">' + esc(hostCpu.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">当前主机 CPU 信息</div></div>'
-    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机负载</div><div class="main-diagnostic-value">' + esc(loadMeta.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">load average 与核数折算</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机 CPU</div><div class="main-diagnostic-value">' + esc(hostCpu.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">主机 CPU</div></div>'
+    + '<div class="main-diagnostic-row"><div class="main-diagnostic-label">主机负载</div><div class="main-diagnostic-value">' + esc(loadMeta.join(' | ') || '-') + '</div><div class="main-diagnostic-sub">系统负载</div></div>'
     + '</div>';
 }
 function scheduleDiagnosticRefresh(){
@@ -2926,7 +2926,7 @@ function buildExtraUi(){
     secBanner.id = 'security-banner';
     secBanner.className = 'sniff-banner warn security-banner';
     secBanner.style.display = 'none';
-    secBanner.innerHTML = '<span id="security-banner-text">当前处于 root 权限，存在安全风险。</span><button class="btn-mini warn" id="btn-security-settings" type="button">去设置修复</button>';
+    secBanner.innerHTML = '<span id="security-banner-text">当前运行权限过高</span><button class="btn-mini warn" id="btn-security-settings" type="button">去设置修复</button>';
     header.appendChild(secBanner);
   }
   if(qs('btn-security-settings') && qs('btn-security-settings').getAttribute('data-bound') !== '1'){
@@ -3391,12 +3391,12 @@ function applyRuntimeSecurity(meta){
         return;
       }
       if(qs('security-banner-text')){
-        qs('security-banner-text').textContent = '当前处于 root 权限，存在安全风险。请在设置中一键修复为 rid 专用账号运行。';
+        qs('security-banner-text').textContent = '当前运行权限过高，建议在设置中修复。';
       }
       banner.className = 'sniff-banner warn security-banner';
       banner.style.display = 'flex';
     if(applyRuntimeSecurity.__last !== 'root'){
-      showBanner('当前处于 root 权限，存在安全风险。', 'warn', 5200);
+      showBanner('当前运行权限过高', 'warn', 5200);
       }
       applyRuntimeSecurity.__last = 'root';
     }else{
@@ -7885,7 +7885,7 @@ function renderSummary(data){
     host.cpu_count != null ? fmt(host.cpu_count, 0, ' 核') : '',
     host.cpu_percent != null ? ('占用 ' + fmt(host.cpu_percent, 1, '%')) : ''
   ].filter(Boolean).join(' | ') || '-');
-  setText('diag-cpu-sub', '当前主机 CPU 信息');
+  setText('diag-cpu-sub', '主机 CPU');
   setText('diag-load', [
     host.load1 != null ? ('1m ' + fmt(host.load1, 2, '')) : '',
     host.load5 != null ? ('5m ' + fmt(host.load5, 2, '')) : '',

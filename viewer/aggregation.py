@@ -466,7 +466,7 @@ def fetch_node_metrics(node: dict[str, Any], window: str = "12h") -> dict[str, A
             return {
                 "ok": True,
                 "enabled": False,
-                "error": "子站负载接口需要网页登录会话；请更新子站以提供 /api/v1/metrics Token API。",
+                "error": "远程节点不支持此功能，请升级节点版本。",
                 "status_code": code,
                 "items": [],
             }
@@ -557,7 +557,7 @@ def reparse_node_aircraft(store: ConfigStore, sn: str, mode: str = "auto") -> di
         "item": detail.get("item") if isinstance(detail, dict) else None,
         "track": detail.get("track") if isinstance(detail, dict) else [],
         "track_count": detail.get("track_count", 0) if isinstance(detail, dict) else 0,
-        "message": f"远程重新解析完成: {ok_count}/{len(results)} 个节点",
+        "message": f"重新解析完成 {ok_count}/{len(results)}",
     }
 
 
@@ -758,8 +758,8 @@ def viewer_loading_snapshot(store: ConfigStore) -> dict[str, Any]:
         "drones": [],
         "map_drones": [],
         "logs": [
-            f"[loading] 正在向节点获取数据: 已配置 {node_count} 个节点，启用 {enabled_count} 个。",
-            "[loading] 首页框架已加载，节点数据返回后会自动更新。",
+            f"[loading] 正在请求 {enabled_count} 个节点…",
+            "[loading] 等待节点响应",
         ],
         "logs_seq": int(time.time()),
         "aps": [],
@@ -782,7 +782,7 @@ def viewer_loading_snapshot(store: ConfigStore) -> dict[str, Any]:
             "wifi_fast_supported": False,
             "wifi_fast_msg": "viewer aggregates remote station APIs",
             "sniff_state": "loading",
-            "sniff_msg": "正在向节点获取数据",
+            "sniff_msg": "读取中",
             "sniff_iface": "node-center",
             "sniff_idle_sec": 0,
             "sniff_last_pkt": "",

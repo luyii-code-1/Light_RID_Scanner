@@ -175,10 +175,10 @@ def _maybe_notify_viewer_node_status(store: ConfigStore, snap: dict[str, Any]) -
         if now - last < 300:
             continue
         VIEWER_NOTIFY_LAST_TS[key] = now
-        status = "恢复在线" if ok else "离线"
+        status = "上线" if ok else "离线"
         name = str(node.get("name") or node.get("base_url") or key)
         detail = str(node.get("error") or node.get("base_url") or "")
-        _viewer_send_wecom(store, f"Light RID Viewer: 节点{name}{status}\n{detail}")
+        _viewer_send_wecom(store, f"Light RID Viewer · {name} {status}\n{detail}")
 
 
 def _viewer_interfaces_payload() -> dict[str, Any]:
@@ -637,7 +637,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             if username == cfg["username"] and cfg["password_hash"] and verify_secret(password, cfg["password_hash"]):
                 self._set_session_response(username)
                 return
-            self._send_json({"ok": False, "error": "账号或密码错误"}, 401)
+            self._send_json({"ok": False, "error": "用户名或密码错误"}, 401)
             return
         if path == "/api/logout":
             self.store.delete_session(self._cookie_token())
@@ -693,7 +693,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "auth": self.store.save_auth_config(body)})
                 return
             if path == "/api/settings/notify/test":
-                ok, msg = _viewer_send_wecom(self.store, "Light RID Viewer 企业微信测试通知")
+                ok, msg = _viewer_send_wecom(self.store, "Light RID Viewer 通知测试")
                 self._send_json({"ok": bool(ok), "message": msg}, 200 if ok else 400)
                 return
             if path == "/api/history/aggregate":

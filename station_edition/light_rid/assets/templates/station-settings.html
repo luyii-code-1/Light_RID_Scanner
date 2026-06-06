@@ -352,7 +352,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
   <div class="topbar">
     <div>
       <div class="title">设置</div>
-      <div class="sub">常用设置都在这里，文件级修改放到“原始配置”。</div>
+      <div class="sub">面板 / 原始配置</div>
     </div>
     <div class="actions">
       <button class="btn" id="btn-back" type="button">返回主页</button>
@@ -365,7 +365,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
   <div class="draft-bar">
     <div class="draft-copy">
       <div class="draft-title" id="draft-title">当前没有未保存的改动</div>
-      <div class="draft-meta" id="draft-meta">改动会先留在草稿里。可以先测试，也可以直接保存。</div>
+      <div class="draft-meta" id="draft-meta">未保存的改动</div>
     </div>
     <div class="draft-actions">
       <button class="btn" id="btn-test-visual" type="button" disabled>测试</button>
@@ -393,7 +393,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>采集</h2>
-              <div class="section-copy">配置采集网卡、信道、离线判定和机型识别库。</div>
+              <div class="section-copy">采集参数</div>
             </div>
           </div>
           <div class="grid" style="margin-top:14px">
@@ -408,7 +408,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
               <div class="micro" id="channel-hint" style="display:none"></div>
             </div>
             <div class="field"><label>飞机离线判定(s)</label><input id="cfg-lost-timeout" type="number" min="3" max="3600" step="1"></div>
-            <div class="field"><label>轨迹保存量（点）</label><input id="cfg-track-points-limit" type="number" min="10" max="200000" step="1"><div class="micro">仅影响当前运行期轨迹显示和相关批量处理范围，数据库中的 HEX 会完整保留。</div></div>
+            <div class="field"><label>轨迹保存量（点）</label><input id="cfg-track-points-limit" type="number" min="10" max="200000" step="1"><div class="micro">仅影响运行期显示，数据库完整保留。</div></div>
             <div class="field full"><label>机型识别库</label><input id="cfg-model-map" type="text"></div>
             <div style="display:none">
               <input id="cfg-time" type="number" step="0.1">
@@ -424,10 +424,10 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <input id="cfg-model-update-url" type="text" placeholder="留空使用官方源">
                 <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
               </div>
-              <div class="micro" id="model-update-state">识别库可从默认源或自定义地址同步。</div>
+              <div class="micro" id="model-update-state">从默认源或自定义地址更新识别库。</div>
               <div class="model-update-row app-update-row" style="margin-top:10px">
                 <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
-                <div class="micro app-update-state" id="app-update-state">当前版本与最新版本尚未检查。</div>
+                <div class="micro app-update-state" id="app-update-state">尚未检查更新</div>
                 <div class="row-actions">
                   <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
                   <button class="btn ghost" id="btn-app-update-download" type="button">后台下载安装包</button>
@@ -435,7 +435,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                   <button class="btn" id="btn-app-update-start" type="button">安装已校验安装包</button>
                 </div>
                 <input id="app-update-upload-file" type="file" hidden>
-                <div class="micro">下载任务会在后台继续；手动上传只按 GitHub Asset 的 SHA256 校验，文件名可不同，通过后才能开始安装。</div>
+                <div class="micro">下载完成后自动校验安装。</div>
               </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
@@ -464,7 +464,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
             <summary>
               <div class="network-bind-head">
                 <div class="network-bind-title">自定义网卡绑定</div>
-                <div class="network-bind-copy">单独管理扫描、AP 与桥接用途，默认折叠，避免把主采集设置区挤乱。</div>
+                <div class="network-bind-copy">自定义网卡绑定</div>
               </div>
             </summary>
             <div class="network-bind-body">
@@ -488,7 +488,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>地图与基站</h2>
-              <div class="section-copy">设置地图中心、基站坐标、默认缩放和航向参考。</div>
+              <div class="section-copy">地图与基站参数</div>
             </div>
           </div>
           <div class="grid">
@@ -505,7 +505,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <button class="btn" id="btn-browser-loc" type="button">读取浏览器位置</button>
                 <button class="btn ghost" id="btn-clear-base-loc" type="button">清空基站坐标</button>
               </div>
-              <div class="micro" id="base-geo-hint">浏览器定位能力由当前访问协议和浏览器权限决定。</div>
+              <div class="micro" id="base-geo-hint">由访问协议和浏览器权限决定。</div>
             </div>
           </div>
         </div>
@@ -513,7 +513,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="list-head">
             <div>
               <h2>报警区域</h2>
-              <div class="section-copy">用两组经纬度边界定义矩形告警范围。</div>
+              <div class="section-copy">定义告警区域</div>
             </div>
             <button class="btn" id="btn-zone-add" type="button">添加区域</button>
           </div>
@@ -523,7 +523,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>通知与访问控制</h2>
-              <div class="section-copy">管理通知、登录方式、API Token 和访问来源限制。</div>
+              <div class="section-copy">通知与访问控制</div>
             </div>
           </div>
           <div class="access-subgrid">
@@ -549,12 +549,12 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">网页登录</div>
-                  <div class="access-subcopy">控制设置页和内置页面的账号密码登录会话。</div>
+                  <div class="access-subcopy">网页登录配置</div>
                 </div>
               </div>
               <div class="grid">
                 <div class="field"><label>登录标题</label><input id="cfg-auth-realm" type="text"><div class="micro">显示在登录框和认证域。</div></div>
-                <div class="field"><label>会话有效期(min)</label><input id="cfg-auth-ttl" type="number" min="1" max="10080" step="1"><div class="micro">范围 1 分钟到 7 天。</div></div>
+                <div class="field"><label>会话有效期(min)</label><input id="cfg-auth-ttl" type="number" min="1" max="10080" step="1"><div class="micro">1 - 10080 分钟</div></div>
                 <div class="field"><label>网页登录账号</label><input id="cfg-auth-user" type="text" placeholder="留空即不修改"></div>
                 <div class="field"><label>网页登录密码</label><input id="cfg-auth-pass" type="password" placeholder="留空即不修改"></div>
               </div>
@@ -565,13 +565,13 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <label><input id="cfg-auth-method-password" type="checkbox"> 账号密码登录</label>
                 <label><input id="cfg-auth-method-passkey" type="checkbox"> PassKey 登录</label>
               </div>
-              <div class="micro" id="auth-method-state">至少保留一种网页登录方式。关闭账号密码直登后，账号密码仍用于设置页二次确认。</div>
+              <div class="micro" id="auth-method-state">至少启用一种登录方式</div>
             </div>
             <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">通行密钥登录</div>
-                  <div class="access-subcopy">为网页登录账号绑定浏览器通行密钥，支持一键登录。</div>
+                  <div class="access-subcopy">通行密钥管理</div>
                 </div>
               </div>
               <div class="grid">
@@ -580,14 +580,14 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
               <div class="row-actions">
                 <button class="btn" id="btn-passkey-add" type="button">验证并添加</button>
               </div>
-              <div class="micro" id="passkey-state">先配好网页登录账号和密码，再来这里添加通行密钥。</div>
+              <div class="micro" id="passkey-state">需要先配置账号密码</div>
               <div id="passkey-list" class="passkey-list"></div>
             </div>
             <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">SSO 登录链接</div>
-                  <div class="access-subcopy">SSO 不是单独开关。只要存在有效链接，它就会优先用于登录。</div>
+                  <div class="access-subcopy">SSO 链接列表</div>
                 </div>
               </div>
               <div class="token-actions">
@@ -605,14 +605,14 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <div class="field hidden" id="login-link-custom-field"><label>自定义有效期(min)</label><input id="login-link-ttl-min" type="number" min="1" max="5256000" step="1" value="1440"></div>
                 <label class="sso-single-use"><input id="login-link-single-use" type="checkbox"> 单次登录</label>
               </div>
-              <div class="micro" id="login-link-state">SSO 链接由校验码、有效期和单次登录状态控制。命中有效链接时，会优先于其他网页登录方式。</div>
+              <div class="micro" id="login-link-state">SSO 登录链接配置</div>
               <div id="login-link-list" class="list-wrap sso-link-list"></div>
             </div>
             <div class="access-subcard full collapsible collapsed">
               <div class="access-subhead">
                 <div>
                   <div class="access-subtitle">API Token</div>
-                  <div class="access-subcopy">外部 API Token 随机生成，只在创建成功时显示一次。</div>
+                  <div class="access-subcopy">API Token 管理</div>
                 </div>
               </div>
               <div class="api-token-create-grid">
@@ -672,7 +672,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>主机状态</h2>
-              <div class="section-copy">查看主机负载、网络地址和当前采集情况。</div>
+              <div class="section-copy">主机状态</div>
             </div>
             <button class="btn ghost" id="btn-refresh-host" type="button">刷新状态</button>
           </div>
@@ -687,7 +687,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>权限与 systemd 服务</h2>
-              <div class="section-copy">检查当前运行权限；需要修复时再写入 systemd 配置。</div>
+              <div class="section-copy">权限与服务</div>
             </div>
           </div>
           <div id="runtime-security-alert" class="security-alert">
@@ -703,14 +703,14 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
             <button class="btn" id="btn-service-register" type="button">注册/更新服务</button>
             <button class="btn" id="btn-iw-install" type="button">安装无线工具</button>
           </div>
-          <div class="micro" style="margin-top:10px">修复会创建运行账号、整理文件权限，并补齐采集和热点所需能力。sudo 密码只用于本次操作。</div>
+          <div class="micro" style="margin-top:10px">创建运行账号并配置权限</div>
           <div id="status-system-service" class="status">正在读取服务状态...</div>
         </div>
         <div class="card" data-card-key="metrics">
           <div class="section-head">
             <div>
               <h2>节点负载</h2>
-              <div class="section-copy">记录 CPU、内存、温度、负载和 AP 数趋势。</div>
+              <div class="section-copy">负载记录</div>
             </div>
           </div>
           <div class="metric-toolbar">
@@ -732,7 +732,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <option value="w1">仅 DS18B20 / w1</option>
                 <option value="off">关闭温度采集</option>
               </select>
-              <div class="micro">节点温度会写入主机状态和温度曲线。关闭后显示为空值。</div>
+              <div class="micro">关闭后温度数据不再记录。</div>
             </div>
           </div>
           <div class="metric-list" id="metrics-list">
@@ -749,7 +749,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>设置与扫描数据</h2>
-              <div class="section-copy">配置和扫描数据分开导入导出，避免混用。</div>
+              <div class="section-copy">设置与数据</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -760,7 +760,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="row-actions" style="margin-top:10px">
             <button class="btn" id="btn-export-scan-data" type="button">导出扫描数据</button>
             <button class="btn ghost" id="btn-import-scan-data" type="button">导入扫描数据</button>
-            <button class="btn ghost" id="btn-reidentify-recent-history" type="button">识别所有飞机近100包</button>
+            <button class="btn ghost" id="btn-reidentify-recent-history" type="button">全部重新解析</button>
             <input id="import-scan-data-file" type="file" accept=".json,application/json" style="display:none">
           </div>
           <div class="micro" id="settings-config-path" style="margin-top:10px">设置文件: -</div>
@@ -772,7 +772,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>许可协议</h2>
-              <div class="section-copy">查看或撤回 EULA 确认；撤回后需要重新同意。</div>
+              <div class="section-copy">许可协议</div>
             </div>
           </div>
           <div class="row-actions" style="margin-top:14px">
@@ -785,19 +785,19 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
           <div class="section-head">
             <div>
               <h2>浏览器偏好</h2>
-              <div class="section-copy">仅影响当前浏览器的显示偏好。</div>
+              <div class="section-copy">显示偏好</div>
             </div>
           </div>
           <div class="checks pref-checks" style="margin-top:14px">
             <label><input id="pref-new-firmware-parser" type="checkbox"> 显示 RID 包解析结果</label>
           </div>
-          <div class="micro">只影响当前浏览器的显示。后台仍按旧 ODID 和新版 DJI Beacon 两套规则分别解析。默认开启。</div>
+          <div class="micro">仅影响当前浏览器显示。</div>
         </div>
         <div class="card settings-collapsible collapsed" id="settings-runtime">
           <div class="section-head">
             <div>
               <h2>实时 AP</h2>
-              <div class="section-copy">查看最近扫描到的 AP 和运行日志片段。</div>
+              <div class="section-copy">实时 AP 与日志</div>
             </div>
             <button class="btn ghost" id="btn-refresh-runtime" type="button">刷新</button>
           </div>
@@ -813,7 +813,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
       <div class="raw-toolbar">
         <div>
           <h2>原始配置</h2>
-          <div class="section-copy">按目录浏览配置文件，支持切换、编辑、保存和删除。进入前需要先验证网页登录密码。</div>
+          <div class="section-copy">配置文件管理</div>
         </div>
         <div class="row-actions">
           <button class="btn" id="btn-load-raw" type="button">刷新目录</button>
@@ -861,7 +861,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
 <div class="modal-mask" id="reauth-modal">
   <div class="modal-card">
     <h3>再次验证</h3>
-    <div class="section-copy">敏感操作需要再次验证，包括查看/复制 Token、添加 PassKey 和解锁原始配置。</div>
+    <div class="section-copy">需要验证身份</div>
     <div class="grid" style="margin-top:14px">
       <div class="field full"><label>账号</label><input id="reauth-user" type="text" autocomplete="username"></div>
       <div class="field full"><label>密码</label><input id="reauth-pass" type="password" autocomplete="current-password"></div>
@@ -876,7 +876,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
 <div class="modal-mask" id="elevate-modal">
   <div class="modal-card">
     <h3>临时提权</h3>
-    <div class="section-copy" id="elevate-copy">此操作需要 root 权限；sudo 密码只用于本次请求，不会保存。</div>
+    <div class="section-copy" id="elevate-copy">需要管理员权限</div>
     <div class="grid" style="margin-top:14px">
       <div class="field full"><label>sudo 密码</label><input id="elevate-pass" type="password" autocomplete="off"></div>
     </div>
@@ -890,7 +890,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
 <div class="modal-mask" id="one-time-modal">
   <div class="modal-card">
     <h3 id="one-time-title">只显示一次</h3>
-    <div class="section-copy" id="one-time-note">关闭后不能再次查看或复制。</div>
+    <div class="section-copy" id="one-time-note">内容仅显示一次</div>
     <div class="one-time-secret" id="one-time-secret"></div>
     <div class="row-actions" style="margin-top:14px">
       <button class="btn" id="btn-one-time-copy" type="button">复制</button>
@@ -901,7 +901,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
 <div class="modal-mask" id="model-map-modal">
   <div class="modal-card wide">
     <h3>识别库编辑</h3>
-    <div class="section-copy">编辑本地 rid-models.json 条目，保存后会立即刷新实时和历史中的机型识别。</div>
+    <div class="section-copy">编辑识别映射表，保存后立即生效。</div>
     <div class="model-editor">
       <div class="model-editor-toolbar">
         <input id="model-map-search" type="text" placeholder="前缀或机型">
@@ -917,13 +917,13 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
 <div class="modal-mask" id="app-update-upload-modal">
   <div class="modal-card">
     <h3>上传本地安装包</h3>
-    <div class="micro">先选择与当前架构匹配的安装包。系统会先锁定当前架构对应的 Release 资产，只显示待校验的 SHA256；正式上传时不要求文件名一致。</div>
+    <div class="micro">选择安装包并上传校验</div>
     <div class="row-actions" style="margin-top:12px">
       <button class="btn ghost" id="btn-app-update-upload-pick" type="button">选择文件</button>
       <button class="btn" id="btn-app-update-upload-confirm" type="button">开始上传</button>
     </div>
     <div class="micro" id="app-update-upload-file-name" style="margin-top:12px">尚未选择安装包。</div>
-    <div class="micro" id="app-update-upload-prepare-state" style="margin-top:8px">选择文件后会先按当前架构匹配 Release 资产，并显示待校验的 SHA256。</div>
+    <div class="micro" id="app-update-upload-prepare-state" style="margin-top:8px">选择文件后自动匹配并校验。</div>
     <div class="row-actions" style="margin-top:16px">
       <button class="btn ghost" id="btn-app-update-upload-close" type="button">关闭</button>
     </div>

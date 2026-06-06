@@ -825,7 +825,7 @@ def main() -> None:
         if _process_has_capabilities(list(RUNTIME_SERVICE_CAPABILITIES)):
             _log("[INFO] running without root; required network capabilities are present")
         else:
-            _log("[WARN] 当前不是 root，且未检测到采集所需网络能力；请在设置页执行一键修复")
+            _log("[WARN] 权限不足，请在设置页修复。")
 
     check_iw_available_on_startup()
 
@@ -882,7 +882,7 @@ def main() -> None:
                          max(0, args.settle), args.dwell_on_hit, args.hit_cap),
                    daemon=True).start()
         else:
-            _log("[WARN] 当前无网卡，已进入降级运行；跳频将在网卡恢复后自动启用")
+            _log("[WARN] 无可用网卡，等待恢复…")
     elif args.channel:
         _log(f"[INFO] lock channel {args.channel}")
         if iface:

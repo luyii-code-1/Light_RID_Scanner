@@ -85,7 +85,7 @@ def _api_mutate_tokens(mutator, *, tag: str = "api_token") -> tuple[bool, str, l
 
 def _build_api_token_create_payload(body: dict | None, *, headers=None, client_ip: str | None = None) -> tuple[dict, int]:
     if not _auth_enabled() or (not _auth_hashes_present(AUTH_CFG)):
-        return {"ok": False, "error": "网页登录鉴权未启用或未完成配置，不能生成 API Token"}, 400
+        return {"ok": False, "error": "网页登录未启用"}, 400
     src = body if isinstance(body, dict) else {}
     subject = str(src.get("username") or "-")
     reauth_ok = _auth_check_userpass(str(src.get("username") or ""), str(src.get("password") or ""))
@@ -93,7 +93,7 @@ def _build_api_token_create_payload(body: dict | None, *, headers=None, client_i
         reauth_ok = _auth_check_basic_header(headers.get("Authorization"))
     if not reauth_ok:
         _op_log("api-token-create", "", actor=subject, ip=str(client_ip or "-"), ok=False)
-        return {"ok": False, "error": "账号或密码错误"}, 401
+        return {"ok": False, "error": "用户名或密码错误"}, 401
     now_wall = time.time()
     expires_at, expiry_err = _api_token_expiry_from_row(src, now_wall=now_wall, fallback=0.0)
     if expiry_err:
@@ -1017,11 +1017,11 @@ def _passkey_record_payload(passkey_name: str | None = None) -> str:
     name = str(passkey_name or "").strip()
     if name:
         return name[:80]
-    return "通行密钥 " + time.strftime("%Y-%m-%d %H:%M:%S")
+    return "PassKey " + time.strftime("%Y-%m-%d %H:%M:%S")
 
 def _passkey_login_begin(headers) -> dict:
     if not _auth_enabled() or not _auth_hashes_present(AUTH_CFG):
-        return {"ok": False, "error": "网页登录账号密码未配置完整"}
+        return {"ok": False, "error": "未配置登录账号"}
     if not _auth_login_method_enabled("passkey"):
         return {"ok": False, "error": "PassKey 登录已关闭"}
     items = [item for item in _normalize_passkeys(AUTH_CFG.get("passkeys")) if bool(item.get("enabled", True))]
@@ -1048,7 +1048,7 @@ def _passkey_login_begin(headers) -> dict:
 
 def _passkey_register_begin(body: dict | None, headers, *, client_ip: str | None = None) -> dict:
     if not _auth_enabled() or not _auth_hashes_present(AUTH_CFG):
-        return {"ok": False, "error": "网页登录账号密码未配置完整"}, 400
+        return {"ok": False, "error": "未配置登录账号"}, 400
     if not _auth_login_method_enabled("passkey"):
         return {"ok": False, "error": "PassKey 登录已关闭"}, 403
     src = body if isinstance(body, dict) else {}
@@ -1058,7 +1058,7 @@ def _passkey_register_begin(body: dict | None, headers, *, client_ip: str | None
         return {"ok": False, "error": "请同时提供账号和密码"}, 400
     if not _auth_check_userpass(user, pwd):
         _op_log("passkey-register", "start auth failed", actor=user or "-", ip=str(client_ip or "-"), ok=False)
-        return {"ok": False, "error": "账号或密码错误"}, 401
+        return {"ok": False, "error": "用户名或密码错误"}, 401
     rp_id = _webauthn_rp_id_from_headers(headers)
     origin = _webauthn_origin_from_headers(headers)
     realm = str(AUTH_CFG.get("realm") or "Light RID Scanner")
@@ -1154,7 +1154,7 @@ def _passkey_finish_register(body: dict | None, headers, *, client_ip: str | Non
 
 def _passkey_finish_login(body: dict | None, headers, *, client_ip: str | None = None) -> dict:
     if not _auth_enabled() or not _auth_hashes_present(AUTH_CFG):
-        return {"ok": False, "error": "网页登录账号密码未配置完整"}, 400
+        return {"ok": False, "error": "未配置登录账号"}, 400
     if not _auth_login_method_enabled("passkey"):
         return {"ok": False, "error": "PassKey 登录已关闭"}, 403
     src = body if isinstance(body, dict) else {}
@@ -1302,7 +1302,7 @@ def _build_sso_link_payload(body: dict | None, *, require_reauth: bool = True, h
             reauth_ok = _auth_check_basic_header(headers.get("Authorization"))
         if not reauth_ok:
             _op_log("login-link-create", "", actor=subject, ip=str(client_ip or "-"), ok=False)
-            return {"ok": False, "error": "账号或密码错误"}, 401
+            return {"ok": False, "error": "用户名或密码错误"}, 401
     next_path = str(src.get("next") or "/").strip() or "/"
     if not next_path.startswith("/") or next_path.startswith("//"):
         next_path = "/"

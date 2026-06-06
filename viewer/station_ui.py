@@ -54,7 +54,7 @@ def _viewer_patch_js() -> str:
   var viewerThemeBound = false;
   var viewerDataLoaded = false;
   var viewerLoadingStartedAt = 0;
-  var viewerLoadingTargetText = '远端 Station 节点';
+  var viewerLoadingTargetText = '远程节点';
   var viewerLoadingTimeoutSec = 15;
   function qs(id){ return document.getElementById(id); }
   function removeNode(node){ if(node && node.parentNode) node.parentNode.removeChild(node); }
@@ -154,9 +154,9 @@ def _viewer_patch_js() -> str:
     var elapsed = Math.floor((Date.now() - viewerLoadingStartedAt) / 1000);
     var remain = Math.max(0, viewerLoadingTimeoutSec - elapsed);
     if(remain > 0){
-      return '正在从 ' + viewerLoadingTargetText + ' 读取数据，预计 ' + remain + 's 后提示超时';
+      return '正在读取 ' + viewerLoadingTargetText + '…';
     }
-    return viewerLoadingTargetText + ' 返回较慢，仍在等待数据';
+    return '等待 ' + viewerLoadingTargetText + ' 响应…';
   }
   function loadingState(){
     if(!viewerLoadingStartedAt) viewerLoadingStartedAt = Date.now();
@@ -212,7 +212,7 @@ def _viewer_patch_js() -> str:
     var hint = qs('map-hint');
     if(hint) hint.textContent = msg.detail;
     var status = qs('ws-status');
-    if(status) status.textContent = '正在读取数据';
+    if(status) status.textContent = '读取中';
     var ts = qs('cur-ts');
     if(ts) ts.textContent = '读取中';
     if(status) status.textContent = '\u6b63\u5728\u8bfb\u53d6\u6570\u636e';

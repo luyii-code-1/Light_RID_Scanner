@@ -526,7 +526,7 @@
     return { response: r, data: d };
   }
   async function reidentifyRecentHistoryPackets() {
-    setStatus("status-data-transfer", "正在将最近历史包按 128 条一批加入重解析队列...", false);
+    setStatus("status-data-transfer", "正在加入重解析队列…", false);
     var data = await postJson("/api/settings/history/reidentify-recent", { limit: 100 });
     var state = historyReidentifyWorkflowState(data);
     setStatus("status-data-transfer", historyReidentifyWorkflowText(state), false);
@@ -616,7 +616,7 @@
     if (lastSystemServiceStatus && lastSystemServiceStatus.running_as_root) return Promise.resolve("");
     return new Promise(function(resolve) {
       elevateResolve = resolve;
-      if (qs("elevate-copy")) qs("elevate-copy").textContent = String(message || "此操作需要 root 权限；sudo 密码只用于本次请求，不会保存。");
+      if (qs("elevate-copy")) qs("elevate-copy").textContent = String(message || "需要管理员权限");
       if (qs("elevate-status")) setStatus("elevate-status", "密码只用于这次操作，不会写入配置文件或浏览器存储。", false);
       if (qs("elevate-modal")) qs("elevate-modal").classList.add("show");
       window.setTimeout(function() {
@@ -902,7 +902,7 @@
     box.classList.toggle("warn", runningRoot || !serviceOk);
     box.classList.toggle("ok", !runningRoot && serviceOk);
     if (qs("runtime-security-title")) {
-      qs("runtime-security-title").textContent = runningRoot ? "当前处于 root 权限" : serviceOk ? "运行权限正常" : "专用账号未完成";
+      qs("runtime-security-title").textContent = runningRoot ? "当前运行权限过高" : serviceOk ? "运行权限正常" : "专用账号未完成";
     }
     if (qs("runtime-security-copy")) {
       if (runningRoot) {
@@ -927,7 +927,7 @@
     try {
       if (btn) btn.disabled = true;
       setStatus("status-system-service", "正在注册 systemd 服务...", false);
-      const body = await privilegedBody({ confirm: true }, "注册/更新 systemd 服务需要 root 权限。请输入 sudo 密码；密码只用于本次请求，不会保存。");
+      const body = await privilegedBody({ confirm: true }, "注册或更新服务需要管理员权限");
       const data = await postJson("/api/settings/systemd/register", body);
       renderSystemServiceStatus(data && data.status || {});
       showNotice(data.message || "systemd 服务已注册。", "ok", 3600);
@@ -984,7 +984,7 @@
     try {
       if (btn) btn.disabled = true;
       setStatus("status-system-service", "正在修复运行权限...", false);
-      const body = await privilegedBody({ confirm: true }, "一键修复需要 root 权限。请输入 sudo 密码；密码只用于创建账号、授权文件和写入 systemd 服务，本系统不会保存。");
+      const body = await privilegedBody({ confirm: true }, "修复需要管理员权限");
       const data = await postJson("/api/settings/security/repair", body);
       restartScheduled = !!(data && data.restart_scheduled);
       restartDelay = Number(data && data.restart_delay_sec || restartDelay);
@@ -2695,7 +2695,7 @@
       throw new Error("请先保存当前设置，再应用网卡绑定到系统。");
     }
     if (!confirm("将按已保存配置调整网卡状态、AP 地址、hostapd 和内置 DHCP。继续？")) return;
-    const body = await privilegedBody({ confirm: true }, "应用网卡绑定需要 root 权限；sudo 密码只用于本次请求，不会保存。");
+    const body = await privilegedBody({ confirm: true }, "应用网卡绑定需要管理员权限");
     const data = await postJson("/api/network-bindings/apply", body);
     var lines = [];
     (Array.isArray(data.steps) ? data.steps : []).forEach(function(step) {

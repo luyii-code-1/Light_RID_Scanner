@@ -819,7 +819,7 @@ footer{text-align:center;padding:8px 10px;font-size:12px;color:#5b6470}
   <div class="panel">
     <div class="panel-hdr">
       🗺 地图
-      <span class="sub" id="map-hint">等待坐标...</span>
+      <span class="sub" id="map-hint">等待坐标</span>
     </div>
     <div id="map"></div>
   </div>
@@ -1779,28 +1779,19 @@ var initialLoadingTimer = null;
 function loadingStateForTarget(target){
   if(!initialLoadingStartedAt) initialLoadingStartedAt = Date.now();
   var elapsed = Math.floor((Date.now() - initialLoadingStartedAt) / 1000);
-  var remain = Math.max(0, initialLoadingTimeoutSec - elapsed);
-  var name = String(target || '\u672c\u673a\u57fa\u7ad9');
-  if(remain > 0){
-    return {
-      target: name,
-      detail: '\u6b63\u5728\u8bfb\u53d6 ' + name + ' \u6570\u636e',
-      status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u9884\u8ba1 ' + remain + 's \u540e\u63d0\u793a\u8d85\u65f6'
-    };
-  }
+  var name = String(target || '\u672c\u673a');
+  if(name === '\u672c\u673a') name = '\u672c\u673a';
   return {
     target: name,
-    detail: '\u8bfb\u53d6 ' + name + ' \u6570\u636e\u8d85\u65f6\uff0c\u4ecd\u5728\u7b49\u5f85\u540e\u7aef\u8fd4\u56de',
-    status: '\u5df2\u7b49\u5f85 ' + elapsed + 's\uff0c\u6682\u4e0d\u5173\u95ed\u9875\u9762'
+    detail: '\u6b63\u5728\u8bfb\u53d6 ' + name + '\u2026',
+    status: elapsed + 's'
   };
 }
 function loadingTextForTarget(target){
   if(!initialLoadingStartedAt) initialLoadingStartedAt = Date.now();
   var elapsed = Math.floor((Date.now() - initialLoadingStartedAt) / 1000);
-  var remain = Math.max(0, initialLoadingTimeoutSec - elapsed);
-  var name = String(target || '本机基站');
-  if(remain > 0) return '正在读取 ' + name + ' 数据，' + remain + 's 后超时';
-  return '读取 ' + name + ' 数据超时，仍在等待返回';
+  var name = String(target || '本机');
+  return '正在读取 ' + name + '…';
 }
 function showInitialDataLoading(target, title){
   var host = qs('rid-loading-overlay');
@@ -1808,7 +1799,7 @@ function showInitialDataLoading(target, title){
     host = document.createElement('div');
     host.id = 'rid-loading-overlay';
     host.className = 'rid-loading-overlay';
-    host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title"></div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u5f53\u524d\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u8be6\u7ec6\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
+    host.innerHTML = '<div class="rid-loading-shell"><div class="rid-loading-box"><div class="rid-loading-head"><div class="rid-loading-spinner"></div><div class="rid-loading-copy-wrap"><div class="rid-loading-title"></div><div class="rid-loading-copy"></div></div></div><div class="rid-loading-meta"><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u76ee\u6807</span><span class="rid-loading-meta-value" data-role="target"></span></div><div class="rid-loading-meta-line"><span class="rid-loading-meta-label">\u72b6\u6001</span><span class="rid-loading-meta-value" data-role="status"></span></div></div></div></div>';
     document.body.appendChild(host);
   }
   var titleEl = host.querySelector('.rid-loading-title');
@@ -1817,7 +1808,7 @@ function showInitialDataLoading(target, title){
   var statusEl = host.querySelector('[data-role="status"]');
   function tickLoading(){
     var state = loadingStateForTarget(target);
-    if(titleEl) titleEl.textContent = String(title || '\u6b63\u5728\u8bfb\u53d6\u6570\u636e');
+    if(titleEl) titleEl.textContent = String(title || '\u8bfb\u53d6\u4e2d');
     if(copyEl) copyEl.textContent = state.detail;
     if(targetEl) targetEl.textContent = state.target;
     if(statusEl) statusEl.textContent = state.status;
@@ -3680,7 +3671,7 @@ async function loadConfigEditor(){
   var ta = qs('config-editor');
   var st = qs('config-editor-status');
   if(!ta) return;
-  if(st) st.textContent = '读取中...';
+  if(st) st.textContent = '读取中';
   try{
     var data = await getJson('/api/config');
     ta.value = String(data.text || '');
@@ -3724,7 +3715,7 @@ async function loadConfigEditorLegacy(){
   var ta = qs('config-editor');
   var st = qs('config-editor-status');
   if(!ta) return;
-  if(st) st.textContent = '读取中...';
+  if(st) st.textContent = '读取中';
   try{
     var data = await getJson('/api/config');
     ta.value = String(data.text || '');

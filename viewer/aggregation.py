@@ -14,7 +14,7 @@ from typing import Any
 from viewer.storage import ConfigStore
 
 
-HTTP_TIMEOUT_SEC = 3.0
+HTTP_TIMEOUT_SEC = 15.0
 MAX_JSON_BYTES = 512 * 1024
 APP_VERSION = "0.1.0"
 LIVE_CACHE_SEC = 1.0

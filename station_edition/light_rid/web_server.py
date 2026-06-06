@@ -7323,7 +7323,7 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
     has_passkey = passkey_enabled and any(bool(item.get("enabled", True)) for item in _normalize_passkeys(AUTH_CFG.get("passkeys")))
     password_login_html = (
         '  <form id="login-form">\n'
-        '    <div class="field"><label for="user">账号</label><input id="user" autocomplete="username" autofocus></div>\n'
+        '    <div class="field"><label for="user">用户名</label><input id="user" autocomplete="username" autofocus></div>\n'
         '    <div class="field"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>\n'
         '    <div class="row"><button id="submit" type="submit">登录</button></div>\n'
         '  </form>\n'
@@ -7342,7 +7342,7 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
             if sso_available:
                 status_message = "当前只允许通过 SSO URL 登录，请使用已生成的登录链接进入。"
             else:
-                status_message = "现在没有可用的网页登录方式，请回到设置页检查登录方式。"
+                status_message = "暂无可用的登录方式，请在设置页配置。"
     status_class = "status err" if status_error else "status"
     status_html = '<div class="' + status_class + '" id="status">' + _html_escape(status_message, quote=False) + "</div>"
     method_labels: list[str] = []
@@ -7353,8 +7353,8 @@ def _build_login_html(next_path: str = "/", status_message: str = "", status_err
     elif passkey_enabled:
         method_labels.append("PassKey（待登记）")
     if sso_available:
-        method_labels.append("SSO URL（优先）")
-    login_method_copy = ("可用方式：" + " / ".join(method_labels)) if method_labels else "现在没有可用的网页登录方式。"
+        method_labels.append("SSO URL")
+    login_method_copy = (" / ".join(method_labels)) if method_labels else "无可用的登录方式"
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -7386,7 +7386,7 @@ button:hover{{transform:translateY(-1px);filter:brightness(1.05)}}
 </style></head><body>
 <main class="card">
   <h1 class="brand">Light RID Scanner</h1>
-  <p class="desc">登录监控平台。{_html_escape(login_method_copy, quote=False)}</p>
+  <p class="desc">登录 Light RID Scanner</p>
 {password_login_html}{passkey_login_html}
   {status_html}
 </main>

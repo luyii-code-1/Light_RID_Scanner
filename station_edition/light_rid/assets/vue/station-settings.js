@@ -9,6 +9,9 @@
   function enc(v2) {
     return String(v2 == null ? "" : v2).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
+  function esc(v2) {
+    return enc(v2).replace(/'/g, "&#39;");
+  }
   function splitLines(text) {
     var raw = String(text || "");
     if (raw.indexOf("\r") >= 0) raw = raw.split("\r").join("");
@@ -119,12 +122,11 @@
   var settingsTasks = [];
   function settingsLoadingState(target) {
     if (!settingsLoadingStartedAt) settingsLoadingStartedAt = Date.now();
-    var elapsed = Math.floor((Date.now() - settingsLoadingStartedAt) / 1e3);
     var name = String(target || "设置数据");
     return {
       target: name,
-      detail: "正在处理 " + name,
-      status: "已等待 " + elapsed + "s，完成后会自动刷新状态"
+      detail: "正在等待返回数据",
+      status: "正在处理"
     };
   }
   function showSettingsPageLoading(target, title) {
@@ -1542,6 +1544,9 @@
     else lines.push("启用后会自动检查 GitHub Release；下载、上传和安装都需要手动确认。");
     if (state.install_supported === false && state.support_reason) lines.push("当前环境: " + String(state.support_reason));
     if (state.asset_name) lines.push("匹配资产: " + String(state.asset_name));
+    if (state.mirror && state.mirror !== "github") lines.push("镜像: " + String(state.mirror_url || state.mirror));
+    if (state.force_update) lines.push("强制更新: 已启用，校验失败的安装包也可继续安装。");
+    if (state.staged_ready && state.staged_verified === false) lines.push("安装包校验: 未通过或缺少 SHA256，继续安装属于强制更新。");
     if (state.requires_sudo && state.staged_ready && !state.installing) lines.push("安装时会按需询问 sudo 密码。");
     el.textContent = lines.join("\n");
     if (qs("btn-app-update-check")) {
@@ -1589,6 +1594,40 @@
         });
       }, state.installing ? 3e3 : 1500);
     }
+  }
+  function appUpdateMirrorOptions(au) {
+    var opts = Array.isArray((au || {}).mirror_options) ? (au || {}).mirror_options : [];
+    if (!opts.length && appUpdateState && Array.isArray(appUpdateState.mirror_options)) opts = appUpdateState.mirror_options;
+    if (!opts.length) {
+      opts = [
+        { key: "github", label: "GitHub 官方" },
+        { key: "gh-proxy", label: "gh-proxy.org" },
+        { key: "custom", label: "自定义镜像" }
+      ];
+    }
+    return opts;
+  }
+  function renderAppUpdateMirrorOptions(au) {
+    var sel = qs("cfg-app-update-mirror");
+    if (!sel) return;
+    var current = String(au && au.mirror || appUpdateState && appUpdateState.mirror || "github");
+    var html = appUpdateMirrorOptions(au).map(function(item) {
+      var key = String(item.key || "");
+      if (!key) return "";
+      return '<option value="' + esc(key) + '">' + esc(item.label || key) + "</option>";
+    }).join("");
+    sel.innerHTML = html;
+    sel.value = current;
+    if (sel.value !== current) sel.value = "github";
+    updateAppUpdateMirrorUi();
+  }
+  function updateAppUpdateMirrorUi() {
+    var sel = qs("cfg-app-update-mirror");
+    var wrap = qs("app-update-custom-wrap");
+    var custom = qs("cfg-app-update-custom-mirror");
+    var isCustom = sel && sel.value === "custom";
+    if (wrap) wrap.classList.toggle("hidden", !isCustom);
+    if (custom) custom.disabled = !isCustom;
   }
   async function checkAppVersionNow() {
     var btn = qs("btn-app-update-check");
@@ -1922,7 +1961,10 @@
         url: v("cfg-model-update-url")
       },
       app_update: {
-        enabled: check("cfg-app-update-enabled")
+        enabled: check("cfg-app-update-enabled"),
+        mirror: v("cfg-app-update-mirror") || "github",
+        custom_mirror: v("cfg-app-update-custom-mirror"),
+        force_update: check("cfg-app-update-force")
       },
       metrics: {
         enabled: check("cfg-metrics-enabled"),
@@ -2914,6 +2956,9 @@
     qs("cfg-model-map").value = String(b.model_map || "");
     qs("cfg-model-update-enabled").checked = mu.enabled !== false;
     qs("cfg-app-update-enabled").checked = au.enabled !== false;
+    if (qs("cfg-app-update-force")) qs("cfg-app-update-force").checked = !!au.force_update;
+    if (qs("cfg-app-update-custom-mirror")) qs("cfg-app-update-custom-mirror").value = String(au.custom_mirror || "");
+    renderAppUpdateMirrorOptions(au);
     qs("cfg-model-update-url").value = String(mu.url || "");
     renderAppUpdateState(au && au.state || {});
     var must = mu.state || {};
@@ -3126,6 +3171,12 @@
       });
     });
     on("btn-app-update-upload-close", "click", closeAppUpdateUploadModal);
+    on("cfg-app-update-mirror", "change", function() {
+      updateAppUpdateMirrorUi();
+      updateVisualDraftState();
+    });
+    on("cfg-app-update-custom-mirror", "input", updateVisualDraftState);
+    on("cfg-app-update-force", "change", updateVisualDraftState);
     on("app-update-upload-file", "change", function(ev) {
       var file = ev && ev.target && ev.target.files && ev.target.files[0];
       prepareAppUpdateUploadPackage(file).catch(function(e) {

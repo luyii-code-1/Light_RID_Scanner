@@ -591,9 +591,9 @@ def _history_recent_raw_packet_candidates_locked(limit: int | None = None) -> li
     for sn, hist in history_table.items():
         if not isinstance(hist, dict):
             continue
+        fallback_ts = hist.get("last_capture_wall_ts") or hist.get("last_seen_wall_ts") or 0.0
         raw_packets = _history_storage_fetch_raw_packets(sn, per_aircraft_limit, newest_first=True, path=HISTORY_STORE_PATH)
         if not raw_packets:
-            fallback_ts = hist.get("last_capture_wall_ts") or hist.get("last_seen_wall_ts") or 0.0
             raw_packets = list(hist.get("raw_packets") or [])[-per_aircraft_limit:]
             for item in raw_packets:
                 if isinstance(item, dict) and "_wall_ts" not in item:
@@ -615,6 +615,110 @@ def _history_recent_raw_packet_candidates_locked(limit: int | None = None) -> li
                 "packet_count": len(raw_packets),
             })
     out.sort(key=lambda x: (str(x.get("sn") or ""), float(x.get("wall_ts") or 0.0), int(x.get("seq") or 0)))
+    return out
+
+
+def _history_storage_fetch_recent_raw_packets_by_sn(sns: list[str], limit: int, path: str | None = None) -> dict[str, list[dict]]:
+    clean_sns: list[str] = []
+    seen: set[str] = set()
+    for sn in sns or []:
+        text = str(sn or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        clean_sns.append(text)
+    if not clean_sns:
+        return {}
+    try:
+        per_sn_limit = max(1, int(limit or 1))
+    except Exception:
+        per_sn_limit = 1
+    db_path = os.path.abspath(str(path or HISTORY_STORE_PATH or _history_store_default_path()))
+    if not os.path.exists(db_path):
+        return {}
+    placeholders = ",".join("?" for _ in clean_sns)
+    sql = (
+        "WITH ranked AS ("
+        "SELECT id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format, "
+        "ROW_NUMBER() OVER (PARTITION BY sn ORDER BY capture_wall_ts DESC, id DESC) AS rn "
+        "FROM raw_packets WHERE sn IN (" + placeholders + ")"
+        ") "
+        "SELECT id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format "
+        "FROM ranked WHERE rn <= ? ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
+    )
+    args = list(clean_sns) + [per_sn_limit]
+    conn = None
+    try:
+        _log(f"[INFO] history raw packet bulk fetch open: sns={len(clean_sns)} limit={per_sn_limit}")
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        _log("[INFO] history raw packet bulk fetch query")
+        rows = conn.execute(sql, args).fetchall()
+        _log(f"[INFO] history raw packet bulk fetch rows={len(rows)}")
+    except Exception as exc:
+        _log(f"[WARN] history raw packet bulk fetch failed: {exc}")
+        return {}
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        item = _history_storage_packet_row_to_dict(row)
+        sn = str((row["sn"] if isinstance(row, sqlite3.Row) else row[1]) or "")
+        out.setdefault(sn, []).append(item)
+    return out
+
+
+def _history_recent_raw_packet_candidates(limit: int | None = None) -> list[dict]:
+    try:
+        per_aircraft_limit = int(limit)
+    except Exception:
+        per_aircraft_limit = _track_store_points_limit()
+    per_aircraft_limit = max(1, min(per_aircraft_limit, _track_store_points_limit()))
+    started_at = time.perf_counter()
+    _log(f"[INFO] history reparse candidate collect start: limit={per_aircraft_limit}")
+    with state_lock:
+        history_items = [
+            (str(sn or ""), dict(hist))
+            for sn, hist in history_table.items()
+            if isinstance(hist, dict)
+            and (_scan_type_key(hist.get("scan_type")) == "phone" or (len(str(sn or "")) == 20 and str(sn or "").isalnum()))
+        ]
+    _log(f"[INFO] history reparse candidate collect copied: aircraft={len(history_items)} elapsed={time.perf_counter() - started_at:.2f}s")
+    raw_by_sn = _history_storage_fetch_recent_raw_packets_by_sn(
+        [sn for sn, _hist in history_items],
+        per_aircraft_limit,
+        path=HISTORY_STORE_PATH,
+    )
+    _log(f"[INFO] history reparse candidate collect fetched: aircraft={len(raw_by_sn)} elapsed={time.perf_counter() - started_at:.2f}s")
+    out: list[dict] = []
+    for item_index, (sn, hist) in enumerate(history_items, 1):
+        fallback_ts = hist.get("last_capture_wall_ts") or hist.get("last_seen_wall_ts") or 0.0
+        raw_packets = list(raw_by_sn.get(sn) or [])
+        if not raw_packets:
+            raw_packets = list(hist.get("raw_packets") or [])[-per_aircraft_limit:]
+            for item in raw_packets:
+                if isinstance(item, dict) and "_wall_ts" not in item:
+                    item["_wall_ts"] = fallback_ts
+        for packet_index, raw in enumerate(raw_packets):
+            if not isinstance(raw, dict):
+                continue
+            if not str(raw.get("hex") or "").strip():
+                continue
+            out.append({
+                "wall_ts": _history_raw_packet_wall_ts(raw, fallback_ts),
+                "seq": (item_index * max(1, per_aircraft_limit)) + packet_index,
+                "sn": sn,
+                "hist": dict(hist),
+                "raw": dict(raw),
+                "packet_index": packet_index,
+                "packet_count": len(raw_packets),
+            })
+    out.sort(key=lambda x: (str(x.get("sn") or ""), float(x.get("wall_ts") or 0.0), int(x.get("seq") or 0)))
+    _log(f"[INFO] history reparse candidate collect done: packets={len(out)} elapsed={time.perf_counter() - started_at:.2f}s")
     return out
 
 def _history_raw_hex_to_bytes(raw_hex: str) -> bytes:
@@ -795,6 +899,8 @@ def _history_apply_reidentified_locked(
     *,
     used_mode: str | None = None,
     update_track: bool = True,
+    update_raw_packet: bool = True,
+    update_memory: bool = True,
 ) -> dict:
     basic = decoded.get("basic_id") if isinstance(decoded, dict) else None
     loc = decoded.get("location") if isinstance(decoded, dict) else None
@@ -809,9 +915,9 @@ def _history_apply_reidentified_locked(
     sn = parsed_sn if parsed_sn and (old_sn.startswith("MAC:") or old_sn != parsed_sn) else old_sn
     if not sn:
         sn = parsed_sn or old_sn
-    existing = history_table.get(sn) if sn != old_sn else None
+    existing = history_table.get(sn) if (update_memory and sn != old_sn) else None
     record = dict(existing) if isinstance(existing, dict) else dict(hist)
-    if sn != old_sn and old_sn in history_table:
+    if update_memory and sn != old_sn and old_sn in history_table:
         old_record = history_table.pop(old_sn)
         if existing:
             _history_merge(record, old_record)
@@ -908,32 +1014,35 @@ def _history_apply_reidentified_locked(
         for key in ("pilot_lat", "pilot_lon", "pilot_alt", "pilot_loc_type", "pilot_loc_type_text"):
             record[key] = None if key != "pilot_loc_type_text" else ""
     _apply_decoded_role_positions(record, loc, sys_loc, meta if isinstance(meta, dict) else None)
-    record["track_samples"] = []
-    record["tracks"] = _empty_track_store()
-    record["track"] = []
-    record["track_updated_wall_ts"] = None
-    history_table[sn] = record
-    if sn != old_sn and old_sn in state_table:
-        if sn not in state_table:
-            state_table[sn] = state_table.pop(old_sn)
-            state_table[sn]["sn"] = sn
-        else:
-            state_table.pop(old_sn, None)
-    state_entry = state_table.get(sn)
-    if isinstance(state_entry, dict):
-        for key in (
-            "id_type", "uas_id", "model", "lat", "lon", "alt", "speed", "vspeed", "move_dir",
-            "pilot_lat", "pilot_lon", "pilot_alt", "pilot_loc_type", "pilot_loc_type_text",
-            "firmware_type", "last_capture_wall_ts", "raw_packets",
-        ) + NEW_FW_DETAIL_KEYS:
-            if key in record:
-                state_entry[key] = record.get(key)
-    if isinstance(raw, dict):
+    if update_track:
+        record["track_samples"] = []
+        record["tracks"] = _empty_track_store()
+        record["track"] = []
+        record["track_updated_wall_ts"] = None
+    if update_memory:
+        history_table[sn] = record
+        if sn != old_sn and old_sn in state_table:
+            if sn not in state_table:
+                state_table[sn] = state_table.pop(old_sn)
+                state_table[sn]["sn"] = sn
+            else:
+                state_table.pop(old_sn, None)
+        state_entry = state_table.get(sn)
+        if isinstance(state_entry, dict):
+            for key in (
+                "id_type", "uas_id", "model", "lat", "lon", "alt", "speed", "vspeed", "move_dir",
+                "pilot_lat", "pilot_lon", "pilot_alt", "pilot_loc_type", "pilot_loc_type_text",
+                "firmware_type", "last_capture_wall_ts", "raw_packets",
+            ) + NEW_FW_DETAIL_KEYS:
+                if key in record:
+                    state_entry[key] = record.get(key)
+    if update_raw_packet and isinstance(raw, dict):
         try:
             _history_storage_update_raw_packet(sn, raw, HISTORY_STORE_PATH)
         except Exception as exc:
             _log(f"[WARN] raw packet database update failed for {sn}: {exc}")
-    _history_mark_dirty()
+    if update_memory:
+        _history_mark_dirty()
     return record
 
 
@@ -965,14 +1074,25 @@ def _history_reidentify_finalize_tracks(
         preserved_types,
     )
 
-def reidentify_recent_history_packets(limit: int | None = None) -> dict:
+
+HISTORY_REPARSE_PACKET_LIMIT_DEFAULT = 4000
+
+
+def _history_reparse_effective_limit(limit: int | None = None) -> int:
     try:
         store_limit = _track_store_points_limit()
-        effective_limit = max(1, min(int(limit or store_limit), store_limit))
     except Exception:
-        effective_limit = _track_store_points_limit()
-    with state_lock:
-        candidates = _history_recent_raw_packet_candidates_locked(effective_limit)
+        store_limit = HISTORY_REPARSE_PACKET_LIMIT_DEFAULT
+    try:
+        requested = int(limit) if limit not in (None, "") else HISTORY_REPARSE_PACKET_LIMIT_DEFAULT
+    except Exception:
+        requested = HISTORY_REPARSE_PACKET_LIMIT_DEFAULT
+    return max(1, min(requested, store_limit, HISTORY_REPARSE_PACKET_LIMIT_DEFAULT))
+
+
+def reidentify_recent_history_packets(limit: int | None = None) -> dict:
+    effective_limit = _history_reparse_effective_limit(limit)
+    candidates = _history_recent_raw_packet_candidates(effective_limit)
     if not candidates:
         return {"ok": False, "error": "no history raw packet"}
     return _reidentify_recent_history_packets_sync(candidates, effective_limit)
@@ -1067,6 +1187,33 @@ def _history_reparse_clear_pending_queue() -> int:
     return drained
 
 
+def _history_reparse_dynamic_worker_count(total_aircraft: int, total_packets: int) -> int:
+    if max(0, int(total_aircraft or 0), int(total_packets or 0)) <= 0:
+        return 1
+    return 12
+
+
+def _history_reparse_group_candidates(candidates: list[dict]) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        sn = str(item.get("sn") or "").strip()
+        if not sn:
+            continue
+        group = groups.setdefault(sn, {
+            "sn": sn,
+            "hist": dict(item.get("hist") or {}) if isinstance(item.get("hist"), dict) else {},
+            "items": [],
+        })
+        group["items"].append(item)
+    out = list(groups.values())
+    for group in out:
+        group["items"].sort(key=lambda x: (float(x.get("wall_ts") or 0.0), int(x.get("packet_index") or 0), int(x.get("seq") or 0)))
+    out.sort(key=lambda x: str(x.get("sn") or ""))
+    return out
+
+
 def _history_reparse_task_active(task_id: str) -> bool:
     with history_reparse_lock:
         return bool(history_reparse_state.get("running")) and str(history_reparse_state.get("task_id") or "") == str(task_id or "")
@@ -1095,7 +1242,8 @@ def _history_reparse_note_result(
             return _history_reparse_workflow_snapshot()
         total = max(0, int(history_reparse_state.get("total") or 0))
         step = max(0, min(total, int(index or 0)))
-        history_reparse_state["completed"] = max(int(history_reparse_state.get("completed") or 0), step)
+        completed_now = min(total, int(history_reparse_state.get("completed") or 0) + 1)
+        history_reparse_state["completed"] = completed_now
         if decoded:
             history_reparse_state["decoded"] = int(history_reparse_state.get("decoded") or 0) + 1
         if skipped:
@@ -1115,7 +1263,7 @@ def _history_reparse_note_result(
                 errors.append({"index": step, "error": str(error), "sn": str(updated_sn or "")})
             history_reparse_state["errors"] = errors
             history_reparse_state["last_error"] = str(error)
-        active_batch = int(math.ceil(float(step or 1) / float(max(1, int(batch_size or 1))))) if step > 0 else 0
+        active_batch = int(math.ceil(float(completed_now or 1) / float(max(1, int(batch_size or 1))))) if completed_now > 0 else 0
         history_reparse_state["active_batch"] = active_batch
         history_reparse_state["active_batch_size"] = (
             min(max(1, int(batch_size or 1)), max(0, total - ((active_batch - 1) * max(1, int(batch_size or 1)))))
@@ -1219,6 +1367,110 @@ def _history_reparse_process_item(item: dict) -> None:
         _history_reparse_finish_if_ready(task_id)
 
 
+def _history_reparse_process_aircraft_group(group: dict, task_id: str, batch_size: int) -> list[dict]:
+    if not task_id or not _history_reparse_task_active(task_id):
+        return []
+    target_sn = str(group.get("sn") or "")
+    items = list(group.get("items") or [])
+    hist_seed = dict(group.get("hist") or {}) if isinstance(group.get("hist"), dict) else {}
+    with state_lock:
+        current_hist = history_table.get(target_sn)
+        hist_copy = dict(current_hist) if isinstance(current_hist, dict) else dict(hist_seed)
+    before_tracks = _sanitize_tracks(hist_copy)
+    rebuilt_tracks = _empty_track_store()
+    sn_now = target_sn
+    record: dict | None = None
+    parse_result_updates: list[dict] = []
+    for item in items:
+        if not _history_reparse_task_active(task_id):
+            return parse_result_updates
+        index = max(0, int(item.get("index") or 0))
+        raw = dict(item.get("raw") or {}) if isinstance(item.get("raw"), dict) else {}
+        started_at = time.perf_counter()
+        updated_sn = sn_now
+        fmt = ""
+        err = ""
+        decoded_ok = False
+        skipped = False
+        failed = False
+        migrated = False
+        try:
+            data = _history_raw_hex_to_bytes(str(raw.get("hex") or ""))
+            if not data:
+                skipped = True
+                err = "raw packet has no usable hex"
+                continue
+            decoded, firmware_type, body, used_mode = _history_decode_raw_packet(data, hist_copy, sn_now, "auto")
+            if not decoded:
+                failed = True
+                err = "raw packet could not be decoded"
+                continue
+            receive_time_ms = None
+            try:
+                fallback_wall = hist_copy.get("last_capture_wall_ts") or hist_copy.get("last_seen_wall_ts") or time.time()
+                receive_time_ms = int(float(_history_raw_packet_wall_ts(raw, fallback_wall) or 0.0) * 1000.0)
+            except Exception:
+                receive_time_ms = None
+            packet_hash = str(raw.get("hex") or f"history-{index}")[:128]
+            for sample in _track_samples_from_decoded(decoded, receive_time_ms, packet_hash=packet_hash):
+                _track_store_append_sample(rebuilt_tracks, sample)
+            with state_lock:
+                live_hist = history_table.get(sn_now) or history_table.get(target_sn) or hist_copy
+                record = _history_apply_reidentified_locked(
+                    sn_now,
+                    live_hist,
+                    raw,
+                    decoded,
+                    firmware_type,
+                    body,
+                    used_mode=used_mode,
+                    update_track=False,
+                    update_raw_packet=False,
+                    update_memory=False,
+                )
+            decoded_ok = True
+            updated_sn = str(record.get("sn") or sn_now)
+            migrated = bool(updated_sn and updated_sn != sn_now)
+            sn_now = updated_sn or sn_now
+            hist_copy = dict(record)
+            fmt = str(record.get("rid_format") or record.get("dji_rid_kind") or record.get("kind") or firmware_type or used_mode or "unknown")
+            parse_result_updates.append({
+                "sn": sn_now,
+                "raw": dict(raw),
+                "parsed": raw.get("parsed") if isinstance(raw, dict) else None,
+                "parse_mode": raw.get("parse_mode") if isinstance(raw, dict) else used_mode,
+                "parse_format": raw.get("parse_format") if isinstance(raw, dict) else fmt,
+            })
+        except Exception as exc:
+            failed = True
+            err = str(exc)
+            _log(f"[WARN] history reparse item failed: {exc}")
+        finally:
+            _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=0)
+            _history_reparse_note_result(
+                task_id,
+                index=index,
+                batch_size=batch_size,
+                updated_sn=updated_sn if decoded_ok else target_sn,
+                fmt=fmt,
+                error=err,
+                decoded=decoded_ok,
+                skipped=skipped,
+                failed=failed,
+                migrated=migrated,
+            )
+    return parse_result_updates
+
+
+def _history_reparse_reload_from_db() -> bool:
+    try:
+        load_history_store(HISTORY_STORE_PATH)
+        return bool(save_history_store(force=True))
+    except Exception as exc:
+        _log(f"[WARN] history reparse db reload failed: {exc}")
+        return False
+
+
 def _history_reparse_worker_loop() -> None:
     while True:
         item = history_reparse_queue.get()
@@ -1246,44 +1498,61 @@ def start_history_reparse_worker() -> None:
 
 def _recent_history_reidentify_producer(candidates: list[dict], effective_limit: int, task_id: str) -> None:
     total = len(candidates)
-    batch_size = max(1, int(HISTORY_REPARSE_BATCH_SIZE or 128))
+    groups = _history_reparse_group_candidates(candidates)
+    worker_count = _history_reparse_dynamic_worker_count(len(groups), total)
+    batch_size = max(1, int(math.ceil(float(total or 1) / float(worker_count or 1))))
     try:
         _history_reparse_workflow_update(
-            message="queueing batches",
+            total=total,
+            aircraft_total=len(groups),
+            batches_total=int(math.ceil(float(total or 0) / float(batch_size or 1))) if total else 0,
+            message=f"starting parallel reparse: {worker_count} threads",
             active_batch=0,
             active_batch_size=0,
-            enqueued=0,
-            producer_done=False,
-        )
-        for batch_start in range(0, total, batch_size):
-            if not _history_reparse_task_active(task_id):
-                return
-            batch = candidates[batch_start: batch_start + batch_size]
-            active_batch = int((batch_start // batch_size) + 1)
-            _history_reparse_workflow_update(
-                active_batch=active_batch,
-                active_batch_size=len(batch),
-                message=f"queueing {min(total, batch_start + len(batch))}/{total}",
-            )
-            for offset, item in enumerate(batch, 1):
-                history_reparse_queue.put({
-                    "task_id": task_id,
-                    "index": batch_start + offset,
-                    "batch_size": batch_size,
-                    "effective_limit": effective_limit,
-                    "sn": str(item.get("sn") or ""),
-                    "hist": dict(item.get("hist") or {}) if isinstance(item.get("hist"), dict) else {},
-                    "raw": dict(item.get("raw") or {}) if isinstance(item.get("raw"), dict) else {},
-                })
-            _history_reparse_workflow_update(
-                enqueued=batch_start + len(batch),
-                active_batch=active_batch,
-                active_batch_size=len(batch),
-                message=f"queued {batch_start + len(batch)}/{total}",
-            )
-        _history_reparse_workflow_update(
+            worker_total=worker_count,
+            worker_busy=0,
+            worker_idle=worker_count,
+            enqueued=total,
             producer_done=True,
-            message=f"queued {total}/{total}, processing",
+            batch_size=batch_size,
+        )
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        parse_result_updates: list[dict] = []
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="history-reparse") as pool:
+            futures = [
+                pool.submit(_history_reparse_process_aircraft_group, group, task_id, batch_size)
+                for group in groups
+            ]
+            _history_reparse_workflow_update(
+                active_batch_size=min(len(groups), worker_count),
+                worker_total=worker_count,
+                worker_busy=min(len(groups), worker_count),
+                worker_idle=max(0, worker_count - min(len(groups), worker_count)),
+                message=f"processing {total} packets across {len(groups)} aircraft with {worker_count} threads",
+            )
+            for future in as_completed(futures):
+                if not _history_reparse_task_active(task_id):
+                    return
+                try:
+                    result = future.result()
+                    if isinstance(result, list):
+                        parse_result_updates.extend([item for item in result if isinstance(item, dict)])
+                except Exception as exc:
+                    _log(f"[WARN] history reparse parallel task failed: {exc}")
+        if parse_result_updates:
+            _history_reparse_workflow_update(message=f"saving {len(parse_result_updates)} parsed packets to database")
+            try:
+                save_started = time.perf_counter()
+                saved_packets = _history_storage_update_raw_packet_parse_results(parse_result_updates, HISTORY_STORE_PATH)
+                _log(f"[INFO] history reparse parsed packet db update: rows={saved_packets}/{len(parse_result_updates)} elapsed={time.perf_counter() - save_started:.2f}s")
+            except Exception as exc:
+                _log(f"[WARN] raw packet parse-result database batch update failed: {exc}")
+        saved = _history_reparse_reload_from_db()
+        _history_reparse_workflow_update(
+            saved=bool(saved),
+            worker_busy=0,
+            worker_idle=worker_count,
+            message="history reparse parsed results saved; refreshing history from database",
         )
         _history_reparse_finish_if_ready(task_id)
     except Exception as exc:
@@ -1295,26 +1564,48 @@ def _recent_history_reidentify_producer(candidates: list[dict], effective_limit:
                 error=str(exc),
             )
 
-def start_recent_history_reidentify_workflow(limit: int | None = None) -> dict:
+
+def _recent_history_reidentify_prepare_and_run(effective_limit: int, task_id: str) -> None:
     try:
-        store_limit = _track_store_points_limit()
-        effective_limit = max(1, min(int(limit or store_limit), store_limit))
-    except Exception:
-        effective_limit = _track_store_points_limit()
-    with state_lock:
-        candidates = _history_recent_raw_packet_candidates_locked(effective_limit)
-    if not candidates:
-        return {"ok": False, "error": "no history raw packet", "workflow": _history_reparse_workflow_snapshot()}
-    start_history_reparse_worker()
+        _history_reparse_workflow_update(message="collecting history raw packets", producer_done=False)
+        candidates = _history_recent_raw_packet_candidates(effective_limit)
+        if not candidates:
+            if _history_reparse_task_active(task_id):
+                _history_reparse_workflow_finish(
+                    ok=False,
+                    message="history reparse failed",
+                    error="no history raw packet",
+                    producer_done=True,
+                )
+            return
+        _recent_history_reidentify_producer(candidates, effective_limit, task_id)
+    except Exception as exc:
+        _log(f"[WARN] history reparse prepare failed: {exc}")
+        if _history_reparse_task_active(task_id):
+            _history_reparse_workflow_finish(
+                ok=False,
+                message="history reparse failed",
+                error=str(exc),
+                producer_done=True,
+            )
+
+
+def start_recent_history_reidentify_workflow(limit: int | None = None) -> dict:
+    effective_limit = _history_reparse_effective_limit(limit)
     _history_reparse_clear_pending_queue()
     with history_reparse_runtime_lock:
         history_reparse_runtime_updated_sns.clear()
-    aircraft_total = len({str(item.get("sn") or "") for item in candidates if str(item.get("sn") or "")})
+    with state_lock:
+        aircraft_total = len([
+            sn for sn, hist in history_table.items()
+            if sn and isinstance(hist, dict)
+            and (_scan_type_key(hist.get("scan_type")) == "phone" or (len(str(sn or "")) == 20 and str(sn or "").isalnum()))
+        ])
     started, workflow = _history_reparse_workflow_start(
         kind="history_recent",
         title="最近历史重解析",
         limit=effective_limit,
-        total=len(candidates),
+        total=0,
         aircraft_total=aircraft_total,
         batch_size=HISTORY_REPARSE_BATCH_SIZE,
     )
@@ -1327,11 +1618,11 @@ def start_recent_history_reidentify_workflow(limit: int | None = None) -> dict:
             "workflow": workflow,
         }
     task_id = str(workflow.get("task_id") or "")
-    Thread(target=lambda: _recent_history_reidentify_producer(candidates, effective_limit, task_id), daemon=True).start()
+    Thread(target=lambda: _recent_history_reidentify_prepare_and_run(effective_limit, task_id), daemon=True).start()
     return {
         "ok": True,
         "started": True,
-        "message": f"queued {len(candidates)} packets in batches of {int(HISTORY_REPARSE_BATCH_SIZE)}",
+        "message": "history reparse started; collecting raw packets in background",
         "workflow": _history_reparse_workflow_snapshot(),
     }
 
@@ -1588,9 +1879,12 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
     loc   = decoded.get("location")
     sys_loc = decoded.get("system")
     meta = decoded.get("metadata") if isinstance(decoded, dict) else None
+    firmware_type_key = _firmware_type_key(firmware_type)
     uas_id_value = _uas_id_clean(decoded.get("uas_id"))
+    if firmware_type_key == "old":
+        uas_id_value = ""
 
-    if basic and basic.get("uas_id"):
+    if firmware_type_key != "old" and basic and basic.get("uas_id"):
         mac_to_basic[src_mac] = {"basic": basic, "ts": time.monotonic()}
         if len(mac_to_basic) > MAC_BASIC_CACHE_MAX:
             old = sorted(mac_to_basic.items(), key=lambda kv: kv[1].get("ts",0))
@@ -1599,11 +1893,11 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
     ssid_sn = mac_to_ssid_sn.get(src_mac,{}).get("sn")
     mac_key = f"MAC:{src_mac}"
 
-    if basic and basic.get("uas_id"):
+    if firmware_type_key != "old" and basic and basic.get("uas_id"):
         sn, it = basic["uas_id"].strip(), basic.get("id_type","unknown")
     elif ssid_sn:
         sn, it = ssid_sn, "SSID"
-    elif src_mac in mac_to_basic:
+    elif firmware_type_key != "old" and src_mac in mac_to_basic:
         c  = mac_to_basic[src_mac].get("basic",{})
         sn = (c.get("uas_id","") or "").strip() or mac_key
         it = c.get("id_type","unknown")
@@ -1611,7 +1905,6 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         sn, it = mac_key, "unknown"
 
     scan_type_key = _scan_type_key(scan_type)
-    firmware_type_key = _firmware_type_key(firmware_type)
     parser_format = str(meta.get("format") or meta.get("rid_format") or "") if isinstance(meta, dict) else ""
     rid_coord_ok = _decoded_has_valid_coord(loc, sys_loc, meta if isinstance(meta, dict) else None)
     model = _resolve_model_name(sn, scan_type_key, None)
@@ -2016,6 +2309,8 @@ def _ws_settings_runtime_payload() -> dict:
 def _ws_push_loop() -> None:
     """Push latest state JSON to home/settings websocket clients."""
     import json as _json
+    last_home_logs_seq = None
+    last_home_aps_seq = None
     while True:
         time.sleep(1.0)
         home_frame = None
@@ -2040,8 +2335,17 @@ def _ws_push_loop() -> None:
                     client["next_send_at"] = now + 5.0
                 else:
                     if home_frame is None:
-                        home_payload = _json.dumps(_state_snapshot(), ensure_ascii=False)
+                        home_snapshot = _state_snapshot()
+                        logs_seq = home_snapshot.get("logs_seq")
+                        aps_seq = home_snapshot.get("aps_seq")
+                        if last_home_logs_seq == logs_seq:
+                            home_snapshot.pop("logs", None)
+                        if last_home_aps_seq == aps_seq:
+                            home_snapshot.pop("aps", None)
+                        home_payload = _json.dumps(home_snapshot, ensure_ascii=False)
                         home_frame = _ws_frame(home_payload.encode())
+                        last_home_logs_seq = logs_seq
+                        last_home_aps_seq = aps_seq
                     sock.sendall(home_frame)
             except Exception:
                 dead.append(client)
@@ -2459,7 +2763,8 @@ def _app_update_upload_session_create(file_name: str, total_bytes: int) -> dict:
     if not asset:
         raise ValueError("latest release has no matching asset for this architecture")
     digest = _app_update_normalize_digest(asset.get("digest") or "")
-    if not digest:
+    force_update = bool(APP_UPDATE_CFG.get("force_update"))
+    if not digest and not force_update:
         raise ValueError("GitHub release asset digest is missing")
     if not safe_name:
         safe_name = _app_update_safe_filename(str(asset.get("name") or "")) or "package.bin"
@@ -2583,6 +2888,7 @@ def _app_update_register_staged_package(
     asset: dict,
     sha256_hex: str,
     size: int,
+    verified: bool = True,
 ) -> dict:
     previous = _app_update_valid_stage_meta()
     if previous:
@@ -2598,7 +2904,7 @@ def _app_update_register_staged_package(
         "asset_url": str((asset or {}).get("url") or ""),
         "expected_sha256": _app_update_normalize_digest((asset or {}).get("digest") or ""),
         "sha256": _app_update_normalize_digest(sha256_hex or ""),
-        "verified": True,
+        "verified": bool(verified),
         "size": int(size or 0),
         "prepared_at": time.time(),
     }
@@ -2635,7 +2941,8 @@ def _app_update_download_worker(release_url: str) -> None:
         if not asset:
             raise RuntimeError("latest release has no matching asset for this architecture")
         digest = _app_update_normalize_digest(asset.get("digest") or "")
-        if not digest:
+        force_update = bool(APP_UPDATE_CFG.get("force_update"))
+        if not digest and not force_update:
             raise RuntimeError("GitHub release asset digest is missing")
         stage_dir = _app_update_prepare_stage_dir(str(release.get("tag_name") or "download"))
         download_path = os.path.join(stage_dir, str(asset.get("name") or "package.bin"))
@@ -2654,7 +2961,7 @@ def _app_update_download_worker(release_url: str) -> None:
         h = hashlib.sha256()
         downloaded = 0
         last_update = 0.0
-        with _http_open_with_fallback(
+        with _app_update_http_open(
             str(asset.get("url") or ""),
             headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
             timeout=30,
@@ -2682,7 +2989,8 @@ def _app_update_download_worker(release_url: str) -> None:
                     )
                     last_update = now
         actual_digest = h.hexdigest().lower()
-        if actual_digest != digest:
+        verified = bool(digest and actual_digest == digest)
+        if not verified and not force_update:
             raise RuntimeError("downloaded package SHA256 does not match GitHub asset digest")
         meta = _app_update_register_staged_package(
             source="download",
@@ -2692,11 +3000,12 @@ def _app_update_download_worker(release_url: str) -> None:
             asset=asset,
             sha256_hex=actual_digest,
             size=os.path.getsize(download_path),
+            verified=verified,
         )
         _app_update_set_download_state(
             running=False,
-            status="completed",
-            message=f"downloaded and verified {meta.get('asset_name') or 'package'}",
+            status="completed" if verified else "completed_unverified",
+            message=(f"downloaded and verified {meta.get('asset_name') or 'package'}" if verified else f"downloaded without valid SHA256: {meta.get('asset_name') or 'package'}"),
             downloaded_bytes=int(meta.get("size") or 0),
             download_total_bytes=int(meta.get("size") or 0),
             download_percent=100.0,
@@ -2707,7 +3016,7 @@ def _app_update_download_worker(release_url: str) -> None:
         _app_update_write_notice({
             "kind": "ok",
             "title": "安装包已就绪",
-            "text": f"{meta.get('asset_name') or '安装包'} 已下载并通过 SHA256 校验，可开始更新。",
+            "text": (f"{meta.get('asset_name') or '安装包'} 已下载并通过 SHA256 校验，可开始更新。" if verified else f"{meta.get('asset_name') or '安装包'} 已下载，但未通过 SHA256 校验；已按强制更新设置允许继续。"),
             "tag": str(meta.get("latest_tag") or ""),
             "asset_name": str(meta.get("asset_name") or ""),
         })
@@ -2788,7 +3097,8 @@ def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes
         if not asset:
             raise ValueError("latest release has no matching asset for this architecture")
     digest = _app_update_normalize_digest(asset.get("digest") or "")
-    if not digest:
+    force_update = bool(APP_UPDATE_CFG.get("force_update"))
+    if not digest and not force_update:
         raise ValueError("GitHub release asset digest is missing")
     asset_file_name = _app_update_safe_filename(str(asset.get("name") or "")) or safe_name or "package.bin"
     stage_dir = _app_update_prepare_stage_dir(str(release.get("tag_name") or "upload"))
@@ -2809,7 +3119,8 @@ def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes
         if written != int(total_bytes):
             raise ValueError("upload truncated before all bytes were received")
         actual_digest = h.hexdigest().lower()
-        if actual_digest != digest:
+        verified = bool(digest and actual_digest == digest)
+        if not verified and not force_update:
             raise ValueError("uploaded package SHA256 does not match GitHub asset digest")
         meta = _app_update_register_staged_package(
             source="upload",
@@ -2819,11 +3130,12 @@ def _accept_uploaded_app_update_package(file_name: str, body_stream, total_bytes
             asset=asset,
             sha256_hex=actual_digest,
             size=written,
+            verified=verified,
         )
         _app_update_set_download_state(
             running=False,
-            status="uploaded",
-            message=f"uploaded and verified {meta.get('asset_name') or safe_name}",
+            status="uploaded" if verified else "uploaded_unverified",
+            message=(f"uploaded and verified {meta.get('asset_name') or safe_name}" if verified else f"uploaded without valid SHA256: {meta.get('asset_name') or safe_name}"),
             downloaded_bytes=written,
             download_total_bytes=written,
             download_percent=100.0,
@@ -2984,8 +3296,41 @@ def _app_update_runtime_support() -> dict:
         return {"supported": False, "reason": "当前可执行文件路径无效，无法执行替换。", "target_arch": target_arch, "target_path": target_path}
     return {"supported": True, "reason": "", "target_arch": target_arch, "target_path": target_path}
 
+def _app_update_mirror_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return raw
+    mirror = str(APP_UPDATE_CFG.get("mirror") or "github").strip().lower()
+    if mirror == "github":
+        return raw
+    if mirror == "gh-proxy":
+        return raw if raw.startswith(GITHUB_PROXY_PREFIX) else (GITHUB_PROXY_PREFIX + raw)
+    if mirror == "custom":
+        base = str(APP_UPDATE_CFG.get("custom_mirror") or "").strip()
+        if not base:
+            return raw
+        if "{url}" in base:
+            return base.replace("{url}", raw)
+        if "{encoded_url}" in base:
+            return base.replace("{encoded_url}", urllib.parse.quote(raw, safe=""))
+        return base.rstrip("/") + "/" + raw
+    return raw
+
+def _app_update_http_read(url: str, headers: dict | None = None, timeout: float = 12, max_bytes: int | None = None) -> bytes:
+    final_url = _app_update_mirror_url(url)
+    req = urllib.request.Request(final_url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if max_bytes is None or max_bytes <= 0:
+            return resp.read()
+        return resp.read(max_bytes + 1)[:max_bytes]
+
+def _app_update_http_open(url: str, headers: dict | None = None, timeout: float = 30):
+    final_url = _app_update_mirror_url(url)
+    req = urllib.request.Request(final_url, headers=headers or {})
+    return urllib.request.urlopen(req, timeout=timeout)
+
 def _fetch_latest_release(release_url: str) -> dict:
-    raw, _ = _http_read_with_fallback(
+    raw = _app_update_http_read(
         release_url,
         headers={
             "User-Agent": APP_HTTP_USER_AGENT + " (+release update)",
@@ -3047,7 +3392,7 @@ def _app_update_download_asset(asset: dict, latest_tag: str) -> tuple[str, str]:
     safe_tag = re.sub(r"[^0-9A-Za-z._-]+", "_", str(latest_tag or "latest"))[:40] or "latest"
     stage_dir = tempfile.mkdtemp(prefix=f"{safe_tag}_{stamp}_", dir=stage_root)
     download_path = os.path.join(stage_dir, name)
-    with _http_open_with_fallback(
+    with _app_update_http_open(
         url,
         headers={"User-Agent": APP_HTTP_USER_AGENT + " (+asset download)"},
         timeout=30,
@@ -3146,6 +3491,11 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
     state["current_short"] = _short_commit(current_commit)
     state["latest_short"] = _short_commit(state.get("latest_commit") or "")
     state["release_url"] = str(cfg.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT)
+    state["mirror"] = str(cfg.get("mirror") or "github")
+    state["custom_mirror"] = str(cfg.get("custom_mirror") or "")
+    state["force_update"] = bool(cfg.get("force_update"))
+    state["mirror_url"] = _app_update_mirror_url(state["release_url"])
+    state["mirror_options"] = list(APP_UPDATE_MIRROR_OPTIONS)
     state["max_upload_bytes"] = int(APP_UPDATE_MAX_BYTES)
     state["install_supported"] = bool(support.get("supported"))
     state["support_reason"] = str(support.get("reason") or "")
@@ -3230,7 +3580,9 @@ def _start_app_update_install(*, manual: bool = False, sudo_password: str | None
         return {"ok": False, "error": "安装包仍在下载中，请等待校验完成", "state": state}
     stage_meta = _app_update_valid_stage_meta()
     if not stage_meta or not bool(stage_meta.get("ready")):
-        return {"ok": False, "error": "请先下载最新安装包，或手动上传并通过 SHA256 校验", "state": _app_update_status_payload()}
+        return {"ok": False, "error": "请先下载或上传安装包", "state": _app_update_status_payload()}
+    if not bool(stage_meta.get("verified")) and not bool(APP_UPDATE_CFG.get("force_update")):
+        return {"ok": False, "error": "安装包未通过 SHA256 校验；如确认仍要继续，请在设置中启用强制更新", "state": _app_update_status_payload()}
     if _app_update_requires_sudo() and not str(sudo_password or "").strip():
         return {"ok": False, "error": "sudo required", "need_sudo": True, "state": _app_update_status_payload()}
     stage_dir = os.path.abspath(str(stage_meta.get("stage_dir") or ""))

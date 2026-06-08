@@ -152,6 +152,11 @@ GITHUB_PROXY_PREFIX = "https://gh-proxy.org/"
 RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
 APP_UPDATE_COMMIT_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
 APP_UPDATE_RELEASE_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/releases/latest"
+APP_UPDATE_MIRROR_OPTIONS = [
+    {"key": "github", "label": "GitHub 官方", "base": ""},
+    {"key": "gh-proxy", "label": "gh-proxy.org", "base": GITHUB_PROXY_PREFIX},
+    {"key": "custom", "label": "自定义镜像", "base": ""},
+]
 MODEL_UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
 HOST_METRICS_DIR_DEFAULT = os.path.join(tempfile.gettempdir(), "light_rid_scanner")
 HOST_METRICS_FILE_DEFAULT = "host_metrics.jsonl"
@@ -381,6 +386,9 @@ CONFIG_UPDATE_CFG: dict = {
 APP_UPDATE_CFG: dict = {
     "enabled": True,
     "release_url": APP_UPDATE_RELEASE_URL_DEFAULT,
+    "mirror": "github",
+    "custom_mirror": "",
+    "force_update": False,
 }
 APP_UPDATE_STATE: dict = {
     "running": False,
@@ -1613,6 +1621,47 @@ def _history_storage_fetch_raw_packets(sn: str | None = None, limit: int | None 
         out.reverse()
     return out
 
+def _history_storage_fetch_latest_parsed_packets(path: str | None = None) -> dict[str, dict]:
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    sql = (
+        "SELECT id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format "
+        "FROM raw_packets "
+        "WHERE decoded_json IS NOT NULL AND decoded_json <> '' "
+        "ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
+    )
+    with history_db_lock:
+        rows = conn.execute(sql).fetchall()
+    out: dict[str, dict] = {}
+    for row in rows:
+        sn = str((row["sn"] if isinstance(row, sqlite3.Row) else row[1]) or "").strip()
+        item = _history_storage_packet_row_to_dict(row)
+        parsed = item.get("parsed")
+        if not sn or not isinstance(parsed, dict):
+            continue
+        out[sn] = {"sn": sn, "raw": item, "parsed": parsed}
+    return out
+
+def _history_storage_fetch_parsed_packets_by_sn(path: str | None = None) -> dict[str, list[dict]]:
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    sql = (
+        "SELECT id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format "
+        "FROM raw_packets "
+        "WHERE decoded_json IS NOT NULL AND decoded_json <> '' "
+        "ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
+    )
+    with history_db_lock:
+        rows = conn.execute(sql).fetchall()
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        sn = str((row["sn"] if isinstance(row, sqlite3.Row) else row[1]) or "").strip()
+        item = _history_storage_packet_row_to_dict(row)
+        if not sn or not isinstance(item.get("parsed"), dict):
+            continue
+        out.setdefault(sn, []).append(item)
+    return out
+
 def _history_storage_append_raw_packet(sn: str, raw: dict, path: str | None = None) -> bool:
     target_sn = str(sn or "").strip()
     if not target_sn or not isinstance(raw, dict):
@@ -1689,6 +1738,205 @@ def _history_storage_update_raw_packet(sn: str, raw: dict, path: str | None = No
     if updated:
         return True
     return _history_storage_append_raw_packet(target_sn, raw, db_path)
+
+def _history_storage_update_raw_packet_parse_result(sn: str, raw: dict, parsed: dict | None, parse_mode: str | None = None, parse_format: str | None = None, path: str | None = None) -> bool:
+    target_sn = str(sn or (raw or {}).get("sn") or "").strip()
+    if not target_sn or not isinstance(raw, dict):
+        return False
+    raw_hex = str(raw.get("hex") or "").strip()
+    if not raw_hex:
+        return False
+    db_path = _history_storage_init(path)
+    conn = _history_db_conn(db_path)
+    decoded_json = _history_storage_json_dumps(parsed)
+    db_id = raw.get("_db_id")
+    updated = False
+    with history_db_lock:
+        if db_id not in (None, "", 0):
+            cur = conn.execute(
+                """
+                UPDATE raw_packets
+                SET sn = ?, decoded_json = ?, parse_mode = ?, parse_format = ?
+                WHERE id = ?
+                """,
+                (
+                    target_sn,
+                    decoded_json or None,
+                    str(parse_mode or raw.get("parse_mode") or ""),
+                    str(parse_format or raw.get("parse_format") or ""),
+                    int(db_id),
+                ),
+            )
+            updated = bool(cur.rowcount)
+        if not updated:
+            capture_wall_ts = _history_parse_wall_ts_text(str(raw.get("ts") or ""), raw.get("_wall_ts"))
+            cur = conn.execute(
+                """
+                UPDATE raw_packets
+                SET sn = ?, decoded_json = ?, parse_mode = ?, parse_format = ?
+                WHERE sn = ? AND hex_text = ? AND ABS(capture_wall_ts - ?) < 0.001
+                """,
+                (
+                    target_sn,
+                    decoded_json or None,
+                    str(parse_mode or raw.get("parse_mode") or ""),
+                    str(parse_format or raw.get("parse_format") or ""),
+                    target_sn,
+                    raw_hex,
+                    float(capture_wall_ts or 0.0),
+                ),
+            )
+            updated = bool(cur.rowcount)
+    if updated:
+        return True
+    raw_copy = dict(raw)
+    raw_copy["parsed"] = parsed
+    raw_copy["parse_mode"] = str(parse_mode or raw_copy.get("parse_mode") or "")
+    raw_copy["parse_format"] = str(parse_format or raw_copy.get("parse_format") or "")
+    return _history_storage_append_raw_packet(target_sn, raw_copy, db_path)
+
+def _history_storage_update_raw_packet_parse_results(items: list[dict], path: str | None = None) -> int:
+    if not isinstance(items, list) or not items:
+        return 0
+    db_path = _history_storage_init(path)
+    updates: list[tuple] = []
+    fallback_appends: list[tuple[str, dict]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        target_sn = str(item.get("sn") or "").strip()
+        raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+        if not target_sn or not raw:
+            continue
+        decoded_json = _history_storage_json_dumps(item.get("parsed"))
+        parse_mode = str(item.get("parse_mode") or raw.get("parse_mode") or "")
+        parse_format = str(item.get("parse_format") or raw.get("parse_format") or "")
+        db_id = raw.get("_db_id")
+        if db_id not in (None, "", 0):
+            updates.append((target_sn, decoded_json or None, parse_mode, parse_format, int(db_id)))
+        else:
+            raw_copy = dict(raw)
+            raw_copy["parsed"] = item.get("parsed")
+            raw_copy["parse_mode"] = parse_mode
+            raw_copy["parse_format"] = parse_format
+            fallback_appends.append((target_sn, raw_copy))
+    updated = 0
+    if updates:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        try:
+            cur = conn.executemany(
+                """
+                UPDATE raw_packets
+                SET sn = ?, decoded_json = ?, parse_mode = ?, parse_format = ?
+                WHERE id = ?
+                """,
+                updates,
+            )
+            conn.commit()
+            updated += int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(updates))
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    for target_sn, raw_copy in fallback_appends:
+        if _history_storage_append_raw_packet(target_sn, raw_copy, db_path):
+            updated += 1
+    return updated
+
+def _history_summary_apply_parsed_packet(record: dict, packet: dict) -> None:
+    parsed = packet.get("parsed") if isinstance(packet, dict) else None
+    if not isinstance(record, dict) or not isinstance(parsed, dict):
+        return
+    basic = parsed.get("basic_id") if isinstance(parsed.get("basic_id"), dict) else {}
+    loc = parsed.get("location") if isinstance(parsed.get("location"), dict) else {}
+    sys_loc = parsed.get("system") if isinstance(parsed.get("system"), dict) else {}
+    meta = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+    uas_id = _uas_id_clean(parsed.get("uas_id") or basic.get("uas_id") or record.get("uas_id"))
+    if uas_id:
+        record["uas_id"] = uas_id
+    if basic.get("id_type"):
+        record["id_type"] = basic.get("id_type")
+    firmware_type = _firmware_type_key(parsed.get("firmware_type") or packet.get("firmware_type") or record.get("firmware_type"))
+    if firmware_type:
+        record["firmware_type"] = firmware_type
+    record["scan_type"] = _scan_type_key(record.get("scan_type"))
+    for key, src_key in (
+        ("lat", "lat"),
+        ("lon", "lon"),
+        ("alt", "alt_geodetic"),
+        ("speed", "speed_ms"),
+        ("vspeed", "vspeed_ms"),
+        ("move_dir", "direction_deg"),
+        ("alt_relative", "relative_alt"),
+        ("alt_geoid", "alt_geodetic"),
+        ("alt_baro", "alt_baro"),
+    ):
+        if src_key in loc and loc.get(src_key) is not None:
+            record[key] = loc.get(src_key)
+    for key, src_key in (
+        ("pilot_lat", "pilot_lat"),
+        ("pilot_lon", "pilot_lon"),
+        ("pilot_alt", "pilot_alt"),
+        ("pilot_loc_type", "pilot_loc_type"),
+        ("pilot_loc_type_text", "pilot_loc_type_text"),
+    ):
+        if src_key in sys_loc and sys_loc.get(src_key) is not None:
+            record[key] = sys_loc.get(src_key)
+    for key in NEW_FW_DETAIL_KEYS:
+        if key in meta:
+            record[key] = meta.get(key)
+    for key in ("rid_format", "dji_rid_kind", "kind", "parse_note", "enterprise_model", "operator_positions", "raw_coords"):
+        if key in meta:
+            record[key] = meta.get(key)
+    try:
+        wall_ts = float(packet.get("_wall_ts") or 0.0)
+    except Exception:
+        wall_ts = 0.0
+    if wall_ts > 0:
+        record["last_capture_wall_ts"] = max(float(record.get("last_capture_wall_ts") or 0.0), wall_ts)
+        record["last_seen_wall_ts"] = max(float(record.get("last_seen_wall_ts") or 0.0), wall_ts)
+    track_store = record.get("tracks")
+    if not isinstance(track_store, dict):
+        track_store = _sanitize_tracks(record.get("track") or [])
+    try:
+        lat_f = float(loc.get("lat"))
+        lon_f = float(loc.get("lon"))
+    except Exception:
+        lat_f = None
+        lon_f = None
+    if lat_f is not None and lon_f is not None and (-90.0 <= lat_f <= 90.0) and (-180.0 <= lon_f <= 180.0) and not (abs(lat_f) < 0.001 and abs(lon_f) < 0.001):
+        sample = {
+            "sample_type": "aircraft",
+            "track_type": "aircraft",
+            "sn": str(record.get("sn") or "") or None,
+            "uas_id": record.get("uas_id"),
+            "lat": round(lat_f, 7),
+            "lon": round(lon_f, 7),
+            "alt": record.get("alt"),
+            "speed": record.get("speed"),
+            "direction": record.get("move_dir"),
+            "timestamp_ms": loc.get("timestamp_ms"),
+            "receive_time_ms": int(float(wall_ts or time.time()) * 1000.0),
+            "packet_hash": str(packet.get("hex") or "")[:128],
+            "source": "history_db_parsed",
+            "coordinate_system": "WGS84",
+        }
+        if _track_store_append_sample(track_store, sample):
+            record["tracks"] = track_store
+            record["track"] = _track_store_primary(track_store, "aircraft")
+            last_aircraft = track_store.get("last_aircraft")
+            if isinstance(last_aircraft, dict):
+                try:
+                    record["track_updated_wall_ts"] = float((last_aircraft.get("receive_time_ms") or last_aircraft.get("timestamp_ms") or 0) / 1000.0)
+                except Exception:
+                    record["track_updated_wall_ts"] = wall_ts or None
 
 def _history_storage_delete_sn(sn: str, path: str | None = None) -> None:
     target_sn = str(sn or "").strip()
@@ -1800,6 +2048,18 @@ def _packet_parse_diag_snapshot() -> dict:
                 reparse_qmax = 0
     workers = max(0, int(globals().get("PACKET_PARSE_WORKERS") or 0))
     drops = max(0, int(globals().get("packet_parse_drop_count") or 0))
+    active_workers = 0
+    active_lock = globals().get("packet_parse_active_lock")
+    if active_lock is not None:
+        try:
+            with active_lock:
+                active_workers = max(0, int(globals().get("packet_parse_active_count") or 0))
+        except Exception:
+            active_workers = max(0, int(globals().get("packet_parse_active_count") or 0))
+    else:
+        active_workers = max(0, int(globals().get("packet_parse_active_count") or 0))
+    active_workers = min(workers, active_workers) if workers else active_workers
+    idle_workers = max(0, workers - active_workers)
     with packet_parse_diag_lock:
         state = dict(packet_parse_diag_state)
         high_water = max(int(state.get("high_water") or 0), qsize)
@@ -1821,6 +2081,9 @@ def _packet_parse_diag_snapshot() -> dict:
         "reparse_queue_max": reparse_qmax,
         "combined_queue_size": qsize + reparse_qsize,
         "workers": workers,
+        "worker_total": workers,
+        "worker_busy": active_workers,
+        "worker_idle": idle_workers,
         "dropped": drops,
         "samples": int(state.get("samples") or 0),
         "last_parse_ms": round(float(state.get("last_ms") or 0.0), 3) if state.get("samples") else None,
@@ -2121,6 +2384,7 @@ def load_history_store(path: str | None) -> None:
         if not isinstance(items, list):
             _log(f"[WARN] history storage summary invalid: {db_path}")
             return
+        parsed_packets_by_sn = _history_storage_fetch_parsed_packets_by_sn(db_path)
         loaded = 0
         repaired_model = 0
         compat_dirty = bool(migrated)
@@ -2154,6 +2418,8 @@ def load_history_store(path: str | None) -> None:
                 h["tracks"] = _empty_track_store()
                 h["track"] = []
                 h["track_updated_wall_ts"] = None
+                for packet in list(parsed_packets_by_sn.get(sn) or []):
+                    _history_summary_apply_parsed_packet(h, packet)
                 h["pkt_count_total"] = max(0, int(raw.get("pkt_count_total") or 0))
                 # Monotonic timestamps are process-local; keep them unset until new packets arrive.
                 h.setdefault("first_seen_ts", None)
@@ -2659,6 +2925,9 @@ def default_app_config() -> dict:
         "app_update": {
             "enabled": True,
             "release_url": APP_UPDATE_RELEASE_URL_DEFAULT,
+            "mirror": "github",
+            "custom_mirror": "",
+            "force_update": False,
         },
         "metrics": {
             "enabled": False,
@@ -3343,6 +3612,10 @@ def _settings_view_payload() -> dict:
             "app_update": {
                 "enabled": bool(app_update.get("enabled", True)),
                 "release_url": str(app_update.get("release_url") or APP_UPDATE_RELEASE_URL_DEFAULT),
+                "mirror": str(app_update.get("mirror") or "github"),
+                "custom_mirror": str(app_update.get("custom_mirror") or ""),
+                "force_update": bool(app_update.get("force_update")),
+                "mirror_options": list(APP_UPDATE_MIRROR_OPTIONS),
                 "state": _app_update_status_payload(consume_notice=True),
             },
             "metrics": {
@@ -3617,6 +3890,15 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
     if p_app_update:
         if "enabled" in p_app_update:
             app_update["enabled"] = bool(p_app_update.get("enabled"))
+        if "mirror" in p_app_update:
+            app_update["mirror"] = str(p_app_update.get("mirror") or "github").strip()
+        if "custom_mirror" in p_app_update:
+            custom_mirror = str(p_app_update.get("custom_mirror") or "").strip()
+            if custom_mirror and not (custom_mirror.startswith("https://") or custom_mirror.startswith("http://")):
+                return None, "invalid app_update.custom_mirror"
+            app_update["custom_mirror"] = custom_mirror
+        if "force_update" in p_app_update:
+            app_update["force_update"] = bool(p_app_update.get("force_update"))
         if "release_url" in p_app_update or "commit_url" in p_app_update:
             url = str(p_app_update.get("release_url") or p_app_update.get("commit_url") or "").strip()
             if url and not (url.startswith("https://") or url.startswith("http://")):
@@ -3953,6 +4235,16 @@ def _normalize_app_update_cfg(cfg: dict | None) -> dict:
     if not (url.startswith("https://") or url.startswith("http://")):
         url = APP_UPDATE_RELEASE_URL_DEFAULT
     base["release_url"] = url
+    mirror = str(base.get("mirror") or "github").strip().lower()
+    valid_mirrors = {str(item.get("key") or "") for item in APP_UPDATE_MIRROR_OPTIONS}
+    if mirror not in valid_mirrors:
+        mirror = "github"
+    base["mirror"] = mirror
+    custom = str(base.get("custom_mirror") or "").strip()
+    if custom and not (custom.startswith("https://") or custom.startswith("http://")):
+        custom = ""
+    base["custom_mirror"] = custom
+    base["force_update"] = bool(base.get("force_update"))
     return base
 
 def _normalize_metrics_cfg(cfg: dict | None) -> dict:

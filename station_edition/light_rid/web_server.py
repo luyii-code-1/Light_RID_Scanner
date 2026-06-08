@@ -879,6 +879,7 @@ var ROOT_SECURITY_IGNORE_KEY = 'rid_root_security_ignore_v1';
 var LIVE_LOST_WINDOW_SEC = 120;
 var HISTORY_DEFAULT_WINDOW_SEC = 12 * 3600;
 var TRACK_HISTORY_FETCH_LIMIT = 4000;
+var TRACK_HISTORY_AUTO_FETCH_LIMIT = 800;
 var TRACK_FORCE_RELOAD_MS = 8000;
 var notificationItems = [];
 var notificationSeq = 0;
@@ -1084,8 +1085,30 @@ function filterTrackByHistoryTime(track){
   var arr = Array.isArray(track) ? track.slice() : [];
   return arr;
 }
+function trackPointWallSec(p){
+  p = p || {};
+  var candidates = [p.receive_time_ms, p.timestamp_ms, p.ts, p.t, p.wall_ts, p.time];
+  for(var i=0;i<candidates.length;i++){
+    var n = Number(candidates[i]);
+    if(!isFinite(n) || n <= 0) continue;
+    if(n > 100000000000) return n / 1000;
+    return n;
+  }
+  return null;
+}
+function filterLiveTrackForDisplay(track){
+  var arr = Array.isArray(track) ? track.slice() : [];
+  if(!arr.length) return arr;
+  var nowSec = Date.now() / 1000;
+  var cutoff = nowSec - LIVE_LOST_WINDOW_SEC;
+  var filtered = arr.filter(function(p){
+    var ts = trackPointWallSec(p);
+    return ts == null || ts >= cutoff;
+  });
+  return filtered.length ? filtered : arr.slice(Math.max(0, arr.length - 2));
+}
 function filterTrackForDisplay(track, page, sn){
-  if(page !== 'history') return [];
+  if(page !== 'history') return filterLiveTrackForDisplay(track);
   var arr = Array.isArray(track) ? track.slice() : [];
   arr = filterTrackByHistoryTime(arr);
   return arr;
@@ -1148,7 +1171,13 @@ function firmwareTypeText(e){
   return firmwareTypeKey(e) === 'new' ? '新版固件' : '旧版固件';
 }
 function uasIdText(e){
+  if(firmwareTypeKey(e) === 'old') return '-';
   var s = String((e && e.uas_id) || '').trim();
+  return s ? s : '-';
+}
+function displaySnText(e){
+  if(firmwareTypeKey(e) === 'old') return '-';
+  var s = String((e && e.sn) || '').trim();
   return s ? s : '-';
 }
 function ridFormatText(e){
@@ -1176,7 +1205,7 @@ function buildInfoHtml(e){
     '<button class="btn-mini export-track-btn" type="button" data-sn="'+escAttr(detailSn)+'">导出轨迹</button>'+
     '<button class="btn-mini warn delete-history-btn" type="button" data-sn="'+escAttr(detailSn)+'">删除历史</button>'+
     '</div><div class="info-grid">';
-  html += infoRowHtml('SN', String(e.sn || '-'));
+  html += infoRowHtml('SN', displaySnText(e));
   html += infoRowHtml('UAS ID', uasIdText(e));
   html += infoRowHtml('机型', String(e.model || 'N/A'));
   html += infoRowHtml('在线状态', e.lost ? '离线' : '在线');
@@ -1276,9 +1305,9 @@ function clearLiveSelections(keepSn){
     if(!matched) delete selectedMacSet[mac];
   });
 }
-function trackFetchUrl(sn){
+function trackFetchUrl(sn, limit){
   var url = '/api/tracks/get?sn=' + encodeURIComponent(sn);
-  url += '&limit=' + encodeURIComponent(String(TRACK_HISTORY_FETCH_LIMIT));
+  url += '&limit=' + encodeURIComponent(String(limit || TRACK_HISTORY_FETCH_LIMIT));
   return url;
 }
 function syncTrackLoadingUi(){
@@ -1294,13 +1323,18 @@ async function ensureTrackLoaded(sn, force, opts){
   if(trackLoading[sn]) return;
   var nowMs = Date.now();
   var meta = trackFetchMeta[sn] || {};
-  var scope = 'history|' + TRACK_HISTORY_FETCH_LIMIT;
+  var fetchLimit = (force || (opts && opts.interactive)) ? TRACK_HISTORY_FETCH_LIMIT : TRACK_HISTORY_AUTO_FETCH_LIMIT;
+  if(opts && opts.limit != null){
+    var explicitLimit = Number(opts.limit);
+    if(isFinite(explicitLimit) && explicitLimit > 0) fetchLimit = Math.max(1, Math.floor(explicitLimit));
+  }
+  var scope = 'history|' + fetchLimit;
   if(trackCache[sn] && !force && meta.scope === scope) return;
   var taskId = (opts && opts.interactive) ? window.beginAsyncTask(opts.title || '轨迹详情', opts.detail || ('正在加载轨迹详情: ' + sn)) : null;
   trackLoading[sn] = true;
   syncTrackLoadingUi();
   try{
-    var data = await getJson(trackFetchUrl(sn));
+    var data = await getJson(trackFetchUrl(sn, fetchLimit));
     var cacheEntry = mergeTrackCachePayload(data);
     var tr = cacheEntry.aircraft;
     trackCache[sn] = cacheEntry;
@@ -1778,18 +1812,16 @@ var initialLoadingTimeoutSec = 15;
 var initialLoadingTimer = null;
 function loadingStateForTarget(target){
   if(!initialLoadingStartedAt) initialLoadingStartedAt = Date.now();
-  var elapsed = Math.floor((Date.now() - initialLoadingStartedAt) / 1000);
   var name = String(target || '\u672c\u673a');
   if(name === '\u672c\u673a') name = '\u672c\u673a';
   return {
     target: name,
-    detail: '\u6b63\u5728\u8bfb\u53d6 ' + name + '\u2026',
-    status: elapsed + 's'
+    detail: '\u6b63\u5728\u7b49\u5f85\u8fd4\u56de\u6570\u636e',
+    status: '\u6b63\u5728\u5904\u7406'
   };
 }
 function loadingTextForTarget(target){
   if(!initialLoadingStartedAt) initialLoadingStartedAt = Date.now();
-  var elapsed = Math.floor((Date.now() - initialLoadingStartedAt) / 1000);
   var name = String(target || '本机');
   return '正在读取 ' + name + '…';
 }
@@ -2219,12 +2251,18 @@ function renderDiagnosticPopup(){
     queueText += ' (' + fmtDiagNum(parser.queue_usage_pct, 1, '%') + ')';
   }
   var queueMeta = [];
+  if(parser.worker_total != null) queueMeta.push('线程 ' + fmtDiagNum(parser.worker_total, 0, ''));
+  if(parser.worker_busy != null) queueMeta.push('正在处理 ' + fmtDiagNum(parser.worker_busy, 0, ''));
+  if(parser.worker_idle != null) queueMeta.push('正在等待 ' + fmtDiagNum(parser.worker_idle, 0, ''));
   if(parser.queue_high_water != null) queueMeta.push('高水位 ' + fmtDiagNum(parser.queue_high_water, 0, ''));
   if(parser.workers != null) queueMeta.push('线程 ' + fmtDiagNum(parser.workers, 0, ''));
   if(parser.dropped != null) queueMeta.push('丢包 ' + fmtDiagNum(parser.dropped, 0, ''));
   var workflowQueueText = workflowQueueDisplay(workflow);
   var reparseQueueText = workflowQueueText !== '-' ? workflowQueueText : fmtDiagNum(parser.reparse_queue_size, 0, '');
   var reparseMeta = [];
+  if(workflow.worker_total != null) reparseMeta.push('线程 ' + fmtDiagNum(workflow.worker_total, 0, ''));
+  if(workflow.worker_busy != null) reparseMeta.push('正在处理 ' + fmtDiagNum(workflow.worker_busy, 0, ''));
+  if(workflow.worker_idle != null) reparseMeta.push('正在等待 ' + fmtDiagNum(workflow.worker_idle, 0, ''));
   if(Number(workflow.pending || 0) > 0) reparseMeta.push('总剩余 ' + fmtDiagNum(workflow.pending, 0, ''));
   if(Number(workflow.total || 0) > 0) reparseMeta.push('已处理 ' + fmtDiagNum(workflow.completed, 0, '') + ' / ' + fmtDiagNum(workflow.total, 0, ''));
   if(Number(workflow.batches_total || 0) > 0) reparseMeta.push('批次 ' + fmtDiagNum(workflow.active_batch, 0, '') + ' / ' + fmtDiagNum(workflow.batches_total, 0, ''));
@@ -3910,6 +3948,7 @@ function renderLiveCards(list){
   rows.forEach(function(e, idx){
     e = e || {};
     var sn = String(e.sn || '');
+    var snDisplay = displaySnText(e);
     var selected = isSnSelected(sn);
     var inAlarmZone = !!zoneAlarmSnSet[sn];
     var cls = 'live-card' + (selected ? ' selected' : '') + (e.lost ? ' lost' : '') + (inAlarmZone ? ' alarm-zone' : '');
@@ -3935,7 +3974,7 @@ function renderLiveCards(list){
       +     '<span class="live-card-state '+stateCls+'">'+esc(stateTxt)+'</span>'
       +   '</div>'
       + '</div>'
-      + '<div class="live-card-snrow"><span class="label">SN</span><span class="live-card-sntext" title="'+esc(sn)+'">'+esc(sn || '-')+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制 SN">⧉</button></div>'
+      + '<div class="live-card-snrow"><span class="label">SN</span><span class="live-card-sntext" title="'+esc(snDisplay)+'">'+esc(snDisplay)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制 SN">⧉</button></div>'
       + '<div class="live-card-snrow live-card-uasrow"><span class="label">UAS ID</span><span class="live-card-sntext" title="'+esc(uas)+'">'+esc(uas)+'</span><span></span></div>'
       + '<div class="live-card-grid">'
       +   '<div class="live-card-item"><div class="k">经纬度</div><div class="v">'+esc(latlon)+'</div></div>'
@@ -4056,6 +4095,7 @@ function renderDroneTable(list){
     displayList.forEach(function(e, idx){
       e = e || {};
       var sn = String(e.sn || '');
+      var snDisplay = displaySnText(e);
       if(sn) latestDroneMap[sn] = e;
       var selected = (page === 'history') ? isHistoryTrackVisible(sn) : isSnSelected(sn);
       var snSrc = snSourceText(e);
@@ -4080,7 +4120,7 @@ function renderDroneTable(list){
       rows += '<tr class="'+cls+' data-row" data-sn="'+escAttr(sn)+'">'+
         '<td><div class="sel-wrap track-sel-wrap"><input class="sel-sn" type="checkbox" data-sn="'+escAttr(sn)+'"'+checked+'>'+chip+loadBar+'</div></td>'+
         '<td class="idx-cell">'+(idx+1)+'</td>'+
-        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(sn)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制SN">⧉</button></div></td>'+
+        '<td><div class="sn-cell">'+snMeta+'<span class="mono">'+esc(snDisplay)+'</span><button class="icon-btn copy-sn" type="button" data-sn="'+escAttr(sn)+'" title="复制SN">⧉</button></div></td>'+
         '<td'+modelCls+'>'+esc(e.model || 'N/A')+'</td>'+
         '<td'+rssiCls+'>'+fmt(e.rssi,0,'dBm')+'</td>'+
         '<td'+pktCls+'>'+esc(e.pkts==null?'0':e.pkts)+'</td>'+
@@ -6217,8 +6257,32 @@ body.zone-alert-active header.app-shell-header,body.zone-alert-active header{box
   header.app-shell-header h1{font-size:18px}
 }
 @media (max-width: 720px){
+  body.app-paged{overflow:auto}
+  .app-pages{height:auto;min-height:calc(100dvh - 150px);padding:0 8px 10px}
+  header.app-shell-header{margin:8px;padding:10px;position:relative;top:auto;grid-template-columns:1fr}
+  .main-shell-top,.main-head-side,.main-menu-actions,.main-live-stats{width:100%;justify-content:flex-start;flex-wrap:wrap}
+  .app-tab-nav{width:100%;min-width:0;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .app-tab-btn,.btn-mini,.header-link-btn{min-width:0;max-width:100%;white-space:normal;text-align:center}
+  .live-layout,.history-layout{gap:10px}
+  .live-card-panel{max-height:none}
+  .live-card-top{grid-template-columns:1fr}
+  .live-card-actions{justify-content:flex-start}
   .live-card-grid{grid-template-columns:1fr}
   .live-card-title{font-size:17px}
+  .tbl-wrap{margin-left:0;margin-right:0;border-radius:12px}
+  .history-table-slot .tbl-wrap{max-height:52vh}
+  .track-replay-card{left:8px;right:8px;bottom:8px;max-height:46vh;padding:12px}
+  .rid-task-host,.rid-toast-host{left:8px;right:8px;bottom:78px;max-width:none}
+  .rid-task,.rid-toast{width:100%}
+}
+@media (max-width: 430px){
+  header.app-shell-header h1{font-size:16px;line-height:1.2}
+  .main-live-stats .stat{white-space:normal}
+  .live-card{padding:11px}
+  .live-card-snrow{grid-template-columns:auto minmax(0,1fr)}
+  .live-card-snrow .icon-btn{grid-column:2;justify-self:start}
+  .info-card{width:calc(100vw - 16px)}
+  .info-row{grid-template-columns:1fr}
 }
 .rid-toast-host{position:fixed;right:18px;bottom:84px;z-index:10000;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:min(360px,calc(100vw - 28px))}
 .rid-toast{display:grid;grid-template-columns:4px minmax(0,1fr);gap:10px;align-items:start;padding:12px 14px;border-radius:var(--radius);background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--border);box-shadow:0 10px 22px rgba(15,23,42,.10);animation:toastIn .3s ease-out;pointer-events:auto;cursor:pointer}
@@ -7032,7 +7096,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       e = e || {};
       var gbExtended = detailSupportsGbExtended(e);
       var base = [
-        ['SN', String(e.sn || '-')],
+        ['SN', displaySnText(e)],
         ['UAS ID', uasIdText(e)],
         ['机型', modelActionCell(e), 'html'],
         ['在线状态', e.lost ? '离线' : '在线'],
@@ -7854,6 +7918,9 @@ function renderSummary(data){
   if(parser.queue_usage_pct != null && isFinite(Number(parser.queue_usage_pct))) queueText += ' (' + fmt(parser.queue_usage_pct, 1, '%') + ')';
   setText('diag-queue', queueText);
   setText('diag-queue-sub', [
+    parser.worker_total != null ? ('线程 ' + fmt(parser.worker_total, 0, '')) : '',
+    parser.worker_busy != null ? ('正在处理 ' + fmt(parser.worker_busy, 0, '')) : '',
+    parser.worker_idle != null ? ('正在等待 ' + fmt(parser.worker_idle, 0, '')) : '',
     parser.queue_high_water != null ? ('高水位 ' + fmt(parser.queue_high_water, 0, '')) : '',
     parser.workers != null ? ('线程 ' + fmt(parser.workers, 0, '')) : '',
     parser.dropped != null ? ('丢包 ' + fmt(parser.dropped, 0, '')) : ''
@@ -7861,6 +7928,9 @@ function renderSummary(data){
   var reparseQueueText = workflowQueueDisplay(workflow);
   setText('diag-reparse', reparseQueueText !== '-' ? reparseQueueText : fmt(parser.reparse_queue_size, 0, ''));
   setText('diag-reparse-sub', [
+    workflow.worker_total != null ? ('线程 ' + fmt(workflow.worker_total, 0, '')) : '',
+    workflow.worker_busy != null ? ('正在处理 ' + fmt(workflow.worker_busy, 0, '')) : '',
+    workflow.worker_idle != null ? ('正在等待 ' + fmt(workflow.worker_idle, 0, '')) : '',
     Number(workflow.pending || 0) > 0 ? ('总剩余 ' + fmt(workflow.pending, 0, '')) : '',
     workflow.total != null ? ('已处理 ' + fmt(workflow.completed, 0, '') + ' / ' + fmt(workflow.total, 0, '')) : '',
     workflow.batches_total != null && Number(workflow.batches_total || 0) > 0 ? ('批次 ' + fmt(workflow.active_batch, 0, '') + ' / ' + fmt(workflow.batches_total, 0, '')) : '',
@@ -8991,7 +9061,7 @@ def http_server_thread() -> None:
                     src = state_table.get(sn) or history_table.get(sn) or {}
                     firmware_type = src.get("firmware_type")
                     tracks = _sanitize_tracks(src)
-                    full_track = _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=firmware_type)
+                    full_count = _track_display_count(tracks, "aircraft", firmware_type=firmware_type)
                     track = _track_for_query(tracks, query, firmware_type=firmware_type)
                     aircraft_query = dict(query)
                     aircraft_query["track_type"] = ["aircraft"]
@@ -9001,7 +9071,7 @@ def http_server_thread() -> None:
                     "ok": True,
                     "sn": sn,
                     "count": len(track),
-                    "count_total": len(full_track),
+                    "count_total": full_count,
                     "track": track,
                     "tracks": {
                         "aircraft": _track_for_query(tracks, aircraft_query, firmware_type=firmware_type),

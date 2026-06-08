@@ -223,6 +223,16 @@ body.theme-light .tab.active{background:color-mix(in srgb, var(--blue) 12%, var(
 .app-update-state{margin-top:0;min-width:0;white-space:pre-line;word-break:break-word;overflow-wrap:anywhere;padding:10px 12px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:10px;background:color-mix(in srgb,var(--surface-tonal) 58%,var(--card2))}
 .app-update-row .row-actions,.app-update-row>#app-update-upload-file,.app-update-row>.micro:last-of-type{grid-column:1/-1}
 .app-update-row .row-actions{margin-top:2px}
+.app-update-panel{display:grid;grid-template-columns:minmax(220px,.75fr) minmax(0,1.25fr);gap:14px;margin-top:12px;padding:14px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb,var(--surface-tonal) 55%,var(--card))}
+.app-update-panel>*{min-width:0}
+.app-update-controls{display:grid;gap:10px}
+.app-update-controls .field{margin:0}
+.app-update-switches{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
+.app-update-switches label{display:inline-flex;gap:7px;align-items:center}
+.app-update-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.app-update-meta{display:grid;gap:8px}
+.app-update-meta .app-update-state{min-height:116px}
+.app-update-custom.hidden{display:none}
 .model-editor{display:grid;gap:10px;margin-top:10px}
 .model-editor-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
 .model-editor-toolbar input{height:42px}
@@ -335,7 +345,7 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
   .zone-layout{grid-template-columns:repeat(3,minmax(0,1fr))}
   .hook-layout .field:last-child,.api-token-create-grid .field:last-child,.zone-layout .field:last-child{grid-column:1/-1}
 }
-@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.access-subgrid,.hook-layout,.api-token-head,.api-token-create-grid,.api-token-grid,.policy-grid,.zone-layout,.field-inline,.model-update-row,.app-update-row,.model-editor-toolbar,.model-map-row,.sso-link-options{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
+@media (max-width:1200px){.visual-grid{grid-template-columns:1fr}.access-subgrid,.hook-layout,.api-token-head,.api-token-create-grid,.api-token-grid,.policy-grid,.zone-layout,.field-inline,.model-update-row,.app-update-row,.app-update-panel,.model-editor-toolbar,.model-map-row,.sso-link-options{grid-template-columns:1fr}.stats-grid{grid-template-columns:1fr}.metric-retention{margin-left:0}}
 @media (max-width:700px){
   .wrap{width:min(100vw - 12px,1420px);padding:10px 6px 18px}
   .topbar,.draft-bar{gap:10px}
@@ -425,18 +435,6 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
                 <button class="btn" id="btn-model-update-now" type="button">立即更新</button>
               </div>
               <div class="micro" id="model-update-state">从默认源或自定义地址更新识别库。</div>
-              <div class="model-update-row app-update-row" style="margin-top:10px">
-                <label><input id="cfg-app-update-enabled" type="checkbox"> 启动自动检查版本</label>
-                <div class="micro app-update-state" id="app-update-state">尚未检查更新</div>
-                <div class="row-actions">
-                  <button class="btn ghost" id="btn-app-update-check" type="button">手动检查版本</button>
-                  <button class="btn ghost" id="btn-app-update-download" type="button">后台下载安装包</button>
-                  <button class="btn ghost" id="btn-app-update-upload" type="button">上传本地安装包</button>
-                  <button class="btn" id="btn-app-update-start" type="button">安装已校验安装包</button>
-                </div>
-                <input id="app-update-upload-file" type="file" hidden>
-                <div class="micro">下载完成后自动校验安装。</div>
-              </div>
               <div class="row-actions" style="margin-top:10px"><button class="btn ghost" id="btn-model-map-open" type="button">编辑识别库</button></div>
             </div>
             <div class="field full"><label>扫描数据库(固定)</label><input id="cfg-history-file" type="text" readonly disabled></div>
@@ -483,6 +481,41 @@ body.theme-light .rid-loading-box{background:var(--card);box-shadow:0 16px 32px 
               <div id="status-network-bind" class="status">-</div>
             </div>
           </details>
+        </div>
+        <div class="card" id="settings-app-update" data-card-key="capture">
+          <div class="section-head">
+            <div>
+              <h2>程序更新</h2>
+              <div class="section-copy">检查、下载、上传并安装 Station 更新包。</div>
+            </div>
+          </div>
+          <div class="app-update-panel">
+            <div class="app-update-controls">
+              <div class="app-update-switches">
+                <label><input id="cfg-app-update-enabled" type="checkbox"> 自动检查版本</label>
+                <label><input id="cfg-app-update-force" type="checkbox"> 强制更新</label>
+              </div>
+              <div class="field">
+                <label>下载镜像</label>
+                <select id="cfg-app-update-mirror"></select>
+              </div>
+              <div class="field app-update-custom" id="app-update-custom-wrap">
+                <label>自定义镜像源</label>
+                <input id="cfg-app-update-custom-mirror" type="text" placeholder="例如 https://gh-proxy.example.com/{url}">
+              </div>
+              <div class="micro">默认直接访问 github.com；选择其他可填写自定义镜像源。强制更新会允许校验失败的安装包继续安装。</div>
+            </div>
+            <div class="app-update-meta">
+              <div class="micro app-update-state" id="app-update-state">尚未检查更新</div>
+              <div class="app-update-actions">
+                <button class="btn ghost" id="btn-app-update-check" type="button">检查</button>
+                <button class="btn ghost" id="btn-app-update-download" type="button">下载</button>
+                <button class="btn ghost" id="btn-app-update-upload" type="button">上传</button>
+                <button class="btn" id="btn-app-update-start" type="button">安装</button>
+              </div>
+              <input id="app-update-upload-file" type="file" hidden>
+            </div>
+          </div>
         </div>
         <div class="card" id="settings-map" data-card-key="map">
           <div class="section-head">

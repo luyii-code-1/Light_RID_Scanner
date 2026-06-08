@@ -1,8 +1,10 @@
 PACKET_PARSE_QUEUE_MAX = 4096
-PACKET_PARSE_WORKERS = max(2, min(4, int(os.cpu_count() or 2)))
+PACKET_PARSE_WORKERS = 12
 packet_parse_queue = queue.Queue(maxsize=PACKET_PARSE_QUEUE_MAX)
 packet_parse_drop_count = 0
 packet_parse_worker_started = False
+packet_parse_active_lock = Lock()
+packet_parse_active_count = 0
 RID_PARSE_FORMATS = {"GB46750_2025", "DJI_OLD_ODID"}
 RID_PARSE_SN_RE = re.compile(r"^[A-Za-z0-9]{4,64}$")
 
@@ -79,16 +81,21 @@ def _enqueue_packet_for_parse(pkt) -> None:
 
 
 def _packet_parse_worker_loop() -> None:
+    global packet_parse_active_count
     while True:
         pkt = packet_parse_queue.get()
         started_at = time.perf_counter()
         queue_depth = packet_parse_queue.qsize()
+        with packet_parse_active_lock:
+            packet_parse_active_count += 1
         try:
             _parse_frame_impl(pkt)
         except Exception as ex:
             if DEBUG_MODE:
                 _scan(f"[ERR] parse worker: {ex}")
         finally:
+            with packet_parse_active_lock:
+                packet_parse_active_count = max(0, packet_parse_active_count - 1)
             _packet_parse_diag_note_parse((time.perf_counter() - started_at) * 1000.0, queue_depth=queue_depth)
 
 

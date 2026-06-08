@@ -145,12 +145,29 @@ jobs:
           uname -m
           docker version
 
+      - name: Pull x32 build image with retry
+        shell: bash
+        run: |
+          set -euxo pipefail
+          IMAGE="python:3.12-bookworm"
+          for attempt in 1 2 3 4 5; do
+            if docker pull --platform linux/386 "$IMAGE"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "Failed to pull $IMAGE for linux/386 after $attempt attempts."
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
       - name: Build 32-bit x86 binary
         shell: bash
         run: |
           set -euxo pipefail
           BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
           docker run --rm --platform linux/386 \
+            --pull never \
             -e RELEASE_TAG="${{ env.RELEASE_TAG }}" \
             -e BUILD_COMMIT="${BUILD_COMMIT}" \
             -v "$PWD:/work" \
@@ -236,12 +253,29 @@ jobs:
           uname -m
           docker version
 
+      - name: Pull ARMv7 build image with retry
+        shell: bash
+        run: |
+          set -euxo pipefail
+          IMAGE="arm32v7/python:3.12-bookworm"
+          for attempt in 1 2 3 4 5; do
+            if docker pull --platform linux/arm/v7 "$IMAGE"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "Failed to pull $IMAGE for linux/arm/v7 after $attempt attempts."
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
       - name: Build 32-bit ARMv7 binary
         shell: bash
         run: |
           set -euxo pipefail
           BUILD_COMMIT="$(git rev-parse --short=7 HEAD)"
           docker run --rm --platform linux/arm/v7 \
+            --pull never \
             -e RELEASE_TAG="${{ env.RELEASE_TAG }}" \
             -e BUILD_COMMIT="${BUILD_COMMIT}" \
             -v "$PWD:/work" \

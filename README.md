@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Light RID Scanner is a fixed-station Remote ID (ASTM F3411 / OpenDroneID) Wi-Fi monitor built for Raspberry Pi and other Linux-based capture nodes. It passively listens for drone Remote ID broadcasts over Wi-Fi, decodes them in real time, and presents the results through a modern web dashboard.
+Light RID Scanner is a fixed-station Remote ID (ASTM F3411 / OpenDroneID) Wi-Fi monitor built for Raspberry Pi and other Linux-based capture nodes. It passively listens for drone Remote ID broadcasts over Wi-Fi, decodes them in real time, and presents the results through a local web dashboard.
 
 It also includes a portable edition for mobile deployments and a node-center viewer that aggregates multiple stations into a single pane of glass.
 

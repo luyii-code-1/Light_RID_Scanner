@@ -175,6 +175,11 @@ async function withViewerPageLoading(target, title, fn){
     hideViewerPageLoading();
   }
 }
+window.dismissViewerToast = dismissViewerToast;
+window.renderViewerToasts = renderViewerToasts;
+window.showViewerPageLoading = showViewerPageLoading;
+window.hideViewerPageLoading = hideViewerPageLoading;
+window.withViewerPageLoading = withViewerPageLoading;
 """
     external_scripts = "".join(f'<script src="{src}"></script>\n' for src in extra_scripts)
     return f"""<!doctype html><html lang="zh"><head>
@@ -187,9 +192,11 @@ async function withViewerPageLoading(target, title, fn){
 {extra_css}
 </style></head><body><div class="wrap">
 {body}
-</div>{external_scripts}
-<script>
+</div><script>
 window.LIGHT_RID_VIEWER_VERSION = {APP_VERSION!r};
 {shared_script}
+</script>
+{external_scripts}
+<script>
 {script}
 </script></body></html>"""

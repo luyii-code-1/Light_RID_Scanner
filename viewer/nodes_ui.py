@@ -127,6 +127,8 @@ def build_nodes_page() -> str:
     extra_css = """
 .node-manager-grid{grid-template-columns:minmax(520px,1.08fr) minmax(420px,.92fr)}
 .node-topbar{padding:14px 18px;border:1px solid color-mix(in srgb,var(--border) 92%,transparent);border-radius:22px;background:linear-gradient(180deg,color-mix(in srgb,var(--card) 96%,transparent),color-mix(in srgb,var(--card2) 94%,transparent));box-shadow:0 10px 28px rgba(0,0,0,.18)}
+.node-topbar .title{font:700 24px/1.05 var(--font-ui);letter-spacing:0}
+.node-topbar .sub{font-size:13px;line-height:1.35}
 .node-hero{display:flex;align-items:center;gap:14px}
 .node-hero-icon{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:color-mix(in srgb,var(--blue) 12%,var(--card2));color:var(--blue);font:700 18px/1 var(--font-ui);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 18%,transparent)}
 .node-glass-card{border-radius:22px;box-shadow:0 8px 24px rgba(0,0,0,.18);background:color-mix(in srgb,var(--card) 96%,transparent)}

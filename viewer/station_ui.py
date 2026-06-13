@@ -51,7 +51,6 @@ def _viewer_patch_js() -> str:
     return r"""
 (function(){
   document.body.classList.add('viewer-mode');
-  var viewerThemeBound = false;
   var viewerDataLoaded = false;
   var viewerLoadingStartedAt = 0;
   var viewerLoadingTargetText = '远程节点';
@@ -68,6 +67,39 @@ def _viewer_patch_js() -> str:
   }
   function stripDetailReparseUi(){
     Array.prototype.slice.call(document.querySelectorAll('.detail-reparse-box')).forEach(removeNode);
+  }
+  function suppressStationSniffUi(){
+    var badge = qs('sniff-state');
+    if(badge){
+      badge.classList.remove('warn','err');
+      badge.classList.add('ok');
+      badge.textContent = '聚合';
+    }
+    var stat = badge && badge.closest ? badge.closest('.stat') : null;
+    if(stat && stat.firstChild) stat.firstChild.textContent = '节点 ';
+    var banner = qs('sniff-banner');
+    if(banner){
+      banner.style.display = 'none';
+      banner.textContent = '';
+      banner.className = 'sniff-banner';
+    }
+    Array.prototype.slice.call(document.querySelectorAll('.banner')).forEach(function(node){
+      var text = String(node.textContent || '');
+      if(text.indexOf('采集告警') >= 0 || text.indexOf('采集异常') >= 0) removeNode(node);
+    });
+  }
+  function sanitizeViewerMeta(meta){
+    if(!meta || typeof meta !== 'object') return meta;
+    var out = Object.assign({}, meta);
+    out.sniff_state = 'ok';
+    out.sniff_iface = 'node-center';
+    if(out.viewer_loading){
+      out.sniff_msg = '正在读取节点';
+      out.sniff_last_pkt = '';
+    }else if(!out.sniff_msg){
+      out.sniff_msg = 'Viewer 聚合';
+    }
+    return out;
   }
   function patchTitle(){
     try{ document.title = 'Light RID Node Center'; }catch(_e){}
@@ -104,6 +136,27 @@ def _viewer_patch_js() -> str:
     });
   }
   function patchViewerFunctions(){
+    if(typeof window.applySniffStatus === 'function' && !window.applySniffStatus.__viewerPatched){
+      window.applySniffStatus = function(meta){
+        var badge = qs('sniff-state');
+        if(badge){
+          badge.classList.remove('warn','err');
+          badge.classList.add('ok');
+          badge.textContent = (meta && meta.viewer_loading) ? '读取' : '聚合';
+        }
+        suppressStationSniffUi();
+      };
+      window.applySniffStatus.__viewerPatched = true;
+    }
+    if(typeof window.showBanner === 'function' && !window.showBanner.__viewerPatched){
+      var oldBanner = window.showBanner;
+      window.showBanner = function(text, kind, timeoutMs, opts){
+        var value = String(text || '');
+        if(value.indexOf('采集告警') >= 0 || value.indexOf('采集异常') >= 0) return null;
+        return oldBanner(text, kind, timeoutMs, opts);
+      };
+      window.showBanner.__viewerPatched = true;
+    }
     if(typeof window.detailReparseControls === 'function' && !window.detailReparseControls.__viewerDisabled){
       window.detailReparseControls = function(){ return ''; };
       window.detailReparseControls.__viewerDisabled = true;
@@ -132,6 +185,7 @@ def _viewer_patch_js() -> str:
       var oldOnData = window.onData;
       window.onData = function(d){
         var isLoading = !!(d && d.meta && d.meta.viewer_loading);
+        if(d && d.meta) d = Object.assign({}, d, {meta: sanitizeViewerMeta(d.meta)});
         if(isLoading){
           var targets = Array.isArray(d.meta.viewer_loading_targets) ? d.meta.viewer_loading_targets : [];
           if(targets.length){
@@ -225,20 +279,46 @@ def _viewer_patch_js() -> str:
       logbox.appendChild(line);
     }
   }
-  function ensureThemeButton(){
-    var settings = qs('btn-settings');
-    if(settings && !qs('btn-theme')){
+  function viewerMenuClass(anchor){
+    var morePop = qs('main-more-pop');
+    if(morePop && anchor && morePop.contains(anchor)) return 'btn-mini header-link-btn';
+    return (anchor && anchor.className) || 'btn-mini header-link-btn';
+  }
+  function makeViewerMenuButton(id, text, href, anchor){
+    var btn = qs(id);
+    if(!btn){
+      btn = document.createElement('button');
+      btn.id = id;
+      btn.type = 'button';
+      if(anchor && anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+    }
+    btn.className = viewerMenuClass(anchor || btn);
+    btn.textContent = text;
+    if(btn.getAttribute('data-viewer-bound') !== '1'){
+      btn.setAttribute('data-viewer-bound','1');
+      btn.addEventListener('click', function(ev){
+        ev.preventDefault();
+        ev.stopPropagation();
+        location.href = href;
+      });
+    }
+    return btn;
+  }
+  function ensureThemeButton(anchor){
+    anchor = anchor || qs('btn-viewer-nodes') || qs('btn-settings');
+    if(anchor && !qs('btn-theme')){
       var theme = document.createElement('button');
-      theme.className = settings.className || 'btn-mini';
       theme.id = 'btn-theme';
       theme.type = 'button';
-      theme.textContent = document.body.classList.contains('theme-light') ? '深色' : '浅色';
-      if(settings.parentNode) settings.parentNode.insertBefore(theme, settings.nextSibling);
+      if(anchor.parentNode) anchor.parentNode.insertBefore(theme, anchor.nextSibling);
     }
     var btn = qs('btn-theme');
     if(btn){
+      btn.className = viewerMenuClass(anchor || btn);
       btn.style.display = '';
-      if(!viewerThemeBound){
+      btn.textContent = document.body.classList.contains('theme-light') ? '深色' : '浅色';
+      if(btn.getAttribute('data-viewer-theme-bound') !== '1'){
+        btn.setAttribute('data-viewer-theme-bound','1');
         btn.addEventListener('click', function(ev){
           ev.preventDefault();
           ev.stopPropagation();
@@ -247,14 +327,17 @@ def _viewer_patch_js() -> str:
           }
           setTimeout(ensureThemeButton, 0);
         });
-        viewerThemeBound = true;
       }
     }
   }
-  function deleteStationOnlyUi(){
-    ['btn-freeze','btn-web-notify','btn-clear-history','btn-adv-open','btn-hw-assistant','btn-logs','adv-modal','notify-center-button','notify-center-panel'].forEach(removeId);
+  function syncViewerMainMenu(){
+    var morePop = qs('main-more-pop');
+    ['btn-freeze','btn-web-notify','btn-clear-history','btn-adv-open','btn-hw-assistant','btn-logs','btn-diagnostic','adv-modal','notify-center-button','notify-center-panel'].forEach(removeId);
     removeClosestById('ap-list', '.panel');
     removeClosestById('ap-list-count', '.panel');
+    removeClosestById('aplist', '.panel');
+    var workflow = qs('main-workflow-wrap');
+    if(workflow) workflow.style.display = 'none';
     stripDetailReparseUi();
     var settings = qs('btn-settings');
     if(settings && settings.getAttribute('data-viewer-bound') !== '1'){
@@ -262,24 +345,19 @@ def _viewer_patch_js() -> str:
       settings.textContent = '设置';
       settings.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); location.href='/settings'; });
     }
-    if(settings && !qs('btn-viewer-nodes')){
-      var nodes = document.createElement('button');
-      nodes.className = settings.className || 'btn';
-      nodes.id = 'btn-viewer-nodes';
-      nodes.type = 'button';
-      nodes.textContent = '节点管理';
-      nodes.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); location.href='/nodes'; });
-      if(settings.parentNode) settings.parentNode.insertBefore(nodes, settings.nextSibling);
-    }
-    ensureThemeButton();
-    var morePop = qs('main-more-pop');
-    if(morePop){
-      Array.prototype.slice.call(morePop.querySelectorAll('button')).forEach(function(btn){
-        if(btn.id === 'btn-logs') removeNode(btn);
-      });
+    if(settings){
+      settings.className = viewerMenuClass(settings);
+      var nodes = makeViewerMenuButton('btn-viewer-nodes', '节点管理', '/nodes', settings);
+      ensureThemeButton(nodes);
+    }else if(morePop){
+      var tail = morePop.lastElementChild;
+      var fallback = makeViewerMenuButton('btn-viewer-nodes', '节点管理', '/nodes', tail);
+      ensureThemeButton(fallback);
+    }else{
+      ensureThemeButton();
     }
   }
-  function tick(){ patchTitle(); patchViewerFunctions(); deleteStationOnlyUi(); syncViewerBaseLabels(); setViewerLoadingState(); }
+  function tick(){ patchTitle(); patchViewerFunctions(); syncViewerMainMenu(); syncViewerBaseLabels(); suppressStationSniffUi(); setViewerLoadingState(); }
   function scheduleTicks(){
     [0, 120, 360, 900, 1800].forEach(function(delay){
       setTimeout(tick, delay);
@@ -301,6 +379,17 @@ def build_station_viewer_page() -> str:
 body.theme-light .viewer-base-label{background:color-mix(in srgb,var(--blue) 7%,var(--panel2))}
 .viewer-mode .detail-reparse-box{display:none !important}
 .viewer-loading-state{color:var(--dim);font-weight:650}
+.viewer-mode #btn-freeze,
+.viewer-mode #btn-web-notify,
+.viewer-mode #btn-clear-history,
+.viewer-mode #btn-adv-open,
+.viewer-mode #btn-hw-assistant,
+.viewer-mode #btn-logs,
+.viewer-mode #btn-diagnostic,
+.viewer-mode #main-workflow-wrap,
+.viewer-mode #sniff-banner,
+.viewer-mode #notify-center-button,
+.viewer-mode #notify-center-panel{display:none !important}
 .banner-stack{top:74px;width:auto;max-width:calc(100vw - 28px);align-items:center}
 .banner{width:min(420px,calc(100vw - 32px));min-height:78px;border-radius:var(--radius-lg)}
 """

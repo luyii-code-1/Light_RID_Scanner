@@ -2827,6 +2827,29 @@ def _app_update_requires_sudo() -> bool:
     except Exception:
         return False
 
+def _app_update_sudo_blocked_reason(raw_error: str = "") -> str:
+    text = str(raw_error or "").strip()
+    if text:
+        lower = text.lower()
+        if "unable to change to root gid" in lower or "sudoers_audit" in lower:
+            return (
+                "当前服务进程无法执行 sudo 提权：systemd 权限边界阻止切换到 root。"
+                "请通过 SSH/root 执行安装或使用同步部署。原始错误: " + text
+            )
+        return "sudo 提权不可用: " + text
+    return (
+        "当前服务进程无法执行 sudo 提权。"
+        "如果服务以 rid 用户并带 CapabilityBoundingSet 运行，请通过 SSH/root 执行安装或使用同步部署。"
+    )
+
+def _app_update_can_elevate() -> bool:
+    if not _app_update_requires_sudo():
+        return True
+    try:
+        return bool(_can_run_privileged_actions())
+    except Exception:
+        return False
+
 def _app_update_normalize_digest(text: str) -> str:
     raw = str(text or "").strip().lower()
     if raw.startswith("sha256:"):
@@ -3485,7 +3508,11 @@ def _app_update_status_payload(consume_notice: bool = False) -> dict:
     state["staged_expected_sha256"] = str(stage_meta.get("expected_sha256") or "")
     state["staged_verified"] = bool(stage_meta.get("verified"))
     state["staged_size"] = int(stage_meta.get("size") or 0)
-    state["requires_sudo"] = _app_update_requires_sudo()
+    requires_sudo = _app_update_requires_sudo()
+    can_elevate = _app_update_can_elevate()
+    state["requires_sudo"] = bool(requires_sudo)
+    state["can_elevate"] = bool(can_elevate)
+    state["sudo_blocked_reason"] = _app_update_sudo_blocked_reason() if requires_sudo and not can_elevate else ""
     state["current_commit"] = current_commit
     state["current_tag"] = current_tag
     state["current_short"] = _short_commit(current_commit)
@@ -3583,8 +3610,17 @@ def _start_app_update_install(*, manual: bool = False, sudo_password: str | None
         return {"ok": False, "error": "请先下载或上传安装包", "state": _app_update_status_payload()}
     if not bool(stage_meta.get("verified")) and not bool(APP_UPDATE_CFG.get("force_update")):
         return {"ok": False, "error": "安装包未通过 SHA256 校验；如确认仍要继续，请在设置中启用强制更新", "state": _app_update_status_payload()}
-    if _app_update_requires_sudo() and not str(sudo_password or "").strip():
+    requires_sudo = _app_update_requires_sudo()
+    if requires_sudo and not _app_update_can_elevate():
+        reason = _app_update_sudo_blocked_reason()
+        return {"ok": False, "error": reason, "need_sudo": False, "state": _app_update_status_payload()}
+    if requires_sudo and not str(sudo_password or "").strip():
         return {"ok": False, "error": "sudo required", "need_sudo": True, "state": _app_update_status_payload()}
+    if requires_sudo:
+        ok_sudo, out_sudo, _rc_sudo = _run_privileged(["true"], timeout=8, sudo_password=sudo_password)
+        if not ok_sudo:
+            reason = _app_update_sudo_blocked_reason(out_sudo)
+            return {"ok": False, "error": reason, "need_sudo": False, "state": _app_update_status_payload()}
     stage_dir = os.path.abspath(str(stage_meta.get("stage_dir") or ""))
     plan = _app_update_stage_install_plan(stage_meta, state, manual)
     plan_path = os.path.join(stage_dir, "plan.json")

@@ -1548,6 +1548,10 @@
     if (state.force_update) lines.push("强制更新: 已启用，校验失败的安装包也可继续安装。");
     if (state.staged_ready && state.staged_verified === false) lines.push("安装包校验: 未通过或缺少 SHA256，继续安装属于强制更新。");
     if (state.requires_sudo && state.staged_ready && !state.installing) lines.push("安装时会按需询问 sudo 密码。");
+    if (state.requires_sudo && state.staged_ready && !state.installing && state.can_elevate === false) {
+      lines.pop();
+      lines.push(String(state.sudo_blocked_reason || "当前服务进程无法执行 sudo 提权，请通过 SSH/root 执行安装或使用同步部署。"));
+    }
     el.textContent = lines.join("\n");
     if (qs("btn-app-update-check")) {
       qs("btn-app-update-check").disabled = !!state.running || !!state.download_running || !!state.installing;
@@ -1559,7 +1563,7 @@
       qs("btn-app-update-upload").disabled = !!state.running || !!state.download_running || !!state.installing;
     }
     if (qs("btn-app-update-start")) {
-      qs("btn-app-update-start").disabled = !!state.running || !!state.download_running || !!state.installing || !state.staged_ready || state.install_supported === false;
+      qs("btn-app-update-start").disabled = !!state.running || !!state.download_running || !!state.installing || !state.staged_ready || state.install_supported === false || state.requires_sudo && state.can_elevate === false;
     }
     if (state.completion_notice && state.completion_notice.text) {
       showNotice(String(state.completion_notice.text), state.completion_notice.kind === "warn" ? "warn" : "ok", 5200);

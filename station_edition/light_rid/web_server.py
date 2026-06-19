@@ -9759,10 +9759,12 @@ def http_server_thread() -> None:
                 except Exception:
                     total_bytes = 0
                 try:
+                    _log(f"[INFO] app update upload prepare: name={file_name or '-'} bytes={total_bytes}")
                     rsp = _prepare_uploaded_app_update_package(file_name, total_bytes)
                     _op_log("app-update-upload-prepare", str((rsp.get("prepare") or {}).get("asset_name") or file_name), ip=_client_ip_from_handler(self), ok=True)
                     self._send_json(rsp, 200)
                 except Exception as e:
+                    _log(f"[WARN] app update upload prepare failed: name={file_name or '-'} bytes={total_bytes} error={e}")
                     _op_log("app-update-upload-prepare", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
                     self._send_json({"ok": False, "error": str(e), "state": _app_update_status_payload()}, 400)
             elif path == "/api/settings/app-update/upload":
@@ -9772,15 +9774,18 @@ def http_server_thread() -> None:
                     self._send_json({"ok": False, "error": "upload file name missing"}, 400)
                     return
                 try:
+                    _log(f"[INFO] app update upload started: name={file_name} bytes={body_len}")
                     meta = _accept_uploaded_app_update_package(file_name, self.rfile, body_len, upload_token=upload_token)
                     rsp = {
                         "ok": True,
                         "message": f"{meta.get('asset_name') or file_name} 已上传并通过 SHA256 校验。",
                         "state": _app_update_status_payload(),
                     }
+                    _log(f"[INFO] app update upload completed: name={meta.get('asset_name') or file_name} bytes={body_len} sha256={str(meta.get('sha256') or '')[:16]}")
                     _op_log("app-update-upload", str(meta.get("asset_name") or file_name), ip=_client_ip_from_handler(self), ok=True)
                     self._send_json(rsp, 200)
                 except Exception as e:
+                    _log(f"[WARN] app update upload failed: name={file_name} bytes={body_len} error={e}")
                     _op_log("app-update-upload", f"error={e}", ip=_client_ip_from_handler(self), ok=False)
                     self._send_json({"ok": False, "error": str(e), "state": _app_update_status_payload()}, 400)
             elif path == "/api/settings/app-update/start":

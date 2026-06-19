@@ -296,6 +296,17 @@ function pageHeaders(extra){
   }
   return headers;
 }
+function fetchNetworkError(url, err){
+  var target = '';
+  try{ target = apiUrl(url); }catch(_e){ target = String(url || ''); }
+  var origin = '';
+  try{ origin = window.location.origin || ''; }catch(_e2){}
+  var base = err && err.message ? String(err.message) : String(err || 'network error');
+  if(base === 'Failed to fetch'){
+    return new Error('网络请求未完成: ' + target + '。当前页面来源: ' + (origin || '-') + '。请确认从基站同源页面打开设置页，例如 http://192.168.1.35:4600/settings；如果正在上传大文件，请检查网络是否中断或页面是否被浏览器/代理拦截。原始错误: ' + base);
+  }
+  return new Error(base + ' (' + target + ')');
+}
 var authRedirecting = false;
 function authExpired(r, d){
   var err = String((d && d.error) || '');
@@ -492,21 +503,36 @@ async function importScanDataFileFromFile(file){
   showNotice('扫描数据导入完成。', 'ok', 3200);
 }
 async function getJson(url){
-  const r = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
+  var r;
+  try{
+    r = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
+  }catch(e){
+    throw fetchNetworkError(url, e);
+  }
   const d = await r.json().catch(()=>({}));
   if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
 }
 async function postJson(url, body){
-  const r = await fetch(apiUrl(url), {method:'POST', headers:pageHeaders({'Content-Type':'application/json'}), body:JSON.stringify(body||{})});
+  var r;
+  try{
+    r = await fetch(apiUrl(url), {method:'POST', headers:pageHeaders({'Content-Type':'application/json'}), body:JSON.stringify(body||{})});
+  }catch(e){
+    throw fetchNetworkError(url, e);
+  }
   const d = await r.json().catch(()=>({}));
   if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
   if(!r.ok || d.ok===false) throw new Error(d.error || ('HTTP '+r.status));
   return d;
 }
 async function requestJson(url, opts){
-  var r = await fetch(apiUrl(url), opts || {});
+  var r;
+  try{
+    r = await fetch(apiUrl(url), opts || {});
+  }catch(e){
+    throw fetchNetworkError(url, e);
+  }
   var d = await r.json().catch(()=>({}));
   if(authExpired(r, d)){ redirectLogin(); throw new Error('login required'); }
   return {response:r, data:d};

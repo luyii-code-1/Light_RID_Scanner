@@ -191,7 +191,7 @@ const TableRoot = {
     const setHistorySnVisible = fn("setHistorySnVisible", () => {});
     const setSnSelected = fn("setSnSelected", () => {});
     const focusHistoryAircraft = fn("focusHistoryAircraft", () => {});
-    const showDroneInfoCard = fn("showDroneInfoCard", () => {});
+    const focusLiveAircraft = fn("focusLiveAircraft", () => {});
     const hideInfoCard = fn("hideInfoCard", () => {});
     const copySn = fn("copySn", () => {});
     let rowClickTimer = null;
@@ -304,10 +304,7 @@ const TableRoot = {
           focusHistoryAircraft(sn);
           return;
         }
-        const item = (window.latestDroneMap || {})[sn];
-        if (item) {
-          showDroneInfoCard(item);
-        }
+        focusLiveAircraft(sn);
       }, 220);
     }
 
@@ -501,7 +498,7 @@ const LiveCardsRoot = {
     const setSnSelected = fn("setSnSelected", () => {});
     const setHistorySnVisible = fn("setHistorySnVisible", () => {});
     const focusHistoryAircraft = fn("focusHistoryAircraft", () => {});
-    const showDroneInfoCard = fn("showDroneInfoCard", () => {});
+    const focusLiveAircraft = fn("focusLiveAircraft", () => {});
     const fmt = fn("fmt", fmtFallback);
     const fmtAge = fn("fmtAge", (age) => (age == null ? "N/A" : String(age)));
     let rowClickTimer = null;
@@ -580,10 +577,7 @@ const LiveCardsRoot = {
           focusHistoryAircraft(sn);
           return;
         }
-        const item = (window.latestDroneMap || {})[sn];
-        if (item) {
-          showDroneInfoCard(item);
-        }
+        focusLiveAircraft(sn);
       }, 220);
     }
 

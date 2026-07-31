@@ -13,10 +13,10 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
   WIP（Work in Progress，开发中）。移动版运行时代码已按新策略清空，当前目录只保留 WIP 说明。
 - 根目录 `run.py`
   基站版本兼容入口，实际跳转到 `station_edition/run.py`。
-- 根目录 `rid-models.json`
+- 根目录 `rid_model.json`
   面向 GitHub Raw 的公开机型库；二进制内也会嵌入同一份资源，运行目录缺失时可自动恢复。
 
-基站版优先从自身目录运行。未显式传入路径时，`config.json`、`rid_storage.db` 和 `rid-models.json` 等运行文件都按当前工作目录解析；旧的 `history-cache.json` / `rid_history_cache.json` 会被视为一次性迁移来源。
+基站版优先从自身目录运行。未显式传入路径时，`config.json`、`rid_storage.db` 和 `rid_model.json` 等运行文件都按当前工作目录解析；旧的 `history-cache.json` / `rid_history_cache.json` 会被视为一次性迁移来源。
 
 ## 功能概览
 
@@ -30,6 +30,8 @@ Light RID Scanner 是一个面向树莓派和其他 Linux 采集节点的固定�
 
 ### 网页仪表盘
 - 基于 Leaflet 的实时地图，展示飞机标记、基站位置和报警区域
+- 支持内存中的模拟目标场景，用于演示和端到端验证（环绕、直线或悬停模式，最多 100 个目标）
+- 支持配置授权地图服务的 Leaflet 瓦片/API 模板
 - 飞机列表面板，包含实时详情卡片（序列号、型号、高度、速度、航向、RSSI）
 - AP 列表面板，显示厂商识别结果
 - 深色/浅色主题切换
@@ -221,7 +223,7 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://0.0.0.0:4600/api/v1/drones
 | `rid_storage.db` | SQLite 历史库与保留的原始 HEX 数据 | 是 |
 | `history-cache.json` | 旧版 JSON 历史文件，存在时会自动导入一次 | 旧版迁移来源 |
 | `rid_history_cache.json` | 更早期的 JSON 历史文件，存在时会自动导入一次 | 旧版迁移来源 |
-| `rid_models.json` | RID 机型前缀到名称的映射 | 是（从 GitHub 或内嵌资源） |
+| `rid_model.json` | RID 机型前缀到名称的映射 | 是（从 GitHub 或内嵌资源） |
 | `oui.txt` | MAC OUI 厂商数据库 | 可选（自动下载） |
 | `light_rid_scanner/host_metrics.jsonl` | 主机负载采样数据 | 是（系统临时目录） |
 
@@ -243,6 +245,25 @@ python run.py --config /etc/light-rid/config.json --no-tui
 2. **地图面板** — 基于 Leaflet 的地图，显示飞机标记（带航向箭头）、基站图标和已启用的报警区域矩形框。飞机标记通过 WebSocket 推送实时更新。点击标记弹出详情卡片，包含序列号、型号、高度、速度、航向、RSSI 和最后发现时间。
 3. **底部面板** — 可在飞机列表、AP 列表和事件日志视图之间切换。飞机列表按最后发现时间排序显示紧凑卡片。AP 列表显示检测到的 Wi-Fi 接入点及 OUI 数据库厂商名称。
 4. **底部导航** — 跳转至 `/settings`、`/logs`、`/hardware-assistant` 的链接及主题切换。
+
+### 地图服务配置
+
+基站页使用 Leaflet。未配置地图服务时，系统会回退到内置默认在线瓦片模板，方便本地测试；该默认底图可能存在法律或服务条款风险，未配置授权地图服务前请勿将基站页面暴露到公网，也不要用于商业场景。
+
+可在 `/settings` 的 **地图与基站** 卡片中配置授权的 XYZ 瓦片/API 模板，也可以直接写入 `config.json`：
+
+```json
+{
+  "web": {
+    "map_tile_url": "https://example.com/tiles/{z}/{x}/{y}.png?key=YOUR_KEY",
+    "map_tile_subdomains": "",
+    "map_tile_attribution": "(c) Your Map Provider",
+    "map_tile_max_native_zoom": 18
+  }
+}
+```
+
+`map_tile_url` 必须包含 `{z}`、`{x}`、`{y}`。如果模板使用 `{s}` 子域，可在 `map_tile_subdomains` 中填写逗号分隔的子域列表。配置 `map_tile_url` 后，首页不再显示默认地图法律风险弱提示。
 
 ### 设置页 (`/settings`)
 
@@ -508,10 +529,10 @@ PY
 
 ### 在线识别库更新
 
-设置页可以从远端 JSON 文件更新 `rid-models.json`。默认地址：
+设置页可以从远端 JSON 文件更新 `rid_model.json`。默认地址：
 
 ```text
-https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid-models.json
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_model.json
 ```
 
 行为说明：
@@ -520,7 +541,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 手动更新按钮使用同一个地址
 - 地址必须以 `http://` 或 `https://` 开头
 - 更新成功或失败都会写入操作日志和通知中心
-- 同一个设置卡片可以把 `rid-models.json` 作为前缀/机型列表编辑
+- 同一个设置卡片可以把 `rid_model.json` 作为前缀/机型列表编辑
 - 机型为 N/A 的详情卡片可以直接写入本地识别库，或打开预填的 GitHub Issue / PR 编辑页
 
 ### 远程配置更新
@@ -686,11 +707,11 @@ python pytools/build.py --target arm64
 
 ## 识别库在线更新
 
-RID 识别库（`rid_models.json`）将 RID 前缀码映射为可读的无人机型号名称，可通过可配置的 URL 在线更新。
+RID 识别库（`rid_model.json`）将 RID 前缀码映射为可读的无人机型号名称，可通过可配置的 URL 在线更新。
 
 **默认更新源：**
 ```
-https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_model.json
 ```
 
 **行为说明：**
@@ -701,7 +722,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - 设置页同时也支持以前缀/机型表格形式直接编辑识别库
 - 型号显示为 "N/A" 的飞机详情卡片提供添加本地映射或打开预填的 GitHub Issue/PR 编辑页选项
 
-二进制构建中内嵌了 `rid_models.json` 的快照作为回退资源。若运行时文件缺失且网络不可用，自动恢复内嵌副本。
+二进制构建中内嵌了 `rid_model.json` 的快照作为回退资源。若运行时文件缺失且网络不可用，自动恢复内嵌副本。
 
 ---
 
@@ -806,7 +827,7 @@ CI 通过 `.github/workflows/build-viewer.yml` 构建 Viewer 二进制，覆盖 
 | `station_edition/run.py` | 基站版入口 | 是 |
 | `station_edition/light_rid/` | 全部扫描、解析、服务、鉴权、UI 模块 | 是 |
 | `portable_edition/pe.py` | 移动版入口 | 是 |
-| `rid_models.json` | RID 机型前缀到型号映射 | 是 |
+| `rid_model.json` | RID 机型前缀到型号映射 | 是 |
 | `rid_build_info.json` | 本地构建标记（commit + 构建号） | 是 |
 | `station_edition/config.example.json` | 安全示例配置 | 是 |
 | `config.json` | 实际运行时配置 | **禁止** |

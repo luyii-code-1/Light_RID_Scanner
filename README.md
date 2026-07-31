@@ -12,10 +12,10 @@ It also includes a portable edition for mobile deployments and a node-center vie
   WIP (Work in Progress). The portable runtime code has been removed while the product policy is being revised; the directory currently contains only a WIP README.
 - Root `run.py`
   Compatibility wrapper for `station_edition/run.py`.
-- Root `rid-models.json`
+- Root `rid_model.json`
   Public GitHub Raw model map. Binaries also embed this file and restore it if runtime download fails.
 
-The station edition is meant to be usable from its own directory. Runtime files such as `config.json`, `rid_storage.db`, and `rid-models.json` are resolved relative to the current working directory unless explicit paths are passed. Older `history-cache.json` / `rid_history_cache.json` files are treated as legacy migration sources.
+The station edition is meant to be usable from its own directory. Runtime files such as `config.json`, `rid_storage.db`, and `rid_model.json` are resolved relative to the current working directory unless explicit paths are passed. Older `history-cache.json` / `rid_history_cache.json` files are treated as legacy migration sources.
 
 - [Architecture](#architecture)
   - [Editions](#editions)
@@ -117,7 +117,7 @@ Light_RID_Scanner/
 │   ├── build_release.py             # CI/local release builder
 │   └── build_viewer.py              # Viewer binary builder
 ├── run.py                           # Root compatibility wrapper
-├── rid_models.json                  # RID model prefix map
+├── rid_model.json                  # RID model prefix map
 ├── requirements.txt                 # Python dependencies
 └── .github/workflows/               # CI build pipelines
 ```
@@ -138,6 +138,8 @@ The station runtime uses a chunk-loading architecture: `app.py` loads and execut
 
 ### Web Dashboard
 - Real-time map with Leaflet, showing aircraft markers, base station, and alarm zones
+- Ephemeral target simulation for demos and end-to-end checks (circle, line, or stationary patterns; up to 100 targets)
+- Configurable Leaflet tile/API template for licensed map providers
 - Aircraft list panel with live detail cards (SN, model, altitude, speed, heading, RSSI)
 - AP list panel with vendor identification
 - Dark/light theme toggle
@@ -249,7 +251,7 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-The binary resolves runtime files relative to its working directory. If `rid_models.json` is missing, it downloads the latest version from GitHub Raw; if the network is unavailable, it falls back to the embedded resource shipped inside the binary.
+The binary resolves runtime files relative to its working directory. If `rid_model.json` is missing, it downloads the latest version from GitHub Raw; if the network is unavailable, it falls back to the embedded resource shipped inside the binary.
 
 ### Build from Source
 
@@ -317,7 +319,7 @@ Runtime files are resolved relative to the current working directory unless expl
 | `rid_storage.db` | SQLite history store and retained raw packet data | Yes |
 | `history-cache.json` | Legacy JSON history source, auto-imported once when present | Legacy migration source |
 | `rid_history_cache.json` | Older legacy JSON history source, auto-imported once when present | Legacy migration source |
-| `rid_models.json` | RID model prefix-to-name mapping | Yes (from GitHub or embedded resource) |
+| `rid_model.json` | RID model prefix-to-name mapping | Yes (from GitHub or embedded resource) |
 | `oui.txt` | MAC OUI vendor database | Optional (auto-downloaded) |
 | `light_rid_scanner/host_metrics.jsonl` | Host load samples | Yes (system temp dir) |
 
@@ -331,6 +333,25 @@ The landing page presents a full-screen dashboard with four zones:
 2. **Map panel** — Leaflet-based map displaying aircraft markers (with heading arrows), base station icon, and enabled alarm zone rectangles. Aircraft markers update in real time via WebSocket push. Clicking a marker opens a detail card with SN, model, altitude, speed, heading, RSSI, and last-seen time.
 3. **Bottom panel** — switchable between aircraft list, AP list, and event log views. The aircraft list shows compact cards sorted by last-seen time. The AP list displays detected Wi-Fi access points with vendor names from the OUI database.
 4. **Footer** — navigation links to `/settings`, `/logs`, `/hardware-assistant`, and theme toggle.
+
+### Map Provider Configuration
+
+The Station dashboard uses Leaflet. When no map provider is configured, it falls back to the built-in default online tile template for local testing. That fallback may have legal or service-terms risk; do not expose the Station page to the public internet or use it commercially without configuring a licensed map provider.
+
+Configure a licensed XYZ tile/API template in `/settings` under **Map & Base Station**, or set these fields in `config.json`:
+
+```json
+{
+  "web": {
+    "map_tile_url": "https://example.com/tiles/{z}/{x}/{y}.png?key=YOUR_KEY",
+    "map_tile_subdomains": "",
+    "map_tile_attribution": "(c) Your Map Provider",
+    "map_tile_max_native_zoom": 18
+  }
+}
+```
+
+`map_tile_url` must include `{z}`, `{x}`, and `{y}`. Optional `{s}` subdomains are supplied through `map_tile_subdomains` as a comma-separated list. Once `map_tile_url` is set, the dashboard hides the default-map legal-risk hint.
 
 ### Settings Page (`/settings`)
 
@@ -738,11 +759,11 @@ Metrics are disabled by default. Enable them in `/settings` to start collecting.
 
 ## Model Map Updates
 
-The RID model map (`rid_models.json`) maps RID prefix codes to human-readable drone model names. It can be updated online from a configurable URL.
+The RID model map (`rid_model.json`) maps RID prefix codes to human-readable drone model names. It can be updated online from a configurable URL.
 
 **Default source:**
 ```
-https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json
+https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_model.json
 ```
 
 **Behavior:**
@@ -753,7 +774,7 @@ https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main
 - The Settings page also allows direct editing of the model list as a prefix/model table
 - Aircraft detail cards showing "N/A" for the model offer options to add a local mapping or open a prefilled GitHub Issue / PR edit page
 
-Binary builds embed a snapshot of `rid_models.json` as a fallback resource. If the file is missing at runtime and the network is unavailable, the embedded copy is restored automatically.
+Binary builds embed a snapshot of `rid_model.json` as a fallback resource. If the file is missing at runtime and the network is unavailable, the embedded copy is restored automatically.
 
 ---
 
@@ -858,7 +879,7 @@ CI builds viewer binaries through `.github/workflows/build-viewer.yml` for Linux
 | `station_edition/run.py` | Station edition entry point | Yes |
 | `station_edition/light_rid/` | All scanner, parser, server, auth, and UI modules | Yes |
 | `portable_edition/pe.py` | Portable edition entry point | Yes |
-| `rid_models.json` | RID model prefix-to-name mapping | Yes |
+| `rid_model.json` | RID model prefix-to-name mapping | Yes |
 | `rid_build_info.json` | Local build marker (commit + build number) | Yes |
 | `station_edition/config.example.json` | Safe example configuration | Yes |
 | `config.json` | Real runtime configuration | **Never** |

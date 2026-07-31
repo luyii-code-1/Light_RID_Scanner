@@ -7289,7 +7289,7 @@ Expected function or array of functions, received type ${typeof value}.`
       });
       const focusHistoryAircraft = fn("focusHistoryAircraft", () => {
       });
-      const showDroneInfoCard = fn("showDroneInfoCard", () => {
+      const focusLiveAircraft = fn("focusLiveAircraft", () => {
       });
       const hideInfoCard = fn("hideInfoCard", () => {
       });
@@ -7389,10 +7389,7 @@ Expected function or array of functions, received type ${typeof value}.`
             focusHistoryAircraft(sn);
             return;
           }
-          const item = (window.latestDroneMap || {})[sn];
-          if (item) {
-            showDroneInfoCard(item);
-          }
+          focusLiveAircraft(sn);
         }, 220);
       }
       function onRowDblClick(row, event) {
@@ -7582,7 +7579,7 @@ Expected function or array of functions, received type ${typeof value}.`
       });
       const focusHistoryAircraft = fn("focusHistoryAircraft", () => {
       });
-      const showDroneInfoCard = fn("showDroneInfoCard", () => {
+      const focusLiveAircraft = fn("focusLiveAircraft", () => {
       });
       const fmt = fn("fmt", fmtFallback);
       const fmtAge = fn("fmtAge", (age) => age == null ? "N/A" : String(age));
@@ -7654,10 +7651,7 @@ Expected function or array of functions, received type ${typeof value}.`
             focusHistoryAircraft(sn);
             return;
           }
-          const item = (window.latestDroneMap || {})[sn];
-          if (item) {
-            showDroneInfoCard(item);
-          }
+          focusLiveAircraft(sn);
         }, 220);
       }
       return {

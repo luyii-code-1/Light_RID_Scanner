@@ -459,6 +459,12 @@ body.bottom-all-collapsed{
   padding:4px 6px;border:1px solid var(--border);border-radius:4px;
   background:color-mix(in srgb,var(--panel) 88%,transparent);
 }
+.map-api-risk{
+  margin:8px 12px 0;padding:7px 10px;border:1px solid color-mix(in srgb,var(--warn) 36%,var(--border));
+  border-radius:6px;background:color-mix(in srgb,var(--warn) 8%,var(--panel));
+  color:var(--warn);font:600 12px/1.35 var(--font-ui);
+}
+.panel.map-panel.collapsed .map-api-risk{display:none}
 .rid-drone-icon{background:transparent;border:0}
 .drone-pin{position:relative;width:74px;height:58px;pointer-events:none;opacity:var(--drone-op,1)}
 .drone-symbol{
@@ -868,6 +874,8 @@ var zoneAlarmSnSet = {};
 var rowClickTimer = null;
 var trackCache = {};
 var trackLoading = {};
+var droneDetailLoading = {};
+var droneDetailCache = {};
 var trackFetchMeta = {};
 var trackRenderQueue = {};
 var trackRenderScheduled = false;
@@ -915,6 +923,15 @@ function mergeTrackCachePayload(payload){
     return normalizeTrackCacheEntry(payload.tracks);
   }
   return normalizeTrackCacheEntry(payload ? payload.track : null);
+}
+function hasTrackPayload(payload){
+  return !!(payload && (
+    Array.isArray(payload.track) ||
+    (payload.tracks && typeof payload.tracks === 'object' && (
+      Array.isArray(payload.tracks.aircraft) ||
+      Array.isArray(payload.tracks.operator)
+    ))
+  ));
 }
 var HL_FADE_IN_MS = 0;
 var HL_HOLD_MS = 0;
@@ -1310,6 +1327,15 @@ function trackFetchUrl(sn, limit){
   url += '&limit=' + encodeURIComponent(String(limit || TRACK_HISTORY_FETCH_LIMIT));
   return url;
 }
+function droneDetailFetchUrl(sn, limit, includeTracks){
+  var url = '/api/drones/get?sn=' + encodeURIComponent(sn);
+  if(includeTracks){
+    url += '&include_tracks=1&limit=' + encodeURIComponent(String(limit || TRACK_HISTORY_FETCH_LIMIT));
+  }else{
+    url += '&include_tracks=0';
+  }
+  return url;
+}
 function syncTrackLoadingUi(){
   var nodes = document.querySelectorAll('[data-track-loading-sn]');
   for(var i=0;i<nodes.length;i++){
@@ -1358,6 +1384,86 @@ async function ensureTrackLoaded(sn, force, opts){
     delete trackLoading[sn];
     syncTrackLoadingUi();
   }
+}
+function replaceLatestDroneRow(item){
+  item = (item && typeof item === 'object') ? item : null;
+  if(!item) return null;
+  var sn = String(item.sn || '');
+  if(!sn) return null;
+  droneDetailCache[sn] = Object.assign({}, droneDetailCache[sn] || {}, item);
+  latestDroneMap[sn] = item;
+  var replaced = false;
+  for(var i=0;i<latestDroneRows.length;i++){
+    if(String((latestDroneRows[i] && latestDroneRows[i].sn) || '') === sn){
+      latestDroneRows[i] = item;
+      replaced = true;
+      break;
+    }
+  }
+  if(!replaced) latestDroneRows.push(item);
+  return item;
+}
+function mergeDroneDetailPayload(sn, data){
+  sn = String(sn || '');
+  data = (data && typeof data === 'object') ? data : {};
+  var item = replaceLatestDroneRow(data.item || latestDroneMap[sn]);
+  if(hasTrackPayload(data)){
+    var cacheEntry = mergeTrackCachePayload(data);
+    trackCache[sn] = cacheEntry;
+    trackFetchMeta[sn] = {
+      ts: Date.now(),
+      scope: 'history|' + TRACK_HISTORY_FETCH_LIMIT,
+      total: Number(data.count_total || data.count || data.track_count || cacheEntry.aircraft.length || 0),
+      shown: Number(cacheEntry.aircraft.length || 0),
+      aircraft: Number(cacheEntry.aircraft.length || 0),
+      operator: Number(cacheEntry.operator.length || 0)
+    };
+  }
+  return item;
+}
+function fetchDroneDetail(sn, opts){
+  sn = String(sn || '');
+  if(!sn) return Promise.resolve(null);
+  if(droneDetailLoading[sn]) return droneDetailLoading[sn];
+  opts = (opts && typeof opts === 'object') ? opts : {};
+  var taskId = null;
+  if(opts.interactive && typeof window.beginAsyncTask === 'function'){
+    taskId = window.beginAsyncTask(opts.title || '\u8be6\u60c5', opts.detail || ('\u6b63\u5728\u8bfb\u53d6\u8be6\u60c5: ' + sn));
+  }
+  trackLoading[sn] = true;
+  var promise = getJson(droneDetailFetchUrl(sn, opts.limit || TRACK_HISTORY_FETCH_LIMIT, !!opts.includeTracks)).then(function(data){
+    var item = mergeDroneDetailPayload(sn, data);
+    if(typeof renderDroneTable === 'function') renderDroneTable(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    if(!replaySyncPaused && typeof updateMap === 'function') updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
+    if(taskId && typeof window.finishAsyncTask === 'function') window.finishAsyncTask(taskId, true, '\u8be6\u60c5\u5df2\u5237\u65b0');
+    return item;
+  }).catch(function(err){
+    if(taskId && typeof window.finishAsyncTask === 'function') window.finishAsyncTask(taskId, false, (err && err.message) ? err.message : err);
+    throw err;
+  }).finally(function(){
+    delete droneDetailLoading[sn];
+    delete trackLoading[sn];
+    syncTrackLoadingUi();
+  });
+  droneDetailLoading[sn] = promise;
+  syncTrackLoadingUi();
+  return promise;
+}
+function openDroneDetail(sn, opts){
+  sn = String(sn || '');
+  if(!sn) return;
+  opts = (opts && typeof opts === 'object') ? opts : {};
+  var fallback = droneDetailCache[sn] || latestDroneMap[sn] || null;
+  if(fallback && opts.showFallback !== false) showDroneInfoCard(fallback);
+  fetchDroneDetail(sn, {interactive:true, title:opts.title || '\u8be6\u60c5', detail:opts.detail || '\u6b63\u5728\u8bfb\u53d6\u8be6\u60c5...', limit:opts.limit}).then(function(item){
+    item = item || latestDroneMap[sn] || fallback;
+    if(item){
+      showDroneInfoCard(item);
+      if(opts.focusMap !== false) focusEntryOnMap(item, 16);
+    }
+  }).catch(function(err){
+    showBanner('\u8be6\u60c5\u8bfb\u53d6\u5931\u8d25: ' + ((err && err.message) ? err.message : err), 'warn', 3600);
+  });
 }
 function syncSelectedFromRows(rows){
   var arr = Array.isArray(rows) ? rows : [];
@@ -1457,7 +1563,6 @@ function setAllVisibleSelected(on){
     if(on){
       selectedSnSet[sn] = true;
       if(mac) selectedMacSet[mac] = true;
-      ensureTrackLoaded(sn, false);
     }else{
       delete selectedSnSet[sn];
       if(mac) delete selectedMacSet[mac];
@@ -1642,7 +1747,8 @@ function refreshActiveInfoCard(rows){
   var body = qs('info-card-body');
   var sn = String(activeInfoSn || '');
   if(!modal || !body || !sn || !modal.classList.contains('show')) return;
-  var row = findDisplayRowBySn(rows, sn) || latestDroneMap[sn] || null;
+  var liveRow = findDisplayRowBySn(rows, sn) || latestDroneMap[sn] || null;
+  var row = droneDetailCache[sn] ? Object.assign({}, droneDetailCache[sn], liveRow || {}) : liveRow;
   if(!row) return;
   var oldScroll = body.scrollTop;
   body.innerHTML = stripUnsafeHtml(buildInfoHtml(row));
@@ -2122,10 +2228,21 @@ function noteWsSample(data){
       wsLatencyMs = Math.round(sample);
     }
   }
+  updateWsStatusLabel();
   updateWorkflowIndicator();
   if(qs('main-more-menu') && qs('main-more-menu').classList.contains('diagnostic-open')){
     renderDiagnosticPopup();
   }
+}
+function wsStatusText(ok){
+  if(replaySyncPaused) return '\u91cd\u6f14\u4e2d';
+  if(!ok) return '\u91cd\u8fde\u4e2d';
+  var latency = Number(wsLatencyMs);
+  return '\u5b9e\u65f6' + (isFinite(latency) && latency >= 0 ? (' ' + Math.round(latency) + 'ms') : '');
+}
+function updateWsStatusLabel(){
+  var el = qs('ws-status');
+  if(el) el.textContent = wsStatusText(wsOnline);
 }
 function workflowState(){
   return (metaState && typeof metaState.workflow === 'object' && metaState.workflow) ? metaState.workflow : {};
@@ -3126,6 +3243,7 @@ function buildExtraUi(){
         });
       }
       ensureMapMiniList();
+      syncMapRiskHint();
       setMapPanelCollapsed(false);
     }
   }
@@ -3263,8 +3381,7 @@ function buildExtraUi(){
           focusHistoryAircraft(sn);
           return;
         }
-        var e = latestDroneMap[sn];
-        if(e) showDroneInfoCard(e);
+        focusLiveAircraft(sn);
       }, 220);
     }
   });
@@ -3360,6 +3477,8 @@ function applyMeta(meta){
   }
   mapHeadingRefDeg = normDeg(metaState.heading_ref_deg);
   mapAutoCenterIdleSec = Math.max(5, Math.min(600, intOrDefault(metaState.map_auto_center_idle_sec, 20)));
+  syncMapRiskHint();
+  applyMapTileLayer();
   var baseCfg = baseFromMeta(metaState);
   var baseStatus = qs('base-status');
   if(baseStatus){
@@ -4163,7 +4282,7 @@ function setWsState(ok){
   if(!ok && qs('main-more-menu') && qs('main-more-menu').classList.contains('diagnostic-open')){
     renderDiagnosticPopup();
   }
-  qs('ws-status').textContent = replaySyncPaused ? '重演中' : (ok ? '实时' : '重连中');
+  updateWsStatusLabel();
 }
 
 function onData(d){
@@ -4184,7 +4303,6 @@ function onData(d){
   latestDroneRows = list.slice();
   applyHistoryDefaultSelection(latestDroneRows);
   syncSelectedFromRows(latestDroneRows);
-  displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){ ensureTrackLoaded(sn, false); });
 
   renderDroneTable(list);
   ensureHighlightAnimation();
@@ -4192,8 +4310,8 @@ function onData(d){
   var box = qs('logbox');
   var autoEl = qs('autoscroll');
   var auto = !autoEl || autoEl.checked;
-  var logs = Array.isArray(d.logs) ? d.logs : [];
-  if(box && (lastLogsSeq !== d.logs_seq || box.childElementCount !== logs.length)){
+  var logs = Array.isArray(d.logs) ? d.logs : null;
+  if(logs && box && (lastLogsSeq !== d.logs_seq || box.childElementCount !== logs.length)){
     box.innerHTML='';
     var frag=document.createDocumentFragment();
     for(var i=0;i<logs.length;i++){
@@ -4209,23 +4327,12 @@ function onData(d){
   }
   if(box && auto) box.scrollTop=box.scrollHeight;
 
-  if(lastApsSeq !== d.aps_seq){
+  if(Array.isArray(d.aps) && d.aps_seq != null && lastApsSeq !== d.aps_seq){
     renderAps(d.aps || [], d.aps_total || 0);
     lastApsSeq = d.aps_seq;
   }
 
   latestMapRows = Array.isArray(d.map_drones) ? d.map_drones : (Array.isArray(d.drones) ? d.drones : []);
-  displayTrackSnList(currentAppPage(), latestDroneRows).forEach(function(sn){
-    var e = latestDroneMap[sn];
-    if(e){
-      var tm = trackFetchMeta[sn] || {};
-      var cachedTotal = Number(tm.total || trackCacheList(sn, 'aircraft').length || 0);
-      if(Number(e.track_count || 0) === cachedTotal) return;
-      if(currentAppPage() === 'history' || (Date.now() - Number(tm.ts || 0)) >= TRACK_FORCE_RELOAD_MS){
-        ensureTrackLoaded(sn, true);
-      }
-    }
-  });
   initMap();
   updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
 }
@@ -4240,6 +4347,7 @@ showInitialDataLoading('本机基站', '正在读取数据');
 connect();
 
 var map = null, markers = {}, pilotMarkers = {}, trackLines = {}, trackLineSig = {}, twsLines = {}, baseMarker = null;
+var mapTileLayer = null, mapOfflineLayer = null, mapTileLayerSig = '', mapTileErrors = 0;
 var motionState = {};
 var COLORS = ['#58a6ff','#3fb950','#d29922','#d2a8ff','#79c0ff','#ff7b72'];
 var TRACK_COLORS = ['#1f9dff','#12b886','#ff8f1f','#ff4d6d','#8b5cf6','#06b6d4','#84cc16','#eab308'];
@@ -4372,8 +4480,7 @@ function focusLiveAircraft(sn){
   setSnSelected(sn, true, {exclusive:true});
   var e = latestDroneMap[sn];
   if(e){
-    ensureTrackLoaded(sn, false, {interactive:true, title:'轨迹详情', detail:'正在加载轨迹详情...'});
-    showDroneInfoCard(e);
+    openDroneDetail(sn, {title:'\u8be6\u60c5', detail:'\u6b63\u5728\u8bfb\u53d6\u8be6\u60c5...'});
     focusEntryOnMap(e, 16);
   }
 }
@@ -4383,8 +4490,7 @@ function focusHistoryAircraft(sn){
   setHistoryVisibleSet([sn], {keepReplay:false});
   var e = latestDroneMap[sn];
   if(e){
-    ensureTrackLoaded(sn, false, {interactive:true, title:'轨迹详情', detail:'正在加载轨迹详情...'});
-    showDroneInfoCard(e);
+    openDroneDetail(sn, {title:'\u8be6\u60c5', detail:'\u6b63\u5728\u8bfb\u53d6\u8be6\u60c5...'});
     focusEntryOnMap(e, 16);
   }
 }
@@ -4539,38 +4645,101 @@ function flushTrackLayerRenderQueue(){
   }
 }
 
+function mapTileSubdomains(raw){
+  if(Array.isArray(raw)){
+    return raw.map(function(x){ return String(x || '').trim(); }).filter(Boolean);
+  }
+  return String(raw || '').split(/[\\s,]+/).map(function(x){ return x.trim(); }).filter(Boolean);
+}
+function sanitizeAttribution(text){
+  return esc(String(text || '')).slice(0, 240);
+}
+function mapTileConfig(){
+  var customUrl = String((metaState && metaState.map_tile_url) || '').trim();
+  var url = customUrl || 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}';
+  var subdomains = customUrl ? mapTileSubdomains(metaState.map_tile_subdomains) : ['1','2','3','4'];
+  if(customUrl && !subdomains.length) subdomains = [''];
+  var attr = customUrl
+    ? sanitizeAttribution(metaState.map_tile_attribution || 'Custom map')
+    : '&copy; 高德地图';
+  var maxNative = Math.max(1, Math.min(30, intOrDefault(metaState.map_tile_max_native_zoom, 18)));
+  return {
+    url: url,
+    custom: !!customUrl,
+    options: {
+      subdomains: subdomains,
+      maxZoom: 30,
+      maxNativeZoom: maxNative,
+      attribution: attr
+    }
+  };
+}
+function mapTileSignature(cfg){
+  cfg = cfg || mapTileConfig();
+  return JSON.stringify([cfg.url, cfg.options.subdomains, cfg.options.maxNativeZoom, cfg.options.attribution]);
+}
+function ensureOfflineMapLayer(){
+  if(!map) return;
+  if(mapOfflineLayer){
+    if(!map.hasLayer(mapOfflineLayer)) mapOfflineLayer.addTo(map);
+    return;
+  }
+  var OfflineGrid = L.GridLayer.extend({
+    createTile: function(coords){
+      var tile = L.DomUtil.create('div', 'offline-map-tile');
+      tile.innerHTML = '<span class="offline-map-badge">离线地图</span>';
+      return tile;
+    }
+  });
+  mapOfflineLayer = new OfflineGrid({tileSize:256, maxZoom:30, attribution:'本地离线底图'});
+  mapOfflineLayer.addTo(map);
+  showBanner('当前客户端无法加载在线底图，已切换为本地离线地图。飞机、轨迹和报警区域仍可显示。', 'warn', 5200, {persist:false});
+}
+function applyMapTileLayer(){
+  if(!map || !window.L) return;
+  var cfg = mapTileConfig();
+  var sig = mapTileSignature(cfg);
+  if(mapTileLayer && mapTileLayerSig === sig) return;
+  if(mapTileLayer){
+    try{ map.removeLayer(mapTileLayer); }catch(_e){}
+  }
+  if(mapOfflineLayer){
+    try{ map.removeLayer(mapOfflineLayer); }catch(_e2){}
+  }
+  mapTileErrors = 0;
+  mapTileLayerSig = sig;
+  mapTileLayer = L.tileLayer(cfg.url, cfg.options);
+  mapTileLayer.on('tileerror', function(){
+    mapTileErrors += 1;
+    if(mapTileErrors >= 2) ensureOfflineMapLayer();
+  });
+  mapTileLayer.addTo(map);
+}
+function syncMapRiskHint(){
+  var panel = qs('map-panel');
+  var mapEl = qs('map');
+  if(!panel && mapEl && mapEl.closest) panel = mapEl.closest('.panel');
+  if(!panel || !mapEl) return;
+  var existing = qs('map-api-risk');
+  var shouldShow = !!(metaState && metaState.map_default_legal_notice === true);
+  if(!shouldShow){
+    if(existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    return;
+  }
+  if(!existing){
+    existing = document.createElement('div');
+    existing.id = 'map-api-risk';
+    existing.className = 'map-api-risk';
+    panel.insertBefore(existing, mapEl);
+  }
+  existing.textContent = '未配置地图 API，当前使用默认在线底图，可能存在法律风险；请勿暴露公网或商业使用。';
+}
+
 function initMap(){
   if(map) return;
   map = L.map('map', {zoomControl:true, attributionControl:true, maxZoom:30});
-  var offlineLayer = null;
-  function ensureOfflineLayer(){
-    if(offlineLayer){
-      if(!map.hasLayer(offlineLayer)) offlineLayer.addTo(map);
-      return;
-    }
-    var OfflineGrid = L.GridLayer.extend({
-      createTile: function(coords){
-        var tile = L.DomUtil.create('div', 'offline-map-tile');
-        tile.innerHTML = '<span class="offline-map-badge">离线地图</span>';
-        return tile;
-      }
-    });
-    offlineLayer = new OfflineGrid({tileSize:256, maxZoom:30, attribution:'本地离线底图'});
-    offlineLayer.addTo(map);
-    showBanner('当前客户端无法加载在线底图，已切换为本地离线地图。飞机、轨迹和报警区域仍可显示。', 'warn', 5200, {persist:false});
-  }
-  var onlineLayer = L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',{
-    subdomains:['1','2','3','4'],
-    maxZoom:30,
-    maxNativeZoom:18,
-    attribution:'&copy; 高德地图'
-  });
-  var tileErrors = 0;
-  onlineLayer.on('tileerror', function(){
-    tileErrors += 1;
-    if(tileErrors >= 2) ensureOfflineLayer();
-  });
-  onlineLayer.addTo(map);
+  applyMapTileLayer();
+  syncMapRiskHint();
   var b = baseFromMeta(metaState);
   if(b.ok) map.setView([b.lat, b.lon], b.zoom);
   else map.setView([30, 114], 5);
@@ -5059,8 +5228,7 @@ function updateReplaySyncUi(){
   var txt = qs('replay-sync-text');
   if(txt) txt.textContent = replayState.snList && replayState.snList.length ? ('轨迹重演中，同步已暂停：' + replayState.snList.length + ' 架') : '轨迹重演中，同步已暂停';
   if(qs('ws-status')){
-    if(replaySyncPaused) qs('ws-status').textContent = '重演中';
-    else if(ws && ws.readyState === WebSocket.OPEN) qs('ws-status').textContent = '实时';
+    updateWsStatusLabel();
   }
 }
 function applyPendingLiveData(){
@@ -6028,6 +6196,21 @@ header.app-shell-header h1{
 .main-more-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;min-width:170px;padding:8px;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 12px 28px rgba(15,23,42,.10);z-index:45}
 .main-more-menu.open .main-more-pop{display:grid;gap:6px}
 .main-more-pop .header-link-btn{width:100%;text-align:left;box-shadow:none}
+.simulation-modal{position:fixed;inset:0;z-index:10020;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(4,10,20,.56);backdrop-filter:blur(8px)}
+.simulation-modal.show{display:flex}
+.simulation-card{width:min(680px,100%);max-height:calc(100dvh - 36px);overflow:auto;border:1px solid var(--border);border-radius:20px;background:var(--panel);box-shadow:var(--shadow-lg)}
+.simulation-head{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 20px;border-bottom:1px solid var(--border)}
+.simulation-title{display:grid;gap:5px}.simulation-title strong{font-size:18px}.simulation-title span{font-size:12px;color:var(--dim)}
+.simulation-body{display:grid;gap:16px;padding:20px}
+.simulation-status{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:14px;background:var(--panel2);font-size:13px;color:var(--dim)}
+.simulation-status strong{color:var(--txt)}.simulation-status.running{border-color:color-mix(in srgb,var(--green) 42%,var(--border));background:color-mix(in srgb,var(--green) 8%,var(--panel2))}
+.simulation-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.simulation-field{display:grid;gap:7px}.simulation-field label{font:600 12px/1 var(--font-ui);color:var(--dim)}
+.simulation-field input,.simulation-field select{width:100%;min-width:0;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel2);color:var(--txt);font:600 14px/1.2 var(--font-ui);outline:none}
+.simulation-field input:focus,.simulation-field select:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--glow)}
+.simulation-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}.simulation-actions .primary{border-color:var(--blue);background:var(--blue);color:#fff}
+.simulation-note{font-size:12px;line-height:1.6;color:var(--dim)}
+@media(max-width:620px){.simulation-grid{grid-template-columns:1fr}.simulation-card{border-radius:16px}.simulation-body{padding:16px}}
 .main-diagnostic-pop{position:absolute;right:0;top:calc(100% + 8px);display:none;width:200px;min-height:300px;max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 14px 30px rgba(15,23,42,.14);z-index:46}
 .main-more-menu.diagnostic-open .main-diagnostic-pop{display:block}
 .main-diagnostic-head{padding:12px 12px 8px;font:700 13px/1 var(--font-ui);color:var(--txt);border-bottom:1px solid var(--border)}
@@ -6439,7 +6622,6 @@ _MAIN_PAGE_PATCH_JS = r"""
       tabs[i].classList.toggle('active', tabs[i].getAttribute('data-page') === p);
     }
     mountMainMapPanel(p);
-    displayTrackSnList(p, latestDroneRows).forEach(function(sn){ ensureTrackLoaded(sn, false); });
     refreshReplayBounds(true);
     if(p === 'live'){
       setTimeout(function(){ if(map) map.invalidateSize(false); }, 80);
@@ -6568,6 +6750,109 @@ _MAIN_PAGE_PATCH_JS = r"""
       });
     }
   }
+  function ensureSimulationModal(){
+    var modal = qs('simulation-modal');
+    if(modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'simulation-modal';
+    modal.className = 'simulation-modal';
+    modal.setAttribute('aria-hidden', 'true');
+    modal.innerHTML =
+      '<section class="simulation-card" role="dialog" aria-modal="true" aria-labelledby="simulation-heading">'+
+      ' <div class="simulation-head"><div class="simulation-title"><strong id="simulation-heading">模拟目标</strong><span>生成仅驻留内存的测试目标，不写入历史记录</span></div><button class="icon-btn" id="simulation-close" type="button" aria-label="关闭">×</button></div>'+
+      ' <div class="simulation-body">'+
+      '  <div class="simulation-status" id="simulation-status"><span>状态</span><strong>正在读取…</strong></div>'+
+      '  <div class="simulation-grid">'+
+      '   <div class="simulation-field"><label for="simulation-count">目标数量</label><input id="simulation-count" type="number" min="1" max="100" step="1" value="3"></div>'+
+      '   <div class="simulation-field"><label for="simulation-pattern">运动模式</label><select id="simulation-pattern"><option value="circle">环绕飞行</option><option value="line">直线往返</option><option value="stationary">定点悬停</option></select></div>'+
+      '   <div class="simulation-field"><label for="simulation-lat">中心纬度</label><input id="simulation-lat" type="number" min="-90" max="90" step="0.000001"></div>'+
+      '   <div class="simulation-field"><label for="simulation-lon">中心经度</label><input id="simulation-lon" type="number" min="-180" max="180" step="0.000001"></div>'+
+      '   <div class="simulation-field"><label for="simulation-radius">活动半径（米）</label><input id="simulation-radius" type="number" min="10" max="100000" step="10" value="500"></div>'+
+      '   <div class="simulation-field"><label for="simulation-speed">速度（米/秒）</label><input id="simulation-speed" type="number" min="0" max="100" step="1" value="12"></div>'+
+      '   <div class="simulation-field"><label for="simulation-altitude">高度（米）</label><input id="simulation-altitude" type="number" min="-500" max="10000" step="1" value="120"></div>'+
+      '   <div class="simulation-field"><label for="simulation-duration">自动停止（秒，0 为不限）</label><input id="simulation-duration" type="number" min="0" max="86400" step="10" value="0"></div>'+
+      '  </div>'+
+      '  <div class="simulation-note">开始新场景会替换当前模拟场景。模拟目标使用独立标识和轨迹来源，可与真实目标同时显示；停止后立即从实时列表移除。</div>'+
+      '  <div class="simulation-actions"><button class="btn-mini warn" id="simulation-stop" type="button">停止并清除</button><button class="btn-mini primary" id="simulation-start" type="button">开始模拟</button></div>'+
+      ' </div>'+
+      '</section>';
+    document.body.appendChild(modal);
+    var close = function(){
+      modal.classList.remove('show');
+      modal.setAttribute('aria-hidden', 'true');
+    };
+    qs('simulation-close').addEventListener('click', close);
+    modal.addEventListener('click', function(ev){ if(ev.target === modal) close(); });
+    qs('simulation-start').addEventListener('click', startSimulationFromModal);
+    qs('simulation-stop').addEventListener('click', stopSimulationFromModal);
+    return modal;
+  }
+  function setSimulationStatus(data, error){
+    var box = qs('simulation-status');
+    if(!box) return;
+    var running = !!(data && data.running);
+    box.classList.toggle('running', running && !error);
+    var strong = box.querySelector('strong');
+    if(error) strong.textContent = String(error);
+    else if(running) strong.textContent = String(data.count || 0) + ' 个目标 · 已运行 ' + Math.round(Number(data.elapsed_sec || 0)) + ' 秒';
+    else strong.textContent = '未运行';
+  }
+  async function refreshSimulationStatus(){
+    try{
+      var data = await getJson('/api/simulation/status');
+      setSimulationStatus(data);
+      var options = data && data.options;
+      if(options && data.running){
+        if(qs('simulation-count')) qs('simulation-count').value = options.count;
+        if(qs('simulation-pattern')) qs('simulation-pattern').value = options.pattern;
+        if(qs('simulation-lat')) qs('simulation-lat').value = options.center_lat;
+        if(qs('simulation-lon')) qs('simulation-lon').value = options.center_lon;
+        if(qs('simulation-radius')) qs('simulation-radius').value = options.radius_m;
+        if(qs('simulation-speed')) qs('simulation-speed').value = options.speed_mps;
+        if(qs('simulation-altitude')) qs('simulation-altitude').value = options.altitude_m;
+        if(qs('simulation-duration')) qs('simulation-duration').value = options.duration_sec;
+      }
+    }catch(e){ setSimulationStatus(null, e.message || e); }
+  }
+  function openSimulationModal(){
+    var modal = ensureSimulationModal();
+    var base = baseFromMeta(metaState || {});
+    if(qs('simulation-lat') && !qs('simulation-lat').value) qs('simulation-lat').value = base.ok ? base.lat : 30.0678192;
+    if(qs('simulation-lon') && !qs('simulation-lon').value) qs('simulation-lon').value = base.ok ? base.lon : 121.1854406;
+    modal.classList.add('show');
+    modal.setAttribute('aria-hidden', 'false');
+    refreshSimulationStatus();
+  }
+  async function startSimulationFromModal(){
+    var button = qs('simulation-start');
+    if(button) button.disabled = true;
+    setSimulationStatus(null, '正在启动…');
+    try{
+      var data = await postJson('/api/simulation/start', {
+        count:Number(qs('simulation-count').value || 3),
+        pattern:String(qs('simulation-pattern').value || 'circle'),
+        center_lat:Number(qs('simulation-lat').value),
+        center_lon:Number(qs('simulation-lon').value),
+        radius_m:Number(qs('simulation-radius').value || 500),
+        speed_mps:Number(qs('simulation-speed').value || 0),
+        altitude_m:Number(qs('simulation-altitude').value || 120),
+        duration_sec:Number(qs('simulation-duration').value || 0)
+      });
+      setSimulationStatus(data);
+      showBanner('模拟场景已启动：' + data.count + ' 个目标', 'ok', 3200);
+    }catch(e){ setSimulationStatus(null, e.message || e); }
+    finally{ if(button) button.disabled = false; }
+  }
+  async function stopSimulationFromModal(){
+    var button = qs('simulation-stop');
+    if(button) button.disabled = true;
+    try{
+      var data = await postJson('/api/simulation/stop', {});
+      setSimulationStatus(data);
+      showBanner('模拟目标已停止并清除', 'ok', 2600);
+    }catch(e){ setSimulationStatus(null, e.message || e); }
+    finally{ if(button) button.disabled = false; }
+  }
   function ensureMainPages(){
     var header = document.querySelector('header');
     if(header && !qs('app-tab-nav')){
@@ -6595,6 +6880,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       var pop = qs('main-more-pop');
       [
         {id:'btn-settings', text:'设置', href:'/settings'},
+        {id:'btn-simulation', text:'模拟目标'},
         {id:'btn-logs', text:'日志', href:'/logs'},
         {id:'btn-diagnostic', text:'诊断'}
       ].forEach(function(item){
@@ -6608,6 +6894,11 @@ _MAIN_PAGE_PATCH_JS = r"""
           if(item.href){
             setDiagnosticVisible(false);
             location.href = item.href;
+            return;
+          }
+          if(item.id === 'btn-simulation'){
+            menu.classList.remove('open');
+            openSimulationModal();
             return;
           }
           setDiagnosticVisible(false);
@@ -6895,6 +7186,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     try{
       var detail = await getJson('/api/drones/get?sn=' + encodeURIComponent(sn));
       if(detail && detail.item){
+        droneDetailCache[sn] = Object.assign({}, droneDetailCache[sn] || {}, detail.item);
         updateLocalRowAfterReparse(sn, detail.item);
         if(Array.isArray(detail.track)){
           trackCache[sn] = normalizeTrackCacheEntry(detail.tracks || detail.track);
@@ -6918,7 +7210,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     }else{
       updateMap(Array.isArray(latestDroneRows) ? latestDroneRows : []);
     }
-    var row = findDisplayRowBySn(latestDroneRows, sn) || latestDroneMap[sn] || null;
+    var row = droneDetailCache[sn] || findDisplayRowBySn(latestDroneRows, sn) || latestDroneMap[sn] || null;
     if(row) showDroneInfoCard(row);
   }
   async function retryDetailReparse(btn){
@@ -6973,13 +7265,13 @@ _MAIN_PAGE_PATCH_JS = r"""
       'Prefix: ' + String(prefix || ''),
       'Current model: N/A',
       '',
-      'Please add this RID model mapping to rid-models.json.'
+      'Please add this RID model mapping to rid_model.json.'
     ].join('\\n');
     return 'https://github.com/luyii-code-1/Light_RID_Scanner/issues/new?title='
       + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
   }
   function modelPrEditUrl(){
-    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid_models.json';
+    return 'https://github.com/luyii-code-1/Light_RID_Scanner/edit/main/rid_model.json';
   }
   function patchLocalModel(sn, model){
     sn = String(sn || '');
@@ -7016,7 +7308,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       await postJson('/api/settings/models/upsert', {sn:sn, prefix:prefix, model:model});
       patchLocalModel(sn, model);
       showBanner('识别库已添加：' + prefix + ' → ' + model, 'ok', 3200);
-      if(latestDroneMap && latestDroneMap[sn]) showDroneInfoCard(latestDroneMap[sn]);
+      if((droneDetailCache && droneDetailCache[sn]) || (latestDroneMap && latestDroneMap[sn])) showDroneInfoCard(droneDetailCache[sn] || latestDroneMap[sn]);
     }catch(e){
       showBanner('识别库添加失败：' + (e.message || e), 'warn', 4800);
     }
@@ -8077,6 +8369,52 @@ def _station_settings_asset_url() -> str:
 def _station_settings_template_path() -> Path | None:
     return _station_asset_path("assets", "templates", "station-settings.html")
 
+def _mobile_template_path() -> Path | None:
+    return _station_asset_path("assets", "templates", "mobile.html")
+
+def _build_mobile_html() -> str:
+    template_path = _mobile_template_path()
+    if template_path is None:
+        return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Mobile</title></head><body>mobile template missing</body></html>'
+    try:
+        html_src = template_path.read_text(encoding="utf-8")
+    except OSError:
+        return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Mobile</title></head><body>mobile template missing</body></html>'
+    return html_src.replace("__APP_VERSION_LABEL__", _app_version_label())
+
+def _query_requests_desktop(query: dict) -> bool:
+    desktop_values = []
+    for key in ("desktop", "pc"):
+        desktop_values.extend(query.get(key) or [])
+    if any(str(value).strip().lower() in ("1", "true", "yes", "on") for value in desktop_values):
+        return True
+    return any(str(value).strip().lower() in ("desktop", "pc", "full") for value in (query.get("view") or []))
+
+def _request_prefers_mobile_home(headers, query: dict | None = None) -> bool:
+    if query and _query_requests_desktop(query):
+        return False
+    ch_mobile = str(headers.get("Sec-CH-UA-Mobile") or "").strip().lower()
+    if ch_mobile in ("?1", "1", "true"):
+        return True
+    ua = str(headers.get("User-Agent") or "").strip().lower()
+    if not ua:
+        return False
+    mobile_tokens = (
+        "iphone",
+        "ipod",
+        "ipad",
+        "android",
+        "windows phone",
+        "iemobile",
+        "blackberry",
+        "bb10",
+        "opera mini",
+        "opera mobi",
+        "mobile",
+        "mobi",
+    )
+    return any(token in ua for token in mobile_tokens)
+
 def _build_settings_html() -> str:
     template_path = _station_settings_template_path()
     if template_path is None:
@@ -8134,7 +8472,7 @@ def http_server_thread() -> None:
                 "script-src 'self' 'unsafe-inline' https://unpkg.com; "
                 "style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com; "
                 "font-src 'self' https://fonts.gstatic.com data:; "
-                "img-src 'self' data: blob: https://*.is.autonavi.com; "
+                "img-src 'self' data: blob: http: https:; "
                 "connect-src 'self' ws: wss: https://unpkg.com; "
                 "media-src 'none'"
             )
@@ -8342,10 +8680,14 @@ def http_server_thread() -> None:
                 self._auth_fail()
                 return False
             try:
-                from urllib.parse import quote
+                from urllib.parse import quote, urlparse, parse_qs
                 target = str(self.path or "/")
                 if not target.startswith("/") or target.startswith("//"):
                     target = "/"
+                parsed_target = urlparse(target)
+                target_query = parse_qs(parsed_target.query or "")
+                if parsed_target.path in ("/", "/index.html") and _request_prefers_mobile_home(self.headers, target_query):
+                    target = "/m/" + (("?" + parsed_target.query) if parsed_target.query else "")
                 self._redirect("/login?next=" + quote(target, safe="/?=&%"))
             except Exception:
                 self._redirect("/login")
@@ -8831,7 +9173,20 @@ def http_server_thread() -> None:
                     },
                 }, 200)
                 return
-            if path in ("/", "/index.html"):
+            if path in ("/m", "/m/", "/m/index.html"):
+                body = _build_mobile_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path in ("/", "/index.html"):
+                if _request_prefers_mobile_home(self.headers, query):
+                    self._redirect("/m/")
+                    return
                 body = _build_html().encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -8962,6 +9317,8 @@ def http_server_thread() -> None:
                 self._send_json(_host_metrics_payload(window_sec=window_sec), 200)
             elif path == "/api/settings/systemd/status":
                 self._send_json(_systemd_service_status_payload(), 200)
+            elif path == "/api/simulation/status":
+                self._send_json(simulation_status(), 200)
             elif path == "/api/drones/get":
                 sn = ""
                 try:
@@ -8971,31 +9328,90 @@ def http_server_thread() -> None:
                 if not sn:
                     self._send_json({"ok": False, "error": "sn required"}, 400)
                     return
-                snap = _state_snapshot()
-                item = None
-                for x in (snap.get("drones") or []):
-                    if str(x.get("sn") or "") == sn:
-                        item = x
-                        break
-                if not item:
-                    self._send_json({"ok": False, "error": "sn not found"}, 404)
-                    return
+                include_tracks = _to_bool((query.get("include_tracks") or ["0"])[0], False)
+                now_mono = time.monotonic()
+                now_wall = time.time()
                 with state_lock:
-                    src = state_table.get(sn) or history_table.get(sn) or {}
+                    cur = state_table.get(sn) or {}
+                    hist = history_table.get(sn) or {}
+                    src = cur or hist
+                    if not src:
+                        self._send_json({"ok": False, "error": "sn not found"}, 404)
+                        return
+                    item = {key: src.get(key) for key in HISTORY_DETAIL_KEYS if key in src}
+                    scan_type_key = _scan_type_key(cur.get("scan_type", hist.get("scan_type", "rid")))
+                    firmware_type_key = _firmware_type_key(cur.get("firmware_type", hist.get("firmware_type", "old")))
+                    model_name = _resolve_model_name(sn, scan_type_key, cur.get("model", hist.get("model")))
+                    if cur:
+                        last_seen_ts = cur.get("last_seen_ts")
+                        if last_seen_ts is None:
+                            last_seen_ts = now_mono
+                        age = max(0.0, now_mono - last_seen_ts)
+                    else:
+                        try:
+                            age = max(0.0, now_wall - float(hist.get("last_seen_wall_ts") or now_wall))
+                        except Exception:
+                            age = 0.0
+                    lost = age > LOST_TIMEOUT
+                    id_src = str(cur.get("id_type", hist.get("id_type","")) or "")
+                    ch = cur.get("last_ch", hist.get("last_ch")) or 0
+                    ch_assumed = bool(cur.get("ch_assumed", hist.get("ch_assumed")))
+                    cap_wall_ts = cur.get("last_capture_wall_ts", hist.get("last_capture_wall_ts"))
                     tracks = _sanitize_tracks(src)
-                    track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type"))
-                    item["raw_packets"] = list(src.get("raw_packets", []) or [])[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:]
-                    item["raw_packets_count"] = len(list(src.get("raw_packets", []) or []))
-                self._send_json({
+                    track = _track_for_query(tracks, query, firmware_type=src.get("firmware_type")) if include_tracks else []
+                    raw_packets = list(src.get("raw_packets", []) or [])
+                    item.update({
+                        "sn": sn,
+                        "sn_src": _sn_source_display(id_src),
+                        "uas_id": _uas_id_clean(cur.get("uas_id") or hist.get("uas_id","")),
+                        "scan_type": _scan_type_display(scan_type_key),
+                        "firmware_type": _firmware_type_display(firmware_type_key),
+                        "firmware_type_key": firmware_type_key,
+                        "model": model_name,
+                        "lost": lost,
+                        "archived": sn not in state_table,
+                        "mac": cur.get("src_mac", hist.get("src_mac","")),
+                        "id_type": id_src or "-",
+                        "ch": f"{'~' if ch_assumed else ''}{ch}" if ch else "?",
+                        "ch_assumed": ch_assumed,
+                        "alt": cur.get("alt", hist.get("alt")),
+                        "spd": cur.get("speed", hist.get("speed")),
+                        "vspd": cur.get("vspeed", hist.get("vspeed")),
+                        "rssi": cur.get("rssi", hist.get("rssi")),
+                        "pkts": hist.get("pkt_count_total", cur.get("pkt_count",0)),
+                        "dir": cur.get("move_dir", hist.get("move_dir")) or "-",
+                        "ssid": cur.get("ssid", hist.get("ssid","")) or "",
+                        "capture_type": cur.get("capture_type", hist.get("capture_type","")) or "",
+                        "capture_time": _fmt_wall_ts(cap_wall_ts),
+                        "last_pkt_time": _fmt_wall_ts(cap_wall_ts),
+                        "raw_packets": raw_packets[-HISTORY_RAW_PACKET_SNAPSHOT_LIMIT:],
+                        "raw_packets_count": len(raw_packets),
+                        "scan_type_key": scan_type_key,
+                        "age": round(age),
+                        "age_text": _fmt_age_compact(age),
+                        "first_seen": _fmt_wall_ts(hist.get("first_seen_wall_ts", cur.get("first_seen_wall_ts"))),
+                        "last_seen": _fmt_wall_ts(hist.get("last_seen_wall_ts", cur.get("last_seen_wall_ts"))),
+                        "track_count": len(_track_store_primary(tracks, "aircraft")),
+                        "operator_track_count": len(_track_store_primary(tracks, "operator")),
+                    })
+                    item.pop("tracks", None)
+                    item.pop("track", None)
+                    aircraft_query = {**query, "track_type": ["aircraft"]}
+                    operator_query = {**query, "track_type": ["operator"]}
+                    aircraft_track = _track_for_query(tracks, aircraft_query, firmware_type=src.get("firmware_type")) if include_tracks else []
+                    operator_track = _track_for_query(tracks, operator_query, firmware_type=src.get("firmware_type")) if include_tracks else []
+                payload = {
                     "ok": True,
                     "item": item,
                     "track_count": len(track),
-                    "track": track,
-                    "tracks": {
-                        "aircraft": _track_for_query(tracks, {"track_type": ["aircraft"]}, firmware_type=src.get("firmware_type")),
-                        "operator": _track_for_query(tracks, {"track_type": ["operator"]}, firmware_type=src.get("firmware_type")),
-                    },
-                }, 200)
+                }
+                if include_tracks:
+                    payload["track"] = track
+                    payload["tracks"] = {
+                        "aircraft": aircraft_track,
+                        "operator": operator_track,
+                    }
+                self._send_json(payload, 200)
             elif path == "/api/settings/models/list":
                 self._send_json(_model_map_editor_payload(), 200)
             elif path == "/api/logs/view":
@@ -9169,7 +9585,7 @@ def http_server_thread() -> None:
                     _ws_clients.append(client_entry)
                 import json as _json
                 try:
-                    initial_payload = _ws_settings_runtime_payload() if ws_mode == "settings" else _state_snapshot()
+                    initial_payload = _ws_settings_runtime_payload() if ws_mode == "settings" else _state_snapshot(lightweight=True)
                     sock.sendall(_ws_frame(
                         _json.dumps(initial_payload, ensure_ascii=False).encode()))
                 except Exception:
@@ -9333,6 +9749,28 @@ def http_server_thread() -> None:
                 payload = _notification_payload()
                 payload["item"] = item
                 self._send_json(payload, 200)
+                return
+            if path == "/api/simulation/start":
+                body = self._read_json_body()
+                rsp = simulation_start(body)
+                _op_log(
+                    "simulation-start",
+                    f"count={rsp.get('count', 0)} pattern={(rsp.get('options') or {}).get('pattern', '')}",
+                    ip=_client_ip_from_handler(self),
+                    ok=bool(rsp.get("ok")),
+                )
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
+                return
+            if path == "/api/simulation/stop":
+                self._read_json_body()
+                rsp = simulation_stop()
+                _op_log(
+                    "simulation-stop",
+                    f"removed={rsp.get('removed', 0)}",
+                    ip=_client_ip_from_handler(self),
+                    ok=True,
+                )
+                self._send_json(rsp, 200)
                 return
             if path == "/api/notifications/delete":
                 body = self._read_json_body()
@@ -9735,9 +10173,16 @@ def http_server_thread() -> None:
                 self._send_json({"ok": True, "passkeys": passkeys, "id": passkey_id}, 200)
                 return
             elif path == "/api/settings/notify/test":
-                ok, resp = send_test_notification_from_config()
+                body = self._read_json_body()
+                ok, resp = send_test_notification_from_visual_payload(body)
                 _op_log("notify-test", str(resp or ""), ip=_client_ip_from_handler(self), ok=bool(ok))
-                self._send_json({"ok": bool(ok), "resp": resp}, 200 if ok else 500)
+                self._send_json({
+                    "ok": bool(ok),
+                    "tested": True,
+                    "saved": False,
+                    "resp": resp,
+                    "error": ("" if ok else str(resp or "notify test failed")),
+                }, 200 if ok else 500)
             elif path == "/api/settings/models/update":
                 body = self._read_json_body()
                 rsp = update_model_map_from_url(manual=True, url_override=str(body.get("url") or "").strip() or None)

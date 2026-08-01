@@ -1,0 +1,1099 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Light RID Mobile</title>
+<link rel="stylesheet" href="/assets/leaflet/leaflet.css">
+<script src="/assets/leaflet/leaflet.js"></script>
+<style>
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+:root{
+  --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei UI","Noto Sans SC",sans-serif;
+  --font-mono:"SFMono-Regular","Cascadia Mono","Consolas",monospace;
+  --bg:#eef3f8;--surface:#ffffff;--surface-soft:#f7f9fc;--line:#dce5ee;
+  --text:#142033;--muted:#64748b;--accent:#1f6feb;--accent-soft:#e7f0ff;
+  --ok:#148957;--warn:#c17300;--bad:#d04444;--shadow:0 10px 24px rgba(15,23,42,.10);
+  --top-pad:max(10px,env(safe-area-inset-top));--bottom-pad:max(8px,env(safe-area-inset-bottom));
+  --map-h:40dvh;--tap:46px
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#08111e;--surface:#111d2d;--surface-soft:#16263a;--line:#26384f;
+    --text:#edf5ff;--muted:#9fb2ca;--accent:#6fb2ff;--accent-soft:#153150;
+    --ok:#53d193;--warn:#ffc15f;--bad:#ff8c8c;--shadow:0 16px 32px rgba(0,0,0,.34)
+  }
+}
+body.theme-light{
+  --bg:#eef3f8;--surface:#ffffff;--surface-soft:#f7f9fc;--line:#dce5ee;
+  --text:#142033;--muted:#64748b;--accent:#1f6feb;--accent-soft:#e7f0ff;
+  --ok:#148957;--warn:#c17300;--bad:#d04444;--shadow:0 10px 24px rgba(15,23,42,.10)
+}
+body.theme-dark{
+  --bg:#08111e;--surface:#111d2d;--surface-soft:#16263a;--line:#26384f;
+  --text:#edf5ff;--muted:#9fb2ca;--accent:#6fb2ff;--accent-soft:#153150;
+  --ok:#53d193;--warn:#ffc15f;--bad:#ff8c8c;--shadow:0 16px 32px rgba(0,0,0,.34)
+}
+body{
+  min-width:320px;height:100dvh;overflow:hidden;background:var(--bg);color:var(--text);
+  font:15px/1.45 var(--font-ui);letter-spacing:0;
+  -webkit-text-size-adjust:100%;text-size-adjust:100%
+}
+a{color:inherit;text-decoration:none}
+button,input{font:inherit}
+button{touch-action:manipulation}
+.mobile-shell{
+  height:100dvh;display:grid;grid-template-rows:auto auto minmax(220px,var(--map-h)) minmax(0,1fr) auto;
+  gap:8px;padding:var(--top-pad) 10px var(--bottom-pad);overflow:hidden;
+  background:
+    radial-gradient(circle at 16% 0,rgba(31,111,235,.10),transparent 32%),
+    linear-gradient(180deg,rgba(255,255,255,.26),transparent 180px)
+}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px}
+.brand{min-width:0;display:flex;flex-direction:column;gap:1px}
+.brand-title{font-weight:800;font-size:18px;line-height:1.05;white-space:nowrap}
+.brand code{font:700 11px/1.2 var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:68vw}
+.top-actions{display:flex;align-items:center;gap:7px;flex-shrink:0}
+.ws-pill,.top-link{
+  min-height:36px;border:1px solid var(--line);border-radius:8px;background:var(--surface);
+  color:var(--text);display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  padding:0 10px;font-weight:750;font-size:13px;box-shadow:0 1px 2px rgba(15,23,42,.05)
+}
+.top-link{min-width:42px}
+.ws-dot{width:8px;height:8px;border-radius:50%;background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 16%,transparent)}
+.ws-dot.ok{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 16%,transparent)}
+.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;min-height:58px}
+.metric{
+  min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:7px 6px;
+  display:flex;flex-direction:column;justify-content:center;gap:2px;box-shadow:0 1px 2px rgba(15,23,42,.05)
+}
+.metric-label{font-size:11px;color:var(--muted);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-value{font-size:18px;line-height:1.08;font-weight:850;font-variant-numeric:tabular-nums}
+.metric-value.small{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.map-zone{
+  position:relative;min-height:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+  background:var(--surface-soft);box-shadow:var(--shadow)
+}
+#mobile-map{width:100%;height:100%;min-height:220px;background:#dbe6f0}
+.map-head{
+  position:absolute;left:8px;top:8px;right:8px;z-index:500;display:flex;align-items:center;justify-content:space-between;gap:8px;pointer-events:none
+}
+.map-chip,.map-action{
+  min-height:34px;border:1px solid color-mix(in srgb,var(--line) 76%,transparent);border-radius:8px;
+  background:color-mix(in srgb,var(--surface) 90%,transparent);backdrop-filter:blur(10px);
+  box-shadow:0 4px 14px rgba(15,23,42,.12);color:var(--text);font-weight:800;font-size:12px
+}
+.map-chip{min-width:0;padding:0 10px;display:flex;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-actions{display:flex;gap:6px;pointer-events:auto}
+.map-action{padding:0 10px}
+.map-action.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.map-hint{
+  position:absolute;left:8px;right:8px;bottom:8px;z-index:500;min-height:34px;padding:7px 10px;border-radius:8px;
+  background:color-mix(in srgb,var(--surface) 90%,transparent);border:1px solid color-mix(in srgb,var(--line) 80%,transparent);
+  color:var(--muted);font-size:12px;font-weight:700;backdrop-filter:blur(10px);pointer-events:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+}
+.map-api-risk{
+  position:absolute;left:8px;right:8px;bottom:50px;z-index:500;padding:7px 10px;border-radius:8px;
+  background:color-mix(in srgb,var(--surface) 92%,transparent);border:1px solid color-mix(in srgb,var(--bad) 40%,var(--line));
+  color:var(--bad);font-size:12px;font-weight:760;line-height:1.35;backdrop-filter:blur(10px);pointer-events:none
+}
+.map-api-risk[hidden]{display:none}
+.content-zone{min-height:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column}
+.content-panel{display:none;min-height:0;flex:1;overflow:hidden}
+.content-panel.active{display:flex;flex-direction:column}
+.list-toolbar{display:grid;grid-template-columns:1fr;gap:8px;padding:9px;border-bottom:1px solid var(--line);background:var(--surface)}
+.segmented{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.segmented button,.toolbar-button{
+  min-height:var(--tap);border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);
+  color:var(--text);font-weight:800;font-size:14px;padding:0 8px
+}
+.segmented button.active,.toolbar-button.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.search-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
+.search-row input{
+  width:100%;min-height:var(--tap);border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);
+  color:var(--text);padding:0 12px;font-size:15px;outline:none
+}
+.search-row input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent)}
+.target-list,.log-list,.detail-scroll{min-height:0;overflow:auto;-webkit-overflow-scrolling:touch}
+.target-list{padding:8px;display:grid;gap:8px;align-content:start}
+.target-card{
+  width:100%;text-align:left;border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);
+  color:var(--text);padding:10px;display:grid;gap:8px;min-height:92px
+}
+.target-card.selected{border-color:var(--accent);background:var(--accent-soft)}
+.target-card.lost{opacity:.72}
+.target-main{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:start}
+.target-sn{min-width:0;font:850 16px/1.2 var(--font-mono);overflow-wrap:anywhere}
+.status-tag{
+  min-height:26px;border-radius:7px;padding:4px 7px;font-size:12px;font-weight:850;
+  background:color-mix(in srgb,var(--ok) 12%,var(--surface));color:var(--ok);white-space:nowrap
+}
+.status-tag.lost{background:color-mix(in srgb,var(--bad) 12%,var(--surface));color:var(--bad)}
+.target-model{color:var(--muted);font-size:13px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.target-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+.target-metrics span{
+  min-width:0;border-radius:7px;background:var(--surface);border:1px solid color-mix(in srgb,var(--line) 75%,transparent);
+  padding:5px 4px;display:flex;flex-direction:column;gap:1px
+}
+.target-metrics em{font-style:normal;color:var(--muted);font-size:10px;font-weight:750;white-space:nowrap}
+.target-metrics b{font-size:12px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.empty-state{margin:auto;display:grid;place-items:center;text-align:center;gap:8px;color:var(--muted);padding:24px;font-weight:750}
+.empty-state strong{color:var(--text);font-size:17px}
+@keyframes rid-spin{to{transform:rotate(360deg)}}
+@keyframes rid-pulse{0%,100%{opacity:.52;transform:scale(.92)}50%{opacity:1;transform:scale(1.08)}}
+@keyframes rid-shimmer{0%{background-position:120% 0}100%{background-position:-120% 0}}
+.loading-spinner{
+  width:28px;height:28px;border-radius:50%;border:3px solid color-mix(in srgb,var(--accent) 20%,transparent);
+  border-top-color:var(--accent);animation:rid-spin .86s linear infinite
+}
+.loading-state{
+  min-height:100%;display:grid;place-items:center;text-align:center;gap:10px;color:var(--muted);
+  padding:22px 16px;font-weight:780
+}
+.loading-state strong{color:var(--text);font-size:16px}
+.loading-state span{font-size:13px}
+.loading-lines{width:min(260px,84%);display:grid;gap:7px;margin-top:2px}
+.skeleton-line,.skeleton-block{
+  border-radius:999px;background:linear-gradient(90deg,
+    color-mix(in srgb,var(--line) 62%,transparent) 0%,
+    color-mix(in srgb,var(--accent) 22%,var(--surface)) 42%,
+    color-mix(in srgb,var(--line) 62%,transparent) 78%);
+  background-size:240% 100%;animation:rid-shimmer 1.25s ease-in-out infinite
+}
+.skeleton-line{height:9px}
+.skeleton-line.short{width:58%;justify-self:center}
+.target-list.is-loading,.log-list.is-loading,.detail-scroll.is-loading{align-content:stretch}
+.metric.is-loading .metric-value{
+  color:transparent;border-radius:6px;min-height:20px;
+  background:linear-gradient(90deg,
+    color-mix(in srgb,var(--line) 62%,transparent),
+    color-mix(in srgb,var(--accent) 18%,var(--surface)),
+    color-mix(in srgb,var(--line) 62%,transparent));
+  background-size:220% 100%;animation:rid-shimmer 1.2s ease-in-out infinite
+}
+.ws-pill.loading .ws-dot{animation:rid-pulse 1s ease-in-out infinite}
+.ws-pill.loading::after{
+  content:"";width:12px;height:12px;border-radius:50%;border:2px solid color-mix(in srgb,var(--accent) 20%,transparent);
+  border-top-color:var(--accent);animation:rid-spin .8s linear infinite
+}
+.loading-overlay{
+  position:absolute;inset:0;z-index:420;display:grid;place-items:center;padding:16px;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--surface) 74%,transparent),color-mix(in srgb,var(--surface) 38%,transparent));
+  backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .18s ease
+}
+.loading-overlay .loading-state{
+  min-height:auto;border:1px solid color-mix(in srgb,var(--line) 70%,transparent);border-radius:10px;
+  background:color-mix(in srgb,var(--surface) 88%,transparent);box-shadow:0 10px 26px rgba(15,23,42,.12)
+}
+.map-zone.map-loading .loading-overlay{opacity:1}
+.detail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border-bottom:1px solid var(--line)}
+.detail-title{min-width:0;font:850 16px/1.2 var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.detail-sub{color:var(--muted);font-size:12px;font-weight:750;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.detail-actions{display:flex;gap:6px;flex-shrink:0}
+.detail-actions button,.log-actions button{
+  min-height:40px;border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);
+  color:var(--text);font-weight:800;font-size:13px;padding:0 10px
+}
+.detail-actions button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.detail-scroll{padding:10px;display:grid;gap:10px;align-content:start}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.detail-row{
+  min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);
+  padding:8px;display:grid;gap:3px
+}
+.detail-row.wide{grid-column:1/-1}
+.detail-row span{color:var(--muted);font-size:11px;font-weight:750}
+.detail-row b{font-size:14px;line-height:1.25;overflow-wrap:anywhere}
+.raw-box{
+  border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);padding:9px;
+  font:12px/1.5 var(--font-mono);color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto
+}
+.log-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border-bottom:1px solid var(--line)}
+.log-title{font-weight:850;font-size:16px}
+.log-actions{display:flex;gap:6px;align-items:center}
+.log-list{padding:8px;display:grid;gap:6px;align-content:start}
+.log-line{border:1px solid var(--line);background:var(--surface-soft);border-radius:8px;padding:8px;font:12px/1.45 var(--font-mono);color:var(--text);overflow-wrap:anywhere}
+.log-line.rid{border-color:color-mix(in srgb,var(--accent) 36%,var(--line));background:color-mix(in srgb,var(--accent) 9%,var(--surface))}
+.mobile-nav{
+  min-height:58px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;
+  padding-top:2px
+}
+.nav-button{
+  min-width:0;min-height:54px;border:1px solid var(--line);border-radius:9px;background:var(--surface);
+  color:var(--muted);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  font-weight:850;font-size:12px;box-shadow:0 1px 2px rgba(15,23,42,.05)
+}
+.nav-button span{font-size:20px;line-height:1;font-weight:900}
+.nav-button.active{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 42%,var(--line));background:var(--accent-soft)}
+.mobile-shell.map-expanded{grid-template-rows:auto auto minmax(0,1fr) auto}
+.mobile-shell.map-expanded .content-zone{display:none}
+.mobile-shell.map-expanded .map-zone{min-height:0}
+.mobile-shell.map-expanded #mobile-map{min-height:0}
+.leaflet-control-zoom a{width:38px!important;height:38px!important;line-height:38px!important;font-size:22px!important}
+.mobile-aircraft-icon{position:relative;width:32px;height:32px;border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 6px 14px rgba(0,0,0,.28)}
+.mobile-aircraft-icon::after{
+  content:"";position:absolute;left:50%;top:50%;width:10px;height:14px;margin:-8px 0 0 -5px;
+  background:#fff;clip-path:polygon(50% 0,100% 100%,50% 78%,0 100%);transform:rotate(var(--heading,0deg))
+}
+.mobile-aircraft-icon.lost{background:#8a97a8}
+.mobile-aircraft-icon.selected{background:#ff9f1c;box-shadow:0 0 0 5px rgba(255,159,28,.22),0 6px 14px rgba(0,0,0,.28)}
+.offline-map-tile{height:100%;display:grid;place-items:center;background:#dbe6f0;color:#60758c;font:700 12px/1 var(--font-ui);border:1px solid rgba(96,117,140,.15)}
+@media (max-width:380px){
+  :root{--map-h:37dvh;--tap:44px}
+  .mobile-shell{padding-left:7px;padding-right:7px;gap:7px}
+  .summary-grid{gap:5px}
+  .metric{padding:6px 5px}
+  .metric-value{font-size:16px}
+  .target-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .top-link{display:none}
+}
+@media (max-height:720px){
+  :root{--map-h:33dvh}
+  .summary-grid{min-height:52px}
+  .metric-value{font-size:16px}
+  .mobile-nav{min-height:52px}
+  .nav-button{min-height:48px}
+}
+@media (orientation:landscape) and (max-height:560px){
+  .mobile-shell{grid-template-columns:minmax(300px,44vw) minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}
+  .topbar{grid-column:1/-1}
+  .summary-grid{display:none}
+  .map-zone{grid-column:1;grid-row:2;min-height:0}
+  .content-zone{grid-column:2;grid-row:2}
+  .mobile-nav{grid-column:1/-1}
+  .mobile-shell.map-expanded{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr) auto}
+  .mobile-shell.map-expanded .map-zone{grid-column:1;grid-row:2}
+}
+@media (prefers-reduced-motion:reduce){
+  .loading-spinner,.ws-pill.loading .ws-dot,.ws-pill.loading::after,.skeleton-line,.skeleton-block,.metric.is-loading .metric-value{
+    animation:none
+  }
+}
+</style>
+</head>
+<body>
+<div class="mobile-shell" id="shell">
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-title">Light RID Mobile</span>
+      <code>__APP_VERSION_LABEL__</code>
+    </a>
+    <div class="top-actions">
+      <div class="ws-pill loading" id="ws-pill"><span class="ws-dot" id="ws-dot"></span><span id="ws-label">连接中</span></div>
+      <a class="top-link" href="/settings">设置</a>
+    </div>
+  </header>
+
+  <section class="summary-grid" aria-label="实时概览">
+    <div class="metric is-loading"><span class="metric-label">全部</span><span class="metric-value" id="sum-total">0</span></div>
+    <div class="metric is-loading"><span class="metric-label">在线</span><span class="metric-value" id="sum-live">0</span></div>
+    <div class="metric is-loading"><span class="metric-label">离线</span><span class="metric-value" id="sum-lost">0</span></div>
+    <div class="metric is-loading"><span class="metric-label">更新</span><span class="metric-value small" id="sum-time">-</span></div>
+  </section>
+
+  <section class="map-zone map-loading" aria-label="地图">
+    <div id="mobile-map"></div>
+    <div class="loading-overlay" id="map-loader" aria-live="polite">
+      <div class="loading-state">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <strong id="map-loader-title">地图加载中</strong>
+        <span id="map-loader-text">正在初始化地图组件</span>
+      </div>
+    </div>
+    <div class="map-head">
+      <div class="map-chip" id="map-chip">等待数据</div>
+      <div class="map-actions">
+        <button class="map-action active" id="btn-follow" type="button">跟随</button>
+        <button class="map-action" id="btn-fit" type="button">回中</button>
+      </div>
+    </div>
+    <div class="map-hint" id="map-hint">正在连接基站</div>
+    <div class="map-api-risk" id="map-api-risk" hidden>未配置地图 API，当前使用默认在线底图，可能存在法律风险；请勿暴露公网或商业使用。</div>
+  </section>
+
+  <section class="content-zone" aria-live="polite">
+    <section class="content-panel active" id="panel-list" data-panel="list">
+      <div class="list-toolbar">
+        <div class="segmented" role="tablist" aria-label="目标筛选">
+          <button class="active" type="button" data-filter="all">全部</button>
+          <button type="button" data-filter="live">在线</button>
+          <button type="button" data-filter="lost">离线</button>
+        </div>
+        <div class="search-row">
+          <input id="search" type="search" inputmode="search" autocomplete="off" placeholder="搜索 SN / 型号 / UAS ID">
+          <button class="toolbar-button" id="btn-clear-search" type="button">清除</button>
+        </div>
+      </div>
+      <div class="target-list is-loading" id="target-list" aria-busy="true">
+        <div class="loading-state">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <strong>正在加载目标</strong>
+          <span>等待基站实时数据</span>
+          <div class="loading-lines" aria-hidden="true">
+            <div class="skeleton-line"></div>
+            <div class="skeleton-line"></div>
+            <div class="skeleton-line short"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="content-panel" id="panel-detail" data-panel="detail">
+      <div class="detail-head">
+        <div style="min-width:0">
+          <div class="detail-title" id="detail-title">未选择目标</div>
+          <div class="detail-sub" id="detail-sub">从列表或地图选择一个目标</div>
+        </div>
+        <div class="detail-actions">
+          <button type="button" id="btn-copy-sn">复制</button>
+          <button class="primary" type="button" id="btn-desktop">桌面页</button>
+        </div>
+      </div>
+      <div class="detail-scroll" id="detail-body">
+        <div class="empty-state"><strong>暂无详情</strong><span>选择目标后显示实时字段和轨迹摘要</span></div>
+      </div>
+    </section>
+
+    <section class="content-panel" id="panel-log" data-panel="log">
+      <div class="log-head">
+        <div>
+          <div class="log-title">扫描日志</div>
+          <div class="detail-sub" id="log-sub">最近 AP / RID 日志</div>
+        </div>
+        <div class="log-actions"><button type="button" id="btn-log-bottom">底部</button></div>
+      </div>
+      <div class="log-list is-loading" id="log-list" aria-busy="true">
+        <div class="loading-state">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <strong>正在加载日志</strong>
+          <span>等待扫描输出</span>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <nav class="mobile-nav" aria-label="移动导航">
+    <button class="nav-button" type="button" data-panel="map"><span>⌂</span>地图</button>
+    <button class="nav-button active" type="button" data-panel="list"><span>≡</span>目标</button>
+    <button class="nav-button" type="button" data-panel="detail"><span>i</span>详情</button>
+    <button class="nav-button" type="button" data-panel="log"><span>▣</span>日志</button>
+  </nav>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var state = {
+    rows: [],
+    mapRows: [],
+    logs: [],
+    meta: {},
+    selectedSn: "",
+    filter: "all",
+    panel: "list",
+    follow: true,
+    ws: null,
+    reconnectTimer: null,
+    details: {},
+    tracks: {},
+    loading: {
+      summary: true,
+      list: true,
+      logs: true,
+      detail: false,
+      map: true
+    },
+    hasData: false,
+    detailLoadingSn: "",
+    detailErrorSn: "",
+    detailError: ""
+  };
+  var map = null;
+  var mapTileLayer = null;
+  var mapOfflineLayer = null;
+  var mapTileSig = "";
+  var mapTileErrors = 0;
+  var markers = {};
+  var baseMarker = null;
+  var trackLayers = [];
+  var internalMapMove = false;
+
+  function qs(id){ return document.getElementById(id); }
+  function qsa(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel)); }
+  function esc(value){
+    return String(value == null ? "" : value)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+  function loadingHtml(title, text, lines){
+    var html = '<div class="loading-state">'
+      + '<div class="loading-spinner" aria-hidden="true"></div>'
+      + '<strong>'+esc(title || "加载中")+'</strong>'
+      + '<span>'+esc(text || "请稍候")+'</span>';
+    if(lines){
+      html += '<div class="loading-lines" aria-hidden="true">'
+        + '<div class="skeleton-line"></div>'
+        + '<div class="skeleton-line"></div>'
+        + '<div class="skeleton-line short"></div>'
+        + '</div>';
+    }
+    return html + '</div>';
+  }
+  function setBusy(el, busy){
+    if(!el) return;
+    el.classList.toggle("is-loading", !!busy);
+    el.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+  function setMapLoading(active, title, text){
+    state.loading.map = !!active;
+    var zone = document.querySelector(".map-zone");
+    if(zone) zone.classList.toggle("map-loading", !!active);
+    if(qs("map-loader-title") && title) qs("map-loader-title").textContent = title;
+    if(qs("map-loader-text") && text) qs("map-loader-text").textContent = text;
+  }
+  function num(value){
+    if(value == null || value === "") return null;
+    var n = Number(value);
+    return isFinite(n) ? n : null;
+  }
+  function fmt(value, dec, unit){
+    var n = num(value);
+    return n == null ? "-" : n.toFixed(dec) + (unit || "");
+  }
+  function fmtAge(sec){
+    var n = num(sec);
+    if(n == null) return "-";
+    n = Math.max(0, Math.round(n));
+    if(n < 60) return n + "s";
+    if(n < 3600) return Math.floor(n / 60) + "m";
+    if(n < 86400) return Math.floor(n / 3600) + "h";
+    return Math.floor(n / 86400) + "d";
+  }
+  function displaySn(item){
+    var sn = String((item && item.sn) || "").trim();
+    return sn || "-";
+  }
+  function uasId(item){
+    return String((item && item.uas_id) || "").trim() || "-";
+  }
+  function statusText(item){
+    if(!item) return "-";
+    if(item.lost) return "离线";
+    if(item.archived) return "历史";
+    return "在线";
+  }
+  function pageHeaders(extra){
+    var h = {"X-LightRID-Page":"1"};
+    if(extra){
+      Object.keys(extra).forEach(function(k){ h[k] = extra[k]; });
+    }
+    return h;
+  }
+  function authExpired(resp, data){
+    var err = String((data && data.error) || "");
+    return resp && resp.status === 401 && ((data && data.auth_expired) || err === "login required" || err === "auth required");
+  }
+  function redirectLogin(){
+    location.href = "/login?next=/m/";
+  }
+  async function fetchJson(url){
+    var resp = await fetch(url, {cache:"no-store", headers:pageHeaders()});
+    var data = await resp.json().catch(function(){ return {}; });
+    if(authExpired(resp, data)){
+      redirectLogin();
+      throw new Error("login required");
+    }
+    if(!resp.ok || data.ok === false){
+      throw new Error(String(data.error || ("HTTP " + resp.status)));
+    }
+    return data;
+  }
+  function validCoord(lat, lon){
+    lat = num(lat); lon = num(lon);
+    if(lat == null || lon == null) return false;
+    if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return false;
+    return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001);
+  }
+  function gcjOutOfChina(lat, lon){
+    return lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271;
+  }
+  function gcjTransformLat(x, y){
+    var ret = -100.0 + 2.0*x + 3.0*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+    ret += (20.0*Math.sin(6.0*x*Math.PI) + 20.0*Math.sin(2.0*x*Math.PI)) * 2.0 / 3.0;
+    ret += (20.0*Math.sin(y*Math.PI) + 40.0*Math.sin(y/3.0*Math.PI)) * 2.0 / 3.0;
+    ret += (160.0*Math.sin(y/12.0*Math.PI) + 320*Math.sin(y*Math.PI/30.0)) * 2.0 / 3.0;
+    return ret;
+  }
+  function gcjTransformLon(x, y){
+    var ret = 300.0 + x + 2.0*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+    ret += (20.0*Math.sin(6.0*x*Math.PI) + 20.0*Math.sin(2.0*x*Math.PI)) * 2.0 / 3.0;
+    ret += (20.0*Math.sin(x*Math.PI) + 40.0*Math.sin(x/3.0*Math.PI)) * 2.0 / 3.0;
+    ret += (150.0*Math.sin(x/12.0*Math.PI) + 300.0*Math.sin(x/30.0*Math.PI)) * 2.0 / 3.0;
+    return ret;
+  }
+  function wgs84ToGcj02(lat, lon){
+    lat = Number(lat); lon = Number(lon);
+    if(!isFinite(lat) || !isFinite(lon) || gcjOutOfChina(lat, lon)) return [lat, lon];
+    var a = 6378245.0;
+    var ee = 0.00669342162296594323;
+    var dLat = gcjTransformLat(lon - 105.0, lat - 35.0);
+    var dLon = gcjTransformLon(lon - 105.0, lat - 35.0);
+    var radLat = lat / 180.0 * Math.PI;
+    var magic = Math.sin(radLat);
+    magic = 1 - ee * magic * magic;
+    var sqrtMagic = Math.sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+    dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+    return [lat + dLat, lon + dLon];
+  }
+  function mapLatLng(lat, lon){
+    var p = wgs84ToGcj02(Number(lat), Number(lon));
+    return [p[0], p[1]];
+  }
+  function aircraftCoord(item){
+    item = item || {};
+    if(item.aircraft_position && validCoord(item.aircraft_position.lat, item.aircraft_position.lon)){
+      return {lat:item.aircraft_position.lat, lon:item.aircraft_position.lon};
+    }
+    if(validCoord(item.lat, item.lon)) return {lat:item.lat, lon:item.lon};
+    return null;
+  }
+  function baseCoord(){
+    var meta = state.meta || {};
+    if(validCoord(meta.base_lat, meta.base_lon)){
+      return {
+        lat:meta.base_lat,
+        lon:meta.base_lon,
+        zoom:Math.max(3, Math.min(20, Number(meta.base_zoom || 13) || 13)),
+        name:String(meta.base_name || "基站")
+      };
+    }
+    return null;
+  }
+  function tileSubdomains(raw){
+    if(Array.isArray(raw)) return raw.map(function(x){ return String(x || "").trim(); }).filter(Boolean);
+    return String(raw || "").split(/[\s,]+/).map(function(x){ return x.trim(); }).filter(Boolean);
+  }
+  function tileAttribution(text){
+    return esc(String(text || "")).slice(0, 240);
+  }
+  function tileConfig(){
+    var meta = state.meta || {};
+    var customUrl = String(meta.map_tile_url || "").trim();
+    var url = customUrl || "https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}";
+    var subdomains = customUrl ? tileSubdomains(meta.map_tile_subdomains) : ["1","2","3","4"];
+    if(customUrl && !subdomains.length) subdomains = [""];
+    return {
+      url:url,
+      options:{
+        subdomains: subdomains,
+        maxZoom:30,
+        maxNativeZoom:Math.max(1, Math.min(30, Number(meta.map_tile_max_native_zoom || 18) || 18)),
+        attribution: customUrl ? tileAttribution(meta.map_tile_attribution || "Custom map") : "&copy; 高德地图"
+      }
+    };
+  }
+  function ensureOfflineLayer(){
+    if(!map) return;
+    if(mapOfflineLayer){
+      if(!map.hasLayer(mapOfflineLayer)) mapOfflineLayer.addTo(map);
+      return;
+    }
+    var OfflineGrid = L.GridLayer.extend({
+      createTile:function(){
+        var tile = L.DomUtil.create("div","offline-map-tile");
+        tile.textContent = "离线地图";
+        return tile;
+      }
+    });
+    mapOfflineLayer = new OfflineGrid({tileSize:256,maxZoom:30,attribution:"本地离线底图"});
+    mapOfflineLayer.addTo(map);
+  }
+  function applyTileLayer(){
+    if(!map || !window.L) return;
+    var cfg = tileConfig();
+    var sig = JSON.stringify([cfg.url, cfg.options.subdomains, cfg.options.maxNativeZoom, cfg.options.attribution]);
+    if(mapTileLayer && mapTileSig === sig) return;
+    if(mapTileLayer){ try{ map.removeLayer(mapTileLayer); }catch(_e){} }
+    if(mapOfflineLayer){ try{ map.removeLayer(mapOfflineLayer); }catch(_e2){} }
+    mapTileErrors = 0;
+    mapTileSig = sig;
+    mapTileLayer = L.tileLayer(cfg.url, cfg.options);
+    mapTileLayer.on("loading", function(){ setMapLoading(true, "地图加载中", "正在加载地图瓦片"); });
+    mapTileLayer.on("load", function(){ setMapLoading(false); });
+    mapTileLayer.on("tileerror", function(){
+      mapTileErrors += 1;
+      if(mapTileErrors >= 2){
+        ensureOfflineLayer();
+        setMapLoading(false);
+      }
+    });
+    mapTileLayer.addTo(map);
+  }
+  function syncMapApiRisk(){
+    var el = qs("map-api-risk");
+    if(el) el.hidden = !((state.meta || {}).map_default_legal_notice === true);
+  }
+  function selectedRow(){
+    var sn = state.selectedSn;
+    if(!sn) return null;
+    for(var i=0;i<state.rows.length;i++){
+      if(String(state.rows[i].sn || "") === sn) return state.rows[i];
+    }
+    return state.details[sn] || null;
+  }
+  function setWs(ok, label){
+    var pill = qs("ws-pill");
+    if(pill) pill.classList.toggle("loading", !ok);
+    var dot = qs("ws-dot");
+    if(dot) dot.classList.toggle("ok", !!ok);
+    if(qs("ws-label")) qs("ws-label").textContent = label || (ok ? "实时" : "重连");
+  }
+  function setPanel(panel){
+    panel = String(panel || "list");
+    state.panel = panel;
+    qs("shell").classList.toggle("map-expanded", panel === "map");
+    qsa(".content-panel").forEach(function(el){
+      el.classList.toggle("active", el.getAttribute("data-panel") === panel);
+    });
+    qsa(".nav-button").forEach(function(btn){
+      btn.classList.toggle("active", btn.getAttribute("data-panel") === panel);
+    });
+    if(panel === "detail") renderDetail();
+    if(panel === "log") renderLogs();
+    setTimeout(function(){ if(map) map.invalidateSize(false); }, 60);
+  }
+  function filteredRows(){
+    var search = String(qs("search").value || "").trim().toLowerCase();
+    return state.rows.filter(function(item){
+      if(state.filter === "live" && item.lost) return false;
+      if(state.filter === "lost" && !item.lost) return false;
+      if(!search) return true;
+      var hay = [
+        item.sn, item.uas_id, item.model, item.mac, item.ssid, item.rid_format,
+        item.dji_rid_kind, item.scan_type, item.firmware_type
+      ].map(function(v){ return String(v || "").toLowerCase(); }).join(" ");
+      return hay.indexOf(search) >= 0;
+    });
+  }
+  function renderSummary(data){
+    state.loading.summary = false;
+    qsa(".metric").forEach(function(el){ el.classList.remove("is-loading"); });
+    var list = state.rows;
+    var live = list.filter(function(x){ return x && !x.lost; }).length;
+    qs("sum-total").textContent = String(list.length);
+    qs("sum-live").textContent = String(live);
+    qs("sum-lost").textContent = String(Math.max(0, list.length - live));
+    qs("sum-time").textContent = String((data && data.ts) || "-");
+    qs("map-chip").textContent = String((data && data.ch) || "-") + " · " + live + " 在线";
+  }
+  function cardHtml(item){
+    var sn = displaySn(item);
+    var cls = "target-card" + (item.lost ? " lost" : "") + (state.selectedSn === sn ? " selected" : "");
+    return '<button class="'+cls+'" type="button" data-sn="'+esc(sn)+'">'
+      + '<div class="target-main"><div>'
+      + '<div class="target-sn">'+esc(sn)+'</div>'
+      + '<div class="target-model">'+esc(String(item.model || "未知型号"))+'</div>'
+      + '</div><span class="status-tag'+(item.lost ? " lost" : "")+'">'+esc(statusText(item))+'</span></div>'
+      + '<div class="target-metrics">'
+      + '<span><em>信号</em><b>'+esc(fmt(item.rssi,0,"dBm"))+'</b></span>'
+      + '<span><em>包数</em><b>'+esc(item.pkts == null ? "0" : item.pkts)+'</b></span>'
+      + '<span><em>更新</em><b>'+esc(item.age_text || fmtAge(item.age))+'</b></span>'
+      + '<span><em>高度</em><b>'+esc(fmt(item.alt,1,"m"))+'</b></span>'
+      + '</div></button>';
+  }
+  function renderList(){
+    var rows = filteredRows();
+    var el = qs("target-list");
+    if(state.loading.list){
+      setBusy(el, true);
+      el.innerHTML = loadingHtml(
+        state.hasData ? "正在刷新目标" : "正在加载目标",
+        state.hasData ? "正在同步最新基站数据" : "等待基站实时数据",
+        true
+      );
+      return;
+    }
+    setBusy(el, false);
+    if(!rows.length){
+      el.innerHTML = '<div class="empty-state"><strong>暂无目标</strong><span>等待基站实时数据或调整筛选条件</span></div>';
+      return;
+    }
+    el.innerHTML = rows.map(cardHtml).join("");
+  }
+  function detailRow(label, value, wide){
+    return '<div class="detail-row'+(wide ? " wide" : "")+'"><span>'+esc(label)+'</span><b>'+esc(value == null || value === "" ? "-" : value)+'</b></div>';
+  }
+  function renderDetail(){
+    var row = selectedRow();
+    var sn = state.selectedSn;
+    var body = qs("detail-body");
+    setBusy(body, state.loading.detail && state.detailLoadingSn === sn);
+    if(!row){
+      qs("detail-title").textContent = "未选择目标";
+      qs("detail-sub").textContent = "从列表或地图选择一个目标";
+      if(body) body.innerHTML = '<div class="empty-state"><strong>暂无详情</strong><span>选择目标后显示实时字段和轨迹摘要</span></div>';
+      return;
+    }
+    if(state.loading.detail && state.detailLoadingSn === sn && !state.details[sn]){
+      qs("detail-title").textContent = displaySn(row);
+      qs("detail-sub").textContent = "正在加载详情和轨迹";
+      if(body) body.innerHTML = loadingHtml("正在加载详情", "读取实时字段和轨迹点", true);
+      return;
+    }
+    var detail = state.details[sn] || row;
+    var trackInfo = state.tracks[sn] || {};
+    qs("detail-title").textContent = displaySn(row);
+    if(state.detailErrorSn === sn && state.detailError){
+      qs("detail-sub").textContent = state.detailError;
+    }else if(state.loading.detail && state.detailLoadingSn === sn){
+      qs("detail-sub").textContent = "正在刷新详情和轨迹";
+    }else{
+      qs("detail-sub").textContent = String(row.model || "未知型号") + " · " + statusText(row);
+    }
+    var html = '<div class="detail-grid">'
+      + detailRow("UAS ID", uasId(detail), true)
+      + detailRow("型号", detail.model || row.model || "-")
+      + detailRow("状态", statusText(row))
+      + detailRow("信号", fmt(detail.rssi,0,"dBm"))
+      + detailRow("包数", detail.pkts == null ? "0" : detail.pkts)
+      + detailRow("纬度", fmt(detail.lat,6,""))
+      + detailRow("经度", fmt(detail.lon,6,""))
+      + detailRow("高度", fmt(detail.alt,1,"m"))
+      + detailRow("速度", fmt(detail.spd,2,"m/s"))
+      + detailRow("方向", detail.dir || "-")
+      + detailRow("数据更新", detail.age_text || fmtAge(detail.age))
+      + detailRow("首次发现", detail.first_seen || "-", true)
+      + detailRow("最后发现", detail.last_seen || "-", true)
+      + detailRow("轨迹点", String(trackInfo.track_count || detail.track_count || 0))
+      + detailRow("原始包", String(detail.raw_packets_count || 0))
+      + detailRow("RID 格式", detail.rid_format || detail.dji_rid_kind || detail.kind || "-", true)
+      + detailRow("解析状态", detail.parse_note || "-", true)
+      + '</div>';
+    var raws = Array.isArray(detail.raw_packets) ? detail.raw_packets : [];
+    if(raws.length){
+      var last = raws[raws.length - 1] || {};
+      html += '<div class="raw-box">'+esc(String(last.hex || ""))+'</div>';
+    }
+    if(state.loading.detail && state.detailLoadingSn === sn){
+      html += loadingHtml("正在刷新轨迹", "地图轨迹加载中", false);
+    }
+    if(body) body.innerHTML = html;
+  }
+  function renderLogs(){
+    var box = qs("log-list");
+    var logs = state.logs.slice(-60);
+    if(state.loading.logs){
+      setBusy(box, true);
+      qs("log-sub").textContent = state.hasData ? "正在刷新日志" : "等待日志数据";
+      box.innerHTML = loadingHtml(
+        state.hasData ? "正在刷新日志" : "正在加载日志",
+        state.hasData ? "同步最近扫描输出" : "等待基站扫描输出",
+        true
+      );
+      return;
+    }
+    setBusy(box, false);
+    qs("log-sub").textContent = logs.length ? ("最近 " + logs.length + " 条") : "暂无日志";
+    if(!logs.length){
+      box.innerHTML = '<div class="empty-state"><strong>暂无日志</strong><span>等待扫描输出</span></div>';
+      return;
+    }
+    box.innerHTML = logs.map(function(line){
+      line = String(line || "");
+      var rid = line.indexOf("RID-") >= 0 || /1581[A-Z0-9]{4}/.test(line);
+      return '<div class="log-line'+(rid ? " rid" : "")+'">'+esc(line)+'</div>';
+    }).join("");
+  }
+  function ensureMap(){
+    if(map) return;
+    if(!window.L){
+      setMapLoading(true, "地图组件加载中", "等待 Leaflet 资源");
+      return;
+    }
+    setMapLoading(true, "地图加载中", "正在初始化地图组件");
+    map = L.map("mobile-map", {zoomControl:true, attributionControl:true, maxZoom:30});
+    applyTileLayer();
+    syncMapApiRisk();
+    var b = baseCoord();
+    if(b) map.setView(mapLatLng(b.lat, b.lon), b.zoom);
+    else map.setView([30,114],5);
+    setTimeout(function(){ setMapLoading(false); }, 1200);
+    map.on("dragstart zoomstart", function(){
+      if(internalMapMove) return;
+      state.follow = false;
+      updateFollowUi();
+    });
+  }
+  function markerIcon(item){
+    var deg = num(item.track_deg);
+    if(deg == null) deg = num(item.dir);
+    if(deg == null) deg = 0;
+    var cls = "mobile-aircraft-icon" + (item.lost ? " lost" : "") + (String(item.sn || "") === state.selectedSn ? " selected" : "");
+    return L.divIcon({
+      className:"mobile-aircraft-icon-wrap",
+      html:'<div class="'+cls+'" style="--heading:'+Number(deg).toFixed(1)+'deg"></div>',
+      iconSize:[32,32],
+      iconAnchor:[16,16],
+      popupAnchor:[0,-18]
+    });
+  }
+  function setMapView(fn){
+    if(!map) return;
+    internalMapMove = true;
+    try{ fn(); }finally{ setTimeout(function(){ internalMapMove = false; }, 120); }
+  }
+  function renderBaseMarker(){
+    var b = baseCoord();
+    if(!map || !b){
+      if(baseMarker){ map.removeLayer(baseMarker); baseMarker = null; }
+      return;
+    }
+    var ll = mapLatLng(b.lat, b.lon);
+    if(baseMarker) baseMarker.setLatLng(ll);
+    else baseMarker = L.circleMarker(ll, {
+      radius:8, color:"#ffffff", weight:2, fillColor:"#1f6feb", fillOpacity:.92
+    }).addTo(map).bindPopup(esc(b.name));
+  }
+  function renderMap(){
+    ensureMap();
+    if(!map) return;
+    renderBaseMarker();
+    var rows = Array.isArray(state.mapRows) && state.mapRows.length ? state.mapRows : state.rows;
+    var active = {};
+    var latlngs = [];
+    rows.forEach(function(item){
+      item = item || {};
+      var sn = String(item.sn || "");
+      var pos = aircraftCoord(item);
+      if(!sn || !pos) return;
+      active[sn] = true;
+      var ll = mapLatLng(pos.lat, pos.lon);
+      latlngs.push(ll);
+      if(markers[sn]){
+        markers[sn].setLatLng(ll);
+        markers[sn].setIcon(markerIcon(item));
+      }else{
+        markers[sn] = L.marker(ll, {icon:markerIcon(item)}).addTo(map);
+        markers[sn].on("click", function(){ selectSn(sn, true); });
+      }
+      markers[sn].bindPopup(esc(displaySn(item)) + "<br>" + esc(item.model || "未知型号"));
+    });
+    Object.keys(markers).forEach(function(sn){
+      if(!active[sn]){
+        map.removeLayer(markers[sn]);
+        delete markers[sn];
+      }
+    });
+    if(state.follow) fitMap(false, latlngs);
+  }
+  function fitMap(force, latlngs){
+    ensureMap();
+    if(!map) return;
+    latlngs = latlngs || [];
+    if(!latlngs.length){
+      var selected = selectedRow();
+      var pos = aircraftCoord(selected);
+      if(pos) latlngs.push(mapLatLng(pos.lat, pos.lon));
+    }
+    setMapView(function(){
+      if(latlngs.length > 1){
+        map.fitBounds(L.latLngBounds(latlngs), {padding:[28,28], maxZoom:17});
+        qs("map-hint").textContent = "显示 " + latlngs.length + " 个目标";
+      }else if(latlngs.length === 1){
+        map.setView(latlngs[0], Math.max(map.getZoom() || 15, 15));
+        qs("map-hint").textContent = state.selectedSn ? "已定位选中目标" : "显示实时目标";
+      }else{
+        var b = baseCoord();
+        if(b){
+          map.setView(mapLatLng(b.lat, b.lon), b.zoom);
+          qs("map-hint").textContent = "暂无可显示目标，已回到基站";
+        }else{
+          map.setView([30,114],5);
+          qs("map-hint").textContent = "暂无坐标数据";
+        }
+      }
+    });
+  }
+  function clearTrackLayers(){
+    if(!map) return;
+    trackLayers.forEach(function(layer){
+      try{ map.removeLayer(layer); }catch(_e){}
+    });
+    trackLayers = [];
+  }
+  function drawTracks(sn, data){
+    ensureMap();
+    clearTrackLayers();
+    if(!map || !data) return;
+    var tracks = data.tracks || {};
+    [
+      {items:tracks.aircraft || data.track || [], color:"#1f6feb"},
+      {items:tracks.operator || [], color:"#ff9f1c"}
+    ].forEach(function(group){
+      var pts = (Array.isArray(group.items) ? group.items : []).filter(function(p){
+        return p && validCoord(p.lat, p.lon);
+      }).map(function(p){ return mapLatLng(p.lat, p.lon); });
+      if(pts.length >= 2){
+        trackLayers.push(L.polyline(pts, {color:group.color, weight:4, opacity:.82}).addTo(map));
+      }
+    });
+    if(trackLayers.length){
+      var all = [];
+      trackLayers.forEach(function(layer){ all = all.concat(layer.getLatLngs()); });
+      setMapView(function(){ map.fitBounds(L.latLngBounds(all), {padding:[28,28], maxZoom:17}); });
+      qs("map-hint").textContent = "已加载 " + esc(sn) + " 的轨迹";
+    }
+  }
+  function updateFollowUi(){
+    qs("btn-follow").classList.toggle("active", !!state.follow);
+    qs("btn-follow").textContent = state.follow ? "跟随" : "手动";
+  }
+  async function selectSn(sn, openDetail){
+    sn = String(sn || "");
+    if(!sn) return;
+    state.selectedSn = sn;
+    state.detailLoadingSn = sn;
+    state.detailErrorSn = "";
+    state.detailError = "";
+    state.loading.detail = true;
+    renderList();
+    renderDetail();
+    renderMap();
+    if(openDetail) setPanel("detail");
+    setMapLoading(true, "轨迹加载中", "正在读取目标详情");
+    try{
+      var data = await fetchJson("/api/drones/get?sn=" + encodeURIComponent(sn));
+      if(data && data.item) state.details[sn] = data.item;
+      state.tracks[sn] = {track_count:Number(data.track_count || 0)};
+      drawTracks(sn, data);
+    }catch(e){
+      state.detailErrorSn = sn;
+      state.detailError = String(e && e.message ? e.message : e);
+    }finally{
+      state.loading.detail = false;
+      state.detailLoadingSn = "";
+      setMapLoading(false);
+      renderDetail();
+    }
+  }
+  function onData(data){
+    state.hasData = true;
+    state.loading.summary = false;
+    state.loading.list = false;
+    state.loading.logs = false;
+    state.meta = (data && data.meta) || {};
+    syncMapApiRisk();
+    applyTileLayer();
+    state.rows = Array.isArray(data && data.drones) ? data.drones.slice() : [];
+    state.mapRows = Array.isArray(data && data.map_drones) ? data.map_drones.slice() : [];
+    state.logs = Array.isArray(data && data.logs) ? data.logs.slice() : [];
+    renderSummary(data || {});
+    renderList();
+    renderLogs();
+    if(state.panel === "detail") renderDetail();
+    renderMap();
+    setMapLoading(false);
+  }
+  function connect(){
+    clearTimeout(state.reconnectTimer);
+    if(!state.hasData){
+      state.loading.list = true;
+      state.loading.logs = true;
+      renderList();
+      renderLogs();
+      setMapLoading(true, "正在连接基站", "等待实时数据通道");
+    }
+    var proto = location.protocol === "https:" ? "wss://" : "ws://";
+    try{
+      state.ws = new WebSocket(proto + location.host + "/ws");
+    }catch(_e){
+      setWs(false, "重连");
+      state.reconnectTimer = setTimeout(connect, 2000);
+      return;
+    }
+    state.ws.onopen = function(){ setWs(true, "实时"); };
+    state.ws.onclose = function(){
+      setWs(false, "重连");
+      if(!state.hasData){
+        state.loading.list = true;
+        state.loading.logs = true;
+        renderList();
+        renderLogs();
+        setMapLoading(true, "正在重连基站", "等待 WebSocket 恢复");
+      }
+      state.reconnectTimer = setTimeout(connect, 2000);
+    };
+    state.ws.onerror = function(){ try{ state.ws.close(); }catch(_e){} };
+    state.ws.onmessage = function(ev){
+      try{ onData(JSON.parse(ev.data)); }catch(_e){}
+    };
+  }
+  function applyTheme(){
+    try{
+      var value = localStorage.getItem("rid_ui_theme");
+      if(value === "light" || value === "dark") document.body.classList.add("theme-" + value);
+    }catch(_e){}
+  }
+  function bindEvents(){
+    qsa(".nav-button").forEach(function(btn){
+      btn.addEventListener("click", function(){ setPanel(btn.getAttribute("data-panel")); });
+    });
+    qsa("[data-filter]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        state.filter = btn.getAttribute("data-filter") || "all";
+        qsa("[data-filter]").forEach(function(x){ x.classList.toggle("active", x === btn); });
+        renderList();
+      });
+    });
+    qs("target-list").addEventListener("click", function(ev){
+      var card = ev.target.closest("[data-sn]");
+      if(card) selectSn(card.getAttribute("data-sn"), true);
+    });
+    qs("search").addEventListener("input", renderList);
+    qs("btn-clear-search").addEventListener("click", function(){
+      qs("search").value = "";
+      renderList();
+    });
+    qs("btn-follow").addEventListener("click", function(){
+      state.follow = !state.follow;
+      updateFollowUi();
+      if(state.follow) fitMap(true);
+    });
+    qs("btn-fit").addEventListener("click", function(){
+      state.follow = true;
+      updateFollowUi();
+      fitMap(true);
+    });
+    qs("btn-copy-sn").addEventListener("click", async function(){
+      if(!state.selectedSn) return;
+      try{ await navigator.clipboard.writeText(state.selectedSn); }catch(_e){}
+    });
+    qs("btn-desktop").addEventListener("click", function(){ location.href = "/"; });
+    qs("btn-log-bottom").addEventListener("click", function(){
+      var box = qs("log-list");
+      box.scrollTop = box.scrollHeight;
+    });
+    window.addEventListener("resize", function(){
+      if(map) setTimeout(function(){ map.invalidateSize(false); }, 80);
+    });
+    if(window.visualViewport){
+      try{
+        window.visualViewport.addEventListener("resize", function(){
+          if(map) setTimeout(function(){ map.invalidateSize(false); }, 80);
+        });
+      }catch(_e){}
+    }
+  }
+
+  applyTheme();
+  bindEvents();
+  updateFollowUi();
+  ensureMap();
+  connect();
+})();
+</script>
+</body>
+</html>

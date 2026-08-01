@@ -18,7 +18,7 @@
     "rssi_delta": 3,
     "change_on_rssi": false,
     "change_on_payload": false,
-    "model_map": "rid_models.json",
+    "model_map": "rid_model.json",
     "history_file": "rid_storage.db",
     "no_tui": true,
     "debug": false
@@ -53,6 +53,10 @@
     "base_zoom": 13,
     "heading_ref_deg": 0.0,
     "map_auto_center_idle_sec": 20,
+    "map_tile_url": "",
+    "map_tile_subdomains": "",
+    "map_tile_attribution": "",
+    "map_tile_max_native_zoom": 18,
     "alarm_zone": {
       "enabled": false,
       "lat1": null,
@@ -100,7 +104,7 @@
   },
   "model_update": {
     "enabled": true,
-    "url": "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
+    "url": "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_model.json"
   },
   "config_update": {
     "enabled": false,

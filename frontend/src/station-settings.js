@@ -1868,6 +1868,10 @@ function collectVisualPayload(){
       base_zoom: n('cfg-base-zoom'),
       heading_ref_deg: n('cfg-heading-ref'),
       map_auto_center_idle_sec: n('cfg-map-idle'),
+      map_tile_url: v('cfg-map-tile-url'),
+      map_tile_subdomains: v('cfg-map-subdomains'),
+      map_tile_attribution: v('cfg-map-attribution'),
+      map_tile_max_native_zoom: n('cfg-map-native-zoom'),
       access_list_enabled: check('cfg-web-access-enabled'),
       access_list_mode: v('cfg-web-access-mode') || 'allow',
       access_list: splitLines(qs('cfg-web-access-list').value || ''),
@@ -1987,7 +1991,11 @@ function visualPayloadSections(payload){
       base_lon: ((payload.web || {}).base_lon),
       base_zoom: ((payload.web || {}).base_zoom),
       heading_ref_deg: ((payload.web || {}).heading_ref_deg),
-      map_auto_center_idle_sec: ((payload.web || {}).map_auto_center_idle_sec)
+      map_auto_center_idle_sec: ((payload.web || {}).map_auto_center_idle_sec),
+      map_tile_url: ((payload.web || {}).map_tile_url),
+      map_tile_subdomains: ((payload.web || {}).map_tile_subdomains),
+      map_tile_attribution: ((payload.web || {}).map_tile_attribution),
+      map_tile_max_native_zoom: ((payload.web || {}).map_tile_max_native_zoom)
     },
     zones: {alarm_zones: ((payload.web || {}).alarm_zones || [])},
     access: {
@@ -2922,6 +2930,10 @@ async function loadVisual(opts){
   qs('cfg-base-zoom').value = String(w.base_zoom ?? '');
   qs('cfg-heading-ref').value = String(w.heading_ref_deg ?? '');
   qs('cfg-map-idle').value = String(w.map_auto_center_idle_sec ?? '');
+  qs('cfg-map-tile-url').value = String(w.map_tile_url || '');
+  qs('cfg-map-subdomains').value = String(w.map_tile_subdomains || '');
+  qs('cfg-map-attribution').value = String(w.map_tile_attribution || '');
+  qs('cfg-map-native-zoom').value = String(w.map_tile_max_native_zoom ?? 18);
   qs('cfg-web-access-enabled').checked = !!w.access_list_enabled;
   qs('cfg-web-access-mode').value = String(w.access_list_mode || 'allow');
   qs('cfg-web-access-list').value = Array.isArray(w.access_list) ? w.access_list.join('\n') : '';
@@ -3027,6 +3039,13 @@ async function testVisual(){
   if(data.reload_msg) msg += '\n' + String(data.reload_msg);
   setStatus('status-visual', msg, false);
   showNotice('测试通过，当前运行配置已回滚。', 'ok', 3000);
+}
+async function testWeComNotification(){
+  const payload = collectVisualPayload();
+  const data = await postJson('/api/settings/notify/test', payload);
+  var msg = String(data.resp || '企业微信测试通知已发送。');
+  setStatus('status-visual', msg, false);
+  showNotice('企业微信测试通知已发送。', 'ok', 3000);
 }
 async function saveRawLegacyUnused(){
   return saveRaw();
@@ -3288,6 +3307,14 @@ function bindAccessActions(){
     rows.push({index:null, name:'新通道', enabled:true, key:''});
     renderHookRows(rows);
     updateVisualDraftState();
+  });
+  on('btn-notify-test', 'click', async function(){
+    try{
+      await withSettingsAsyncTask('企业微信通知', '正在发送测试通知...', function(){ return testWeComNotification(); });
+    }catch(e){
+      setStatus('status-visual', '测试通知发送失败: ' + (e.message || e), true);
+      showNotice(e.message || e, 'warn', 4200);
+    }
   });
 }
 function bindSystemServiceActions(){

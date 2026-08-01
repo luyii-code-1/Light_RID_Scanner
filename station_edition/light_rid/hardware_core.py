@@ -273,6 +273,51 @@ def send_test_notification_from_config(cfg: dict | None = None) -> tuple[bool, s
         results.append(f"{item.get('name') or '通道'}: {'OK' if ok else 'FAIL'} {resp}")
     return (ok_count > 0), " | ".join(results)
 
+
+def send_test_notification_from_visual_payload(body: dict | None = None) -> tuple[bool, str]:
+    """Send a WeCom test using the unsaved visual-settings draft."""
+    if not isinstance(body, dict) or not body:
+        return send_test_notification_from_config()
+    notify_cfg = dict(_normalize_notify_cfg(APP_CONFIG))
+    draft = body.get("notify") if isinstance(body.get("notify"), dict) else {}
+    if "send_timeout_sec" in draft:
+        try:
+            notify_cfg["send_timeout_sec"] = max(2, int(draft.get("send_timeout_sec")))
+        except Exception:
+            return False, "invalid send_timeout_sec"
+    hooks_payload = draft.get("wecom_webhooks")
+    if isinstance(hooks_payload, list):
+        existing_hooks = notify_cfg.get("wecom_webhooks") or []
+        hooks_next: list[dict] = []
+        for idx, item in enumerate(hooks_payload):
+            if not isinstance(item, dict):
+                continue
+            cur_key = ""
+            try:
+                src_idx = int(item.get("index"))
+                if 0 <= src_idx < len(existing_hooks):
+                    cur_key = str(existing_hooks[src_idx].get("key") or "").strip()
+            except Exception:
+                cur_key = ""
+            key = str(item.get("key") or "").strip()
+            if key in ("", "********", "__KEEP__"):
+                key = cur_key
+            if not key:
+                continue
+            hooks_next.append({
+                "name": str(item.get("name") or f"通道 {idx + 1}").strip() or f"通道 {idx + 1}",
+                "enabled": bool(item.get("enabled", True)),
+                "key": key,
+            })
+        notify_cfg["wecom_webhooks"] = _normalize_wecom_webhooks(hooks_next, "")
+        notify_cfg["wecom_webhook_key"] = str(
+            (notify_cfg["wecom_webhooks"][0]["key"] if notify_cfg["wecom_webhooks"] else "") or ""
+        )
+    # A test should be available before the global notification switch is saved.
+    # Individual channel enable flags are still respected.
+    notify_cfg["enabled"] = True
+    return send_test_notification_from_config({"notify": notify_cfg})
+
 def _mac_oui_key(mac: str | None) -> str:
     if not mac:
         return ""
@@ -645,14 +690,6 @@ def ensure_model_map_file(path: str) -> None:
         return
     except Exception as e:
         errors.append("embedded=" + str(e))
-    legacy = os.path.join(os.getcwd(), MODEL_MAP_LEGACY_FILE)
-    if os.path.exists(legacy):
-        try:
-            shutil.copy2(legacy, path)
-            _log(f"[INFO] model map restored from legacy file: {legacy}")
-            return
-        except Exception as e:
-            errors.append("legacy=" + str(e))
     _log("[WARN] model map bootstrap failed: " + "; ".join(errors))
 
 def _model_map_target_path() -> str:
@@ -2356,4 +2393,3 @@ def channel_hopper(iface, ch2g, ch5g, dw2, dw5, settle_ms, hit_ms, cap_ms):
             current_channel = ch
             if settle: time.sleep(settle)
             do_hold(); time.sleep(dw5)
-

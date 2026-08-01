@@ -264,7 +264,7 @@ def build_binary(
         data_arg("station_edition/light_rid", "station_edition/light_rid"),
         "--add-data",
         data_arg(
-            "station_edition/light_rid/resources/rid-models.json",
+            "station_edition/light_rid/resources/rid_model.json",
             "station_edition/light_rid/resources",
         ),
         "--add-data",

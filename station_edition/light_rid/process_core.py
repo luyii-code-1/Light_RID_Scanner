@@ -1893,7 +1893,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
     ssid_sn = mac_to_ssid_sn.get(src_mac,{}).get("sn")
     mac_key = f"MAC:{src_mac}"
 
-    if firmware_type_key != "old" and basic and basic.get("uas_id"):
+    if basic and basic.get("uas_id"):
         sn, it = basic["uas_id"].strip(), basic.get("id_type","unknown")
     elif ssid_sn:
         sn, it = ssid_sn, "SSID"
@@ -2306,6 +2306,169 @@ def _ws_settings_runtime_payload() -> dict:
         "workflow": _history_reparse_workflow_snapshot(),
     }
 
+_HOME_LIST_DRONE_FIELDS = (
+    "sn",
+    "sn_src",
+    "uas_id",
+    "scan_type",
+    "firmware_type",
+    "firmware_type_key",
+    "model",
+    "lost",
+    "archived",
+    "mac",
+    "id_type",
+    "ch",
+    "ch_assumed",
+    "lat",
+    "lon",
+    "alt",
+    "spd",
+    "vspd",
+    "pilot_lat",
+    "pilot_lon",
+    "pilot_alt",
+    "pilot_loc_type",
+    "pilot_loc_type_text",
+    "home_lat",
+    "home_lon",
+    "aux_lat",
+    "aux_lon",
+    "pos_a_lat",
+    "pos_a_lon",
+    "pos_b_lat",
+    "pos_b_lon",
+    "rssi",
+    "pkts",
+    "dir",
+    "ssid",
+    "capture_type",
+    "capture_time",
+    "last_pkt_time",
+    "scan_type_key",
+    "age",
+    "age_text",
+    "online_dur",
+    "first_seen",
+    "last_seen",
+)
+
+def _home_list_drone(row: dict) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    return {key: row.get(key) for key in _HOME_LIST_DRONE_FIELDS if key in row}
+
+def _home_workflow_summary(state: dict | None) -> dict:
+    if not isinstance(state, dict):
+        return {}
+    keys = (
+        "task_id",
+        "kind",
+        "title",
+        "status",
+        "running",
+        "limit",
+        "total",
+        "completed",
+        "decoded",
+        "skipped",
+        "failed",
+        "migrated",
+        "saved",
+        "aircraft_total",
+        "updated_aircraft",
+        "enqueued",
+        "producer_done",
+        "batch_size",
+        "batches_total",
+        "active_batch",
+        "active_batch_size",
+        "message",
+        "last_error",
+        "worker_total",
+        "worker_busy",
+        "worker_idle",
+        "pending",
+        "batches_pending",
+        "queue_depth",
+        "progress_pct",
+        "elapsed_sec",
+        "rate_per_sec",
+        "decoded_rate_per_sec",
+        "eta_sec",
+    )
+    out = {key: state.get(key) for key in keys if key in state}
+    errors = state.get("errors")
+    if isinstance(errors, list) and errors:
+        out["errors_count"] = len(errors)
+    return out
+
+def _home_runtime_security_summary(state: dict | None) -> dict:
+    if not isinstance(state, dict):
+        return {}
+    keys = (
+        "ok",
+        "current_uid",
+        "current_user",
+        "running_as_root",
+        "has_network_capabilities",
+        "risk",
+        "level",
+        "message",
+        "dedicated_user",
+        "dedicated_user_exists",
+        "service_user",
+        "service_uses_dedicated_user",
+        "sudo_available",
+        "can_elevate",
+        "password_saved",
+    )
+    return {key: state.get(key) for key in keys if key in state}
+
+def _home_meta_summary(meta: dict) -> dict:
+    if not isinstance(meta, dict):
+        return {}
+    keys = (
+        "dji_lookup_url",
+        "allow_restart",
+        "restart_args_current",
+        "restart_args_saved",
+        "base_name",
+        "base_lat",
+        "base_lon",
+        "base_zoom",
+        "heading_ref_deg",
+        "map_auto_center_idle_sec",
+        "map_tile_url",
+        "map_tile_subdomains",
+        "map_tile_attribution",
+        "map_tile_max_native_zoom",
+        "map_api_configured",
+        "map_default_legal_notice",
+        "config_path",
+        "iface_selected",
+        "scan_wifi_fast",
+        "wifi_fast_supported",
+        "wifi_fast_msg",
+        "sniff_state",
+        "sniff_msg",
+        "sniff_iface",
+        "sniff_idle_sec",
+        "sniff_last_pkt",
+        "sniff_last_err_at",
+        "oobe",
+        "alert_zone",
+        "alert_zones",
+        "settings_path",
+    )
+    out = {key: meta.get(key) for key in keys if key in meta}
+    out["runtime_security"] = _home_runtime_security_summary(meta.get("runtime_security"))
+    out["workflow"] = _home_workflow_summary(meta.get("workflow"))
+    app_update = meta.get("app_update")
+    if isinstance(app_update, dict) and app_update.get("completion_notice"):
+        out["app_update"] = {"completion_notice": app_update.get("completion_notice")}
+    return out
+
 def _ws_push_loop() -> None:
     """Push latest state JSON to home/settings websocket clients."""
     import json as _json
@@ -2335,7 +2498,7 @@ def _ws_push_loop() -> None:
                     client["next_send_at"] = now + 5.0
                 else:
                     if home_frame is None:
-                        home_snapshot = _state_snapshot()
+                        home_snapshot = _state_snapshot(lightweight=True)
                         logs_seq = home_snapshot.get("logs_seq")
                         aps_seq = home_snapshot.get("aps_seq")
                         if last_home_logs_seq == logs_seq:
@@ -2378,7 +2541,7 @@ def _fmt_wall_ts(ts: float | None) -> str:
     except Exception:
         return "-"
 
-def _state_snapshot() -> dict:
+def _state_snapshot(lightweight: bool = False) -> dict:
     """Return a JSON-serializable snapshot of current runtime state."""
     now = time.monotonic()
     now_wall = time.time()
@@ -2439,10 +2602,59 @@ def _state_snapshot() -> dict:
             ch = cur.get("last_ch", hist.get("last_ch")) or 0
             ch_assumed = bool(cur.get("ch_assumed", hist.get("ch_assumed")))
             cap_wall_ts = cur.get("last_capture_wall_ts", hist.get("last_capture_wall_ts"))
+            if lightweight:
+                drone = {
+                    "sn": sn,
+                    "sn_src": sn_src,
+                    "uas_id": _uas_id_clean(cur.get("uas_id") or hist.get("uas_id","")),
+                    "scan_type": scan_type,
+                    "firmware_type": firmware_type,
+                    "firmware_type_key": firmware_type_key,
+                    "model": model_name,
+                    "lost": lost,
+                    "archived": sn not in live_by_sn,
+                    "mac": cur.get("src_mac", hist.get("src_mac","")),
+                    "id_type": id_src or "-",
+                    "ch": f"{'~' if ch_assumed else ''}{ch}" if ch else "?",
+                    "ch_assumed": ch_assumed,
+                    "lat": cur.get("lat", hist.get("lat")),
+                    "lon": cur.get("lon", hist.get("lon")),
+                    "alt": cur.get("alt", hist.get("alt")),
+                    "spd": cur.get("speed", hist.get("speed")),
+                    "vspd": cur.get("vspeed", hist.get("vspeed")),
+                    "pilot_lat": cur.get("pilot_lat", hist.get("pilot_lat")),
+                    "pilot_lon": cur.get("pilot_lon", hist.get("pilot_lon")),
+                    "pilot_alt": cur.get("pilot_alt", hist.get("pilot_alt")),
+                    "pilot_loc_type": cur.get("pilot_loc_type", hist.get("pilot_loc_type")),
+                    "pilot_loc_type_text": cur.get("pilot_loc_type_text", hist.get("pilot_loc_type_text","")) or "",
+                    "home_lat": cur.get("home_lat", hist.get("home_lat")),
+                    "home_lon": cur.get("home_lon", hist.get("home_lon")),
+                    "aux_lat": cur.get("aux_lat", hist.get("aux_lat")),
+                    "aux_lon": cur.get("aux_lon", hist.get("aux_lon")),
+                    "pos_a_lat": cur.get("pos_a_lat", hist.get("pos_a_lat")),
+                    "pos_a_lon": cur.get("pos_a_lon", hist.get("pos_a_lon")),
+                    "pos_b_lat": cur.get("pos_b_lat", hist.get("pos_b_lat")),
+                    "pos_b_lon": cur.get("pos_b_lon", hist.get("pos_b_lon")),
+                    "rssi": cur.get("rssi", hist.get("rssi")),
+                    "pkts": hist.get("pkt_count_total", cur.get("pkt_count",0)),
+                    "dir": cur.get("move_dir", hist.get("move_dir")) or "-",
+                    "ssid": cur.get("ssid", hist.get("ssid","")) or "",
+                    "capture_type": cur.get("capture_type", hist.get("capture_type","")) or "",
+                    "capture_time": _fmt_wall_ts(cap_wall_ts),
+                    "last_pkt_time": _fmt_wall_ts(cap_wall_ts),
+                    "scan_type_key": scan_type_key,
+                    "age": round(age),
+                    "age_text": _fmt_age_compact(age),
+                    "online_dur": (None if online_dur is None else int(round(float(online_dur)))),
+                    "first_seen": _fmt_wall_ts(hist.get("first_seen_wall_ts", cur.get("first_seen_wall_ts"))),
+                    "last_seen": _fmt_wall_ts(hist.get("last_seen_wall_ts", cur.get("last_seen_wall_ts"))),
+                }
+                drones.append(_home_list_drone(drone))
+                continue
             track_store = _sanitize_tracks(cur.get("tracks", hist.get("tracks", cur.get("track", hist.get("track", [])))) or [])
             aircraft_track_count = _track_display_count(track_store, "aircraft", firmware_type=firmware_type_key)
             operator_track_count = _track_display_count(track_store, "operator", firmware_type=firmware_type_key)
-            drones.append({
+            drone = {
                 "sn": sn,
                 "sn_src": sn_src,
                 "uas_id": _uas_id_clean(cur.get("uas_id") or hist.get("uas_id","")),
@@ -2528,29 +2740,22 @@ def _state_snapshot() -> dict:
                 "aircraft_track_count": aircraft_track_count,
                 "operator_track_count": operator_track_count,
                 "track_updated": _fmt_wall_ts(hist.get("track_updated_wall_ts", cur.get("track_updated_wall_ts"))),
-            })
+            }
+            drones.append(drone)
         drones.sort(key=lambda d: (d["lost"], d.get("archived", False), d["age"], d["sn"]))
         map_drones = [d for d in drones if not d.get("archived")]
-    with log_lock:
-        logs = list(ap_buf)[-80:]
-        logs_seq = ap_seq
-    aps, aps_seq, aps_total = _ap_snapshot()
     sniff_meta = _sniff_health_meta(now, now_wall)
     basic_cfg = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
     if not isinstance(basic_cfg, dict):
         basic_cfg = {}
-    return {
+    map_tile_url = str(WEB_CFG.get("map_tile_url") or "").strip()
+    payload = {
         "ts": time.strftime("%H:%M:%S"),
         "server_wall_ms": int(now_wall * 1000.0),
         "ch": f"ch{current_channel}" if current_channel else "ch?",
         "drones": drones,
         "map_drones": map_drones,
-        "logs": logs,
-        "logs_seq": logs_seq,
-        "aps": aps,
-        "aps_seq": aps_seq,
-        "aps_total": aps_total,
-        "notifications": _notification_payload(200),
+        "lightweight": bool(lightweight),
         "meta": {
             "dji_lookup_url": str(WEB_CFG.get("dji_lookup_url") or ""),
             "allow_restart": bool(WEB_CFG.get("allow_restart", True)),
@@ -2562,6 +2767,12 @@ def _state_snapshot() -> dict:
             "base_zoom": WEB_CFG.get("base_zoom"),
             "heading_ref_deg": WEB_CFG.get("heading_ref_deg"),
             "map_auto_center_idle_sec": WEB_CFG.get("map_auto_center_idle_sec"),
+            "map_tile_url": map_tile_url,
+            "map_tile_subdomains": str(WEB_CFG.get("map_tile_subdomains") or ""),
+            "map_tile_attribution": str(WEB_CFG.get("map_tile_attribution") or ""),
+            "map_tile_max_native_zoom": WEB_CFG.get("map_tile_max_native_zoom"),
+            "map_api_configured": bool(map_tile_url),
+            "map_default_legal_notice": not bool(map_tile_url),
             "config_path": APP_CONFIG_PATH or "",
             "iface_selected": (None if basic_cfg.get("iface") in (None, "") else str(basic_cfg.get("iface"))),
             "scan_wifi_fast": bool(basic_cfg.get("scan_wifi_fast")),
@@ -2582,6 +2793,23 @@ def _state_snapshot() -> dict:
             "settings_path": "/settings",
         },
     }
+    if lightweight:
+        payload.pop("map_drones", None)
+        payload["meta"] = _home_meta_summary(payload.get("meta") or {})
+    if not lightweight:
+        with log_lock:
+            logs = list(ap_buf)[-80:]
+            logs_seq = ap_seq
+        aps, aps_seq, aps_total = _ap_snapshot()
+        payload.update({
+            "logs": logs,
+            "logs_seq": logs_seq,
+            "aps": aps,
+            "aps_seq": aps_seq,
+            "aps_total": aps_total,
+            "notifications": _notification_payload(200),
+        })
+    return payload
 
 def _api_iso_now(ts: float | None = None) -> str:
     try:
@@ -4070,6 +4298,9 @@ def _api_endpoint_index() -> list[dict]:
         {"method": "GET", "path": "/api/v1/aps", "desc": "Realtime AP list"},
         {"method": "GET", "path": "/api/v1/metrics?window=12h|24h|7d", "desc": "Host metrics for token API clients"},
         {"method": "GET", "path": "/api/v1/logs?type=event|scan|ap&limit=200", "desc": "Logs"},
+        {"method": "GET", "path": "/api/simulation/status", "desc": "Ephemeral simulation status (page session)"},
+        {"method": "POST", "path": "/api/simulation/start", "desc": "Start ephemeral target simulation (page session)"},
+        {"method": "POST", "path": "/api/simulation/stop", "desc": "Stop and clear simulated targets (page session)"},
         {"method": "GET", "path": "/api/settings/export/settings", "desc": "Export settings file"},
         {"method": "GET", "path": "/api/settings/export/scan-data", "desc": "Export scan data"},
         {"method": "POST", "path": "/api/settings/import/settings", "desc": "Import settings file"},

@@ -124,8 +124,7 @@ HISTORY_STORE_DEFAULT = "rid_storage.db"
 HISTORY_STORE_LEGACY_DEFAULT = "history-cache.json"
 HISTORY_STORE_LEGACY_ALT_DEFAULT = "rid_history_cache.json"
 HISTORY_RAW_PACKET_SNAPSHOT_LIMIT = 3
-MODEL_MAP_FILE_DEFAULT = "rid-models.json"
-MODEL_MAP_LEGACY_FILE = "rid_models.json"
+MODEL_MAP_FILE_DEFAULT = "rid_model.json"
 SYSTEMD_SERVICE_NAME = "light-rid-scanner.service"
 SYSTEMD_SERVICE_PATH = "/etc/systemd/system/" + SYSTEMD_SERVICE_NAME
 IW_PACKAGE_NAME = "iw"
@@ -149,7 +148,7 @@ EULA_URL = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/ref
 OUI_DB_DEFAULT = "oui.txt"
 OUI_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 GITHUB_PROXY_PREFIX = "https://gh-proxy.org/"
-RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_models.json"
+RID_MODELS_UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/refs/heads/main/rid_model.json"
 APP_UPDATE_COMMIT_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/commits/main"
 APP_UPDATE_RELEASE_URL_DEFAULT = "https://api.github.com/repos/luyii-code-1/Light_RID_Scanner/releases/latest"
 APP_UPDATE_MIRROR_OPTIONS = [
@@ -309,6 +308,10 @@ WEB_CFG: dict = {
     "base_zoom": 13,
     "heading_ref_deg": 0.0,
     "map_auto_center_idle_sec": 20,
+    "map_tile_url": "",
+    "map_tile_subdomains": "",
+    "map_tile_attribution": "",
+    "map_tile_max_native_zoom": 18,
     "alarm_zones": [],
     "access_list_enabled": False,
     "access_list_mode": "allow",
@@ -1642,17 +1645,38 @@ def _history_storage_fetch_latest_parsed_packets(path: str | None = None) -> dic
         out[sn] = {"sn": sn, "raw": item, "parsed": parsed}
     return out
 
-def _history_storage_fetch_parsed_packets_by_sn(path: str | None = None) -> dict[str, list[dict]]:
+def _history_storage_fetch_parsed_packets_by_sn(path: str | None = None, per_sn_limit: int | None = HISTORY_RAW_PACKET_SNAPSHOT_LIMIT) -> dict[str, list[dict]]:
     db_path = _history_storage_init(path)
     conn = _history_db_conn(db_path)
-    sql = (
-        "SELECT id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format "
-        "FROM raw_packets "
-        "WHERE decoded_json IS NOT NULL AND decoded_json <> '' "
-        "ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
-    )
+    cols = "id, sn, capture_wall_ts, capture_time_text, capture_type, firmware_type, uas_id, payload, hex_text, decoded_json, parse_mode, parse_format"
+    try:
+        limit = int(per_sn_limit or 0)
+    except Exception:
+        limit = 0
     with history_db_lock:
-        rows = conn.execute(sql).fetchall()
+        if limit > 0:
+            sql = (
+                f"SELECT {cols} FROM ("
+                f"SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY sn ORDER BY capture_wall_ts DESC, id DESC) AS rn "
+                "FROM raw_packets "
+                "WHERE decoded_json IS NOT NULL AND decoded_json <> ''"
+                ") WHERE rn <= ? "
+                "ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
+            )
+            try:
+                rows = conn.execute(sql, (max(1, limit),)).fetchall()
+            except sqlite3.Error:
+                rows = conn.execute(
+                    f"SELECT {cols} FROM raw_packets "
+                    "WHERE decoded_json IS NOT NULL AND decoded_json <> '' "
+                    "ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
+                ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {cols} FROM raw_packets "
+                "WHERE decoded_json IS NOT NULL AND decoded_json <> '' "
+                "ORDER BY sn ASC, capture_wall_ts ASC, id ASC"
+            ).fetchall()
     out: dict[str, list[dict]] = {}
     for row in rows:
         sn = str((row["sn"] if isinstance(row, sqlite3.Row) else row[1]) or "").strip()
@@ -2896,6 +2920,10 @@ def default_app_config() -> dict:
             "base_zoom": 13,
             "heading_ref_deg": 0.0,
             "map_auto_center_idle_sec": 20,
+            "map_tile_url": "",
+            "map_tile_subdomains": "",
+            "map_tile_attribution": "",
+            "map_tile_max_native_zoom": 18,
             "alarm_zones": [],
             "access_list_enabled": False,
             "access_list_mode": "allow",
@@ -3574,6 +3602,10 @@ def _settings_view_payload() -> dict:
                 "base_zoom": web_norm.get("base_zoom", 13),
                 "heading_ref_deg": web_norm.get("heading_ref_deg", 0.0),
                 "map_auto_center_idle_sec": web_norm.get("map_auto_center_idle_sec", 20),
+                "map_tile_url": str(web_norm.get("map_tile_url") or ""),
+                "map_tile_subdomains": str(web_norm.get("map_tile_subdomains") or ""),
+                "map_tile_attribution": str(web_norm.get("map_tile_attribution") or ""),
+                "map_tile_max_native_zoom": web_norm.get("map_tile_max_native_zoom", 18),
                 "access_list_enabled": bool(web_norm.get("access_list_enabled")),
                 "access_list_mode": str(web_norm.get("access_list_mode") or "allow"),
                 "access_list": list(web_norm.get("access_list") or []),
@@ -3759,9 +3791,29 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
         notify["wecom_webhooks"] = _normalize_wecom_webhooks(notify.get("wecom_webhooks"), notify.get("wecom_webhook_key") or "")
         notify["wecom_webhook_key"] = str((notify["wecom_webhooks"][0]["key"] if notify["wecom_webhooks"] else notify.get("wecom_webhook_key") or "") or "")
 
-    for k in ("dji_lookup_url", "base_name"):
+    for k in ("dji_lookup_url", "base_name", "map_tile_attribution"):
         if k in p_web:
             web[k] = str(p_web.get(k) or "").strip()
+    if "map_tile_url" in p_web:
+        tile_url = str(p_web.get("map_tile_url") or "").strip()
+        if tile_url:
+            has_tokens = all(token in tile_url for token in ("{x}", "{y}", "{z}"))
+            parsed = urllib.parse.urlparse(tile_url)
+            local_path = tile_url.startswith("/")
+            remote_url = parsed.scheme in ("http", "https") and bool(parsed.netloc)
+            if not has_tokens or not (local_path or remote_url):
+                return {"ok": False, "error": "map_tile_url must be an http(s) or local tile template containing {z}, {x}, and {y}"}
+        web["map_tile_url"] = tile_url
+    if "map_tile_subdomains" in p_web:
+        raw_subdomains = p_web.get("map_tile_subdomains")
+        if isinstance(raw_subdomains, list):
+            parts = [str(x or "").strip() for x in raw_subdomains]
+        else:
+            parts = re.split(r"[\s,]+", str(raw_subdomains or "").strip())
+        parts = [x for x in parts if x]
+        if any(len(x) > 32 for x in parts) or len(parts) > 16:
+            return {"ok": False, "error": "invalid map_tile_subdomains"}
+        web["map_tile_subdomains"] = ",".join(parts)
     for k, lo, hi in (("base_lat", -90.0, 90.0), ("base_lon", -180.0, 180.0)):
         if k in p_web:
             try:
@@ -3771,7 +3823,7 @@ def _build_visual_settings_candidate(body: dict | None) -> tuple[dict | None, st
                 return {"ok": False, "error": f"invalid {k}"}
             if web[k] is not None and not (lo <= float(web[k]) <= hi):
                 return {"ok": False, "error": f"{k} out of range"}
-    for k, mn, mx in (("base_zoom", 3, 30), ("map_auto_center_idle_sec", 5, 600)):
+    for k, mn, mx in (("base_zoom", 3, 30), ("map_auto_center_idle_sec", 5, 600), ("map_tile_max_native_zoom", 1, 30)):
         if k in p_web:
             try:
                 web[k] = max(mn, min(mx, int(p_web.get(k))))
@@ -4126,6 +4178,23 @@ def _normalize_web_cfg(cfg: dict | None) -> dict:
     base["sn_source_rid"] = str(base.get("sn_source_rid") or "RID包").strip() or "RID包"
     base["sn_source_ssid"] = str(base.get("sn_source_ssid") or "SSID").strip() or "SSID"
     base["base_name"] = str(base.get("base_name") or "基站").strip() or "基站"
+    tile_url = str(base.get("map_tile_url") or "").strip()
+    if tile_url:
+        parsed = urllib.parse.urlparse(tile_url)
+        has_tokens = all(token in tile_url for token in ("{x}", "{y}", "{z}"))
+        local_path = tile_url.startswith("/")
+        remote_url = parsed.scheme in ("http", "https") and bool(parsed.netloc)
+        if not has_tokens or not (local_path or remote_url):
+            tile_url = ""
+    base["map_tile_url"] = tile_url
+    raw_subdomains = base.get("map_tile_subdomains")
+    if isinstance(raw_subdomains, list):
+        subdomain_parts = [str(x or "").strip() for x in raw_subdomains]
+    else:
+        subdomain_parts = re.split(r"[\s,]+", str(raw_subdomains or "").strip())
+    subdomain_parts = [x for x in subdomain_parts if x and len(x) <= 32][:16]
+    base["map_tile_subdomains"] = ",".join(subdomain_parts)
+    base["map_tile_attribution"] = str(base.get("map_tile_attribution") or "").strip()[:240]
     try:
         lat_raw = base.get("base_lat")
         base["base_lat"] = None if lat_raw in (None, "") else float(lat_raw)
@@ -4158,6 +4227,11 @@ def _normalize_web_cfg(cfg: dict | None) -> dict:
     except Exception:
         idle_sec = 20
     base["map_auto_center_idle_sec"] = max(5, min(600, idle_sec))
+    try:
+        tile_native_zoom = int(base.get("map_tile_max_native_zoom") if base.get("map_tile_max_native_zoom") is not None else 18)
+    except Exception:
+        tile_native_zoom = 18
+    base["map_tile_max_native_zoom"] = max(1, min(30, tile_native_zoom))
     base["access_list_enabled"] = bool(base.get("access_list_enabled"))
     mode = str(base.get("access_list_mode") or "allow").strip().lower()
     base["access_list_mode"] = "deny" if mode in ("deny", "block", "black", "blacklist") else "allow"
@@ -5200,4 +5274,3 @@ def reload_runtime_config(cfg: dict | None) -> tuple[bool, str]:
 
 def _wecom_webhook_url(key: str) -> str:
     return f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"
-

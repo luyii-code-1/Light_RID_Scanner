@@ -1,0 +1,71 @@
+name: Rust Station
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: rust-station-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v3
+        with:
+          workspaces: station_edition_rust
+
+      - name: Format
+        run: cargo fmt --manifest-path station_edition_rust/Cargo.toml --check
+
+      - name: Check
+        run: cargo check --manifest-path station_edition_rust/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --manifest-path station_edition_rust/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Clippy
+        run: cargo clippy --manifest-path station_edition_rust/Cargo.toml --target ${{ matrix.target }} -- -D warnings
+
+  build-linux-arm:
+    name: rust-station-${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v3
+        with:
+          workspaces: station_edition_rust
+
+      - name: Check
+        run: cargo check --manifest-path station_edition_rust/Cargo.toml --target ${{ matrix.target }}

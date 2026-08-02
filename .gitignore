@@ -57,6 +57,7 @@ tools/pi.local.json
 tools/__pycache__/
 plugins
 frontend/node_modules/
+station_edition_rust/target/
 # OS / editor
 .DS_Store
 Thumbs.db

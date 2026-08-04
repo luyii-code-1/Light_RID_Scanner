@@ -76,7 +76,11 @@ jobs:
           mkdir -p "$root/usr/bin" "$root/usr/share/light-rid" "$root/etc/init.d" "$root/etc/light-rid"
           install -m 0755 native_capture/target/mips-unknown-linux-musl/release/light-rid-capture "$root/usr/bin/light-rid-capture"
           cp -a station_edition "$root/usr/share/light-rid/"
-          cp rid_model.json rid_build_info.json "$root/usr/share/light-rid/"
+          cp rid_model.json "$root/usr/share/light-rid/"
+          cp EULA.md "$root/etc/light-rid/EULA.md"
+          printf '{"commit":"%s","tag":"","release_tag":"","build":1,"generated_at":"%s","dirty":false}\n' \
+            "$short_sha" "$(date -u '+%Y-%m-%d %H:%M:%S')" \
+            > "$root/usr/share/light-rid/rid_build_info.json"
           install -m 0755 openwrt/light-rid.init "$root/etc/init.d/light-rid"
           install -m 0644 openwrt/config.gl-ar750s.json "$root/etc/light-rid/config.json"
           tar -C "$root" -czf "release/${package}.tar.gz" .

@@ -17,6 +17,10 @@
   "auth": {
     "enabled": false
   },
+  "ap": {
+    "vendor_auto_download": false,
+    "vendor_db_file": "/etc/light-rid/oui.txt"
+  },
   "model_update": {
     "enabled": false
   },

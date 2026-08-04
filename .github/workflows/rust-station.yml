@@ -91,7 +91,7 @@ jobs:
         run: cross +nightly test -Z build-std --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl
 
       - name: Build static MIPS release
-        run: cross +nightly build -Z build-std --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl --release
+        run: cross +nightly build -Z build-std=std,panic_abort --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl --release
 
       - name: Verify target ELF
         shell: bash

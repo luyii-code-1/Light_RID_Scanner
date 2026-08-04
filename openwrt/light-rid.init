@@ -10,17 +10,28 @@ CAPTURE=/usr/bin/light-rid-capture
 CONFIG=/etc/light-rid/config.json
 
 prepare_monitor() {
-    if ! iw phy phy1 info >/dev/null 2>&1; then
-        wifi up radio1 >/dev/null 2>&1
-        retries=0
-        while ! iw phy phy1 info >/dev/null 2>&1; do
-            retries=$((retries + 1))
-            [ "$retries" -ge 12 ] && return 1
-            sleep 1
-        done
-    fi
+    wifi up radio1 >/dev/null 2>&1
+    retries=0
+    while ! iw phy phy1 info >/dev/null 2>&1; do
+        retries=$((retries + 1))
+        [ "$retries" -ge 12 ] && return 1
+        sleep 1
+    done
+    sleep 3
     wifi down radio1 >/dev/null 2>&1
-    sleep 1
+    retries=0
+    stable=0
+    while [ "$stable" -lt 2 ]; do
+        if iw dev wlan1 info >/dev/null 2>&1; then
+            iw dev wlan1 del >/dev/null 2>&1
+            stable=0
+        else
+            stable=$((stable + 1))
+        fi
+        retries=$((retries + 1))
+        [ "$retries" -ge 15 ] && return 1
+        sleep 1
+    done
     iw dev ridmon del >/dev/null 2>&1
     iw phy phy1 interface add ridmon type monitor || return 1
     ip link set ridmon up || return 1

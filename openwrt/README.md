@@ -52,7 +52,10 @@ Only one scanner instance can run at a time. `light-rid-run status` reports the
 device ID, installed build, free RAM/storage, process IDs, monitor channel,
 5GHz management AP, and web listener. Every package
 contains a SHA-256 manifest checked by `light-rid-install` and
-`light-rid-run check`.
+`light-rid-run check`. The mutable model database is protected by the outer
+package checksum during installation and then lives in `/etc/light-rid`; it is
+intentionally excluded from post-install code integrity checks for compatibility
+with older configurations that updated the bundled seed in place.
 
 Stop the current manual session before upgrading. If an SSH connection was
 interrupted and left an old process behind, recover without rebooting:

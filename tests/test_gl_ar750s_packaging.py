@@ -48,6 +48,7 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertIn("openwrt/light-rid-install", workflow)
         self.assertIn("openwrt/light-rid-upgrade", workflow)
         self.assertIn("package-manifest.sha256", workflow)
+        self.assertIn("! -path './usr/share/light-rid/rid_model.json'", workflow)
         self.assertIn("test ! -e \"$root/etc/light-rid/config.json\"", workflow)
         self.assertIn('"$root/etc/light-rid/EULA.md"', workflow)
         self.assertIn('"$root/etc/light-rid/rid_build_info.json"', workflow)

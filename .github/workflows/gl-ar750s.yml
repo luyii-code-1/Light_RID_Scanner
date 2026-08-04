@@ -91,7 +91,10 @@ jobs:
           install -m 0644 openwrt/config.gl-ar750s.json "$root/usr/share/light-rid/config.gl-ar750s.json"
           (
             cd "$root"
-            find ./usr ./etc -type f ! -name package-manifest.sha256 -print \
+            find ./usr ./etc -type f \
+              ! -name package-manifest.sha256 \
+              ! -path './usr/share/light-rid/rid_model.json' \
+              -print \
               | LC_ALL=C sort \
               | xargs sha256sum \
               > ./usr/share/light-rid/package-manifest.sha256

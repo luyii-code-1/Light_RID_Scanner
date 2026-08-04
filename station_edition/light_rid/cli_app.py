@@ -1,5 +1,5 @@
-PACKET_PARSE_QUEUE_MAX = 4096
-PACKET_PARSE_WORKERS = 12
+PACKET_PARSE_QUEUE_MAX = 256
+PACKET_PARSE_WORKERS = 1
 packet_parse_queue = queue.Queue(maxsize=PACKET_PARSE_QUEUE_MAX)
 packet_parse_drop_count = 0
 packet_parse_worker_started = False
@@ -160,10 +160,12 @@ def _parse_native_frame_impl(
                 pass
 
         ssid_rid = _ssid_to_sn(ssid or "")
+        is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
+        if not (ssid_rid or is_wifi_fast or ODID_OUI in raw):
+            return
         parsed_batch = parse_rid_payloads(raw, mode="auto", ssid_sn=(ssid_rid or None), model_hint=None)
         parsed_packets = list(parsed_batch.get("packets") or []) if parsed_batch.get("ok") else []
         frame_hex = _hex_preview(raw, max_bytes=220)
-        is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
         if not parsed_packets:
             if is_wifi_fast:
                 state_update(

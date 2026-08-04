@@ -1,0 +1,123 @@
+#!/bin/sh
+
+APP_ROOT=/usr/share/light-rid
+CONFIG_DIR=/etc/light-rid
+CONFIG="$CONFIG_DIR/config.json"
+DEFAULT_CONFIG="$APP_ROOT/config.gl-ar750s.json"
+MODEL_MAP="$CONFIG_DIR/rid_model.json"
+DEFAULT_MODEL_MAP="$APP_ROOT/rid_model.json"
+PROG=/usr/bin/python3
+
+fail() {
+    echo "light-rid-install: $*" >&2
+    exit 1
+}
+
+provision_auth() {
+    "$PROG" - "$CONFIG" <<'PY'
+import base64
+import hashlib
+import json
+import os
+import secrets
+import sys
+import tempfile
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    config = json.load(handle)
+
+def secret_hash(value):
+    salt = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
+    digest = hashlib.scrypt(value.encode("utf-8"), salt=salt.encode("ascii"), n=2 ** 14, r=8, p=1, dklen=32)
+    encoded = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return "scrypt$16384$8$1${}${}".format(salt, encoded)
+
+username = "admin"
+password = secrets.token_urlsafe(12)
+auth = config.setdefault("auth", {})
+auth.update({
+    "enabled": True,
+    "username_hash": secret_hash(username),
+    "password_hash": secret_hash(password),
+    "realm": "Light RID Scanner",
+    "login_methods": ["password"],
+    "sso_links": [],
+    "passkeys": [],
+})
+
+parent = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix="config.", suffix=".tmp", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+
+print("light-rid-install: admin_username={}".format(username))
+print("light-rid-install: admin_password={}".format(password))
+print("light-rid-install: record this one-time password now; only its scrypt hash was stored")
+PY
+}
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = "glinet,gl-ar750s-nor-nand" ] || \
+    fail "unsupported board '${board:-unknown}'"
+grep -q "DISTRIB_ARCH='mips_24kc'" /etc/openwrt_release 2>/dev/null || \
+    fail "OpenWrt mips_24kc userspace is required"
+[ -s "$DEFAULT_CONFIG" ] || fail "default configuration is missing"
+[ -s "$DEFAULT_MODEL_MAP" ] || fail "default model map is missing"
+command -v "$PROG" >/dev/null 2>&1 || fail "python3 is required"
+running="$(ps w | awk '/[s]tation_edition\/run.py/{print $1}' | tr '\n' ' ')"
+[ -z "$running" ] || fail "scanner is running (pid $running); stop it before install"
+
+umask 077
+mkdir -p "$CONFIG_DIR" /tmp/light-rid || fail "cannot create runtime directories"
+
+if [ "${1:-}" = "--factory-reset" ]; then
+    if [ -f "$CONFIG" ]; then
+        backup="$CONFIG.factory-$(date '+%Y%m%d-%H%M%S').bak"
+        cp -p "$CONFIG" "$backup" || fail "cannot back up existing configuration"
+        echo "light-rid-install: configuration backup: $backup"
+    fi
+    cp "$DEFAULT_CONFIG" "$CONFIG" || fail "cannot reset configuration"
+    provision_auth || fail "cannot provision unique administrator credentials"
+    echo "light-rid-install: factory configuration installed"
+elif [ -e "$CONFIG" ]; then
+    echo "light-rid-install: existing configuration preserved"
+else
+    cp "$DEFAULT_CONFIG" "$CONFIG" || fail "cannot install initial configuration"
+    provision_auth || fail "cannot provision unique administrator credentials"
+    echo "light-rid-install: initial configuration installed"
+fi
+
+chmod 0700 "$CONFIG_DIR"
+chmod 0600 "$CONFIG"
+if [ ! -e "$MODEL_MAP" ]; then
+    cp "$DEFAULT_MODEL_MAP" "$MODEL_MAP" || fail "cannot install initial model map"
+    echo "light-rid-install: initial model map installed"
+fi
+chmod 0600 "$MODEL_MAP"
+chmod 0755 /usr/bin/light-rid-run /usr/bin/light-rid-install /usr/bin/light-rid-upgrade /usr/bin/light-rid-capture
+
+if [ -x /etc/init.d/light-rid ]; then
+    /etc/init.d/light-rid stop >/dev/null 2>&1 || true
+    /etc/init.d/light-rid disable >/dev/null 2>&1 || true
+fi
+rm -f /etc/rc.d/S95light-rid /etc/rc.d/K10light-rid /etc/init.d/light-rid
+
+# Remove host-Python bytecode and build-only files left by older tarballs.
+rm -rf "$APP_ROOT/station_edition/__pycache__"
+rm -rf "$APP_ROOT/station_edition/light_rid/__pycache__"
+rm -rf "$APP_ROOT/station_edition/pytools"
+rm -f "$APP_ROOT/station_edition/config.example.json"
+
+/usr/bin/light-rid-run check || fail "production preflight failed"
+sync
+echo "light-rid-install: ready; start from SSH with: light-rid-run"

@@ -5,7 +5,77 @@ APP_ROOT=/usr/share/light-rid
 APP="$APP_ROOT/station_edition/run.py"
 CAPTURE=/usr/bin/light-rid-capture
 CONFIG=/etc/light-rid/config.json
+MANIFEST="$APP_ROOT/package-manifest.sha256"
+LOCK_DIR=/tmp/light-rid.lock
 CHILD_PID=""
+LOCK_HELD=0
+MONITOR_PREPARED=0
+
+fail() {
+    echo "light-rid: $*" >&2
+    exit 1
+}
+
+board_name() {
+    cat /tmp/sysinfo/board_name 2>/dev/null
+}
+
+check_board() {
+    board="$(board_name)"
+    [ "$board" = "glinet,gl-ar750s-nor-nand" ] || \
+        fail "unsupported board '${board:-unknown}' (expected GL-AR750S NOR/NAND)"
+    grep -q "DISTRIB_ARCH='mips_24kc'" /etc/openwrt_release 2>/dev/null || \
+        fail "OpenWrt mips_24kc userspace is required"
+}
+
+check_runtime() {
+    check_board
+    for command in "$PROG" iw ip wifi awk sha256sum; do
+        command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
+    done
+    [ -x "$CAPTURE" ] || fail "capture helper is missing"
+    [ -f "$APP" ] || fail "station application is missing"
+    [ -s "$CONFIG" ] || fail "configuration is missing; run light-rid-install first"
+    [ -s "$APP_ROOT/station_edition/light_rid/assets/templates/station-settings.html" ] || \
+        fail "settings template is missing"
+    [ -s "$APP_ROOT/station_edition/light_rid/assets/vue/station-settings.js" ] || \
+        fail "settings JavaScript is missing"
+    "$PROG" -c 'import json, sqlite3, urllib.request' >/dev/null 2>&1 || \
+        fail "Python json/sqlite3/urllib modules are incomplete"
+    "$CAPTURE" --help >/dev/null 2>&1 || fail "capture helper cannot execute on this router"
+    mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
+    [ "${mem_kb:-0}" -ge 100000 ] || fail "at least 100 MB RAM is required"
+    free_kb="$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')"
+    [ "${free_kb:-0}" -ge 8192 ] || fail "at least 8 MB free overlay storage is required"
+    if [ -s "$MANIFEST" ]; then
+        (cd / && sha256sum -c "$MANIFEST" >/dev/null 2>&1) || fail "installed files failed checksum verification"
+    fi
+}
+
+acquire_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        LOCK_HELD=1
+    else
+        owner="$(cat "$LOCK_DIR/launcher.pid" 2>/dev/null)"
+        if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+            fail "already running (launcher pid $owner)"
+        fi
+        rm -rf "$LOCK_DIR"
+        mkdir "$LOCK_DIR" 2>/dev/null || fail "cannot acquire runtime lock"
+        LOCK_HELD=1
+    fi
+    echo "$$" > "$LOCK_DIR/launcher.pid"
+    existing="$(station_pids)"
+    if [ -n "$existing" ]; then
+        rm -rf "$LOCK_DIR"
+        LOCK_HELD=0
+        fail "station process already exists outside this launcher (pid $existing); run light-rid-run stop"
+    fi
+}
+
+station_pids() {
+    ps w | awk '/[s]tation_edition\/run.py/{print $1}' | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -13,8 +83,13 @@ cleanup() {
         kill "$CHILD_PID" >/dev/null 2>&1
         wait "$CHILD_PID" >/dev/null 2>&1
     fi
-    iw dev ridmon del >/dev/null 2>&1
-    wifi up radio1 >/dev/null 2>&1
+    if [ "$MONITOR_PREPARED" -eq 1 ]; then
+        iw dev ridmon del >/dev/null 2>&1
+        wifi up radio1 >/dev/null 2>&1
+    fi
+    if [ "$LOCK_HELD" -eq 1 ]; then
+        rm -rf "$LOCK_DIR"
+    fi
 }
 
 prepare_monitor() {
@@ -27,6 +102,9 @@ prepare_monitor() {
     done
     sleep 3
     wifi down radio1 >/dev/null 2>&1
+    # From this point onward cleanup must restore radio1, even if monitor
+    # creation fails halfway through.
+    MONITOR_PREPARED=1
     retries=0
     stable=0
     while [ "$stable" -lt 2 ]; do
@@ -46,23 +124,117 @@ prepare_monitor() {
     iw dev ridmon set channel 6 HT20 || return 1
 }
 
-[ -x "$PROG" ] || { echo "python3 is not installed" >&2; exit 1; }
-[ -x "$CAPTURE" ] || { echo "capture helper is missing" >&2; exit 1; }
-[ -f "$APP" ] || { echo "station application is missing" >&2; exit 1; }
-[ -f "$APP_ROOT/station_edition/light_rid/assets/templates/station-settings.html" ] || {
-    echo "settings template is missing" >&2
-    exit 1
+show_status() {
+    build="$(sed -n 's/.*"commit":"\([^"]*\)".*/\1/p' "$APP_ROOT/rid_build_info.json" 2>/dev/null)"
+    launcher="$(cat "$LOCK_DIR/launcher.pid" 2>/dev/null)"
+    app_pid="$(cat "$LOCK_DIR/app.pid" 2>/dev/null)"
+    all_station_pids="$(station_pids)"
+    device_id="$(cat /sys/class/net/eth0/address 2>/dev/null | tr -d ':')"
+    available_kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
+    overlay_kb="$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')"
+    echo "board=$(board_name)"
+    echo "device_id=${device_id:-unknown}"
+    echo "build=${build:-unknown}"
+    echo "memory_available_kb=${available_kb:-unknown}"
+    echo "overlay_free_kb=${overlay_kb:-unknown}"
+    if [ -n "$launcher" ] && kill -0 "$launcher" 2>/dev/null; then
+        echo "launcher=running pid=$launcher"
+    else
+        echo "launcher=stopped"
+    fi
+    if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+        echo "station=running pid=$app_pid"
+    else
+        echo "station=stopped"
+    fi
+    echo "station_pids=${all_station_pids:-none}"
+    if iw dev ridmon info >/dev/null 2>&1; then
+        echo "monitor=ridmon channel=$(iw dev ridmon info | awk '/channel/{print $2; exit}')"
+    else
+        echo "monitor=stopped"
+    fi
+    if iw dev wlan0 info >/dev/null 2>&1; then
+        ap_channel="$(iw dev wlan0 info | awk '/channel/{print $2; exit}')"
+        echo "management_ap=wlan0 channel=${ap_channel:-unknown}"
+    else
+        echo "management_ap=unavailable"
+    fi
+    if netstat -ln 2>/dev/null | grep -q ':4600[[:space:]]'; then
+        echo "web=listen port=4600"
+    else
+        echo "web=stopped port=4600"
+    fi
 }
 
-trap cleanup EXIT HUP INT TERM
-prepare_monitor || { echo "failed to prepare ridmon" >&2; exit 1; }
+stop_runtime() {
+    launcher="$(cat "$LOCK_DIR/launcher.pid" 2>/dev/null)"
+    if [ -n "$launcher" ] && kill -0 "$launcher" 2>/dev/null; then
+        kill "$launcher" >/dev/null 2>&1
+        retries=0
+        while kill -0 "$launcher" 2>/dev/null; do
+            retries=$((retries + 1))
+            [ "$retries" -ge 10 ] && break
+            sleep 1
+        done
+    fi
+    for pid in $(station_pids); do
+        kill "$pid" >/dev/null 2>&1
+    done
+    retries=0
+    while [ -n "$(station_pids)" ]; do
+        retries=$((retries + 1))
+        [ "$retries" -ge 5 ] && break
+        sleep 1
+    done
+    for pid in $(station_pids); do
+        kill -9 "$pid" >/dev/null 2>&1
+    done
+    rm -rf "$LOCK_DIR"
+    iw dev ridmon del >/dev/null 2>&1
+    wifi up radio1 >/dev/null 2>&1
+    echo "light-rid: stopped"
+}
 
-cd "$APP_ROOT" || exit 1
+case "${1:-run}" in
+    check)
+        check_runtime
+        echo "light-rid: preflight passed"
+        exit 0
+        ;;
+    status)
+        show_status
+        exit 0
+        ;;
+    stop)
+        stop_runtime
+        exit 0
+        ;;
+    run)
+        ;;
+    *)
+        echo "Usage: light-rid-run [run|check|status|stop]" >&2
+        exit 2
+        ;;
+esac
+
+umask 077
+check_runtime
+acquire_lock
+trap cleanup EXIT HUP INT TERM
+prepare_monitor || fail "failed to prepare phy1/ridmon"
+
+mkdir -p /tmp/light-rid
+cd "$APP_ROOT" || fail "cannot enter $APP_ROOT"
+echo "light-rid: starting GL-AR750S scanner; press Ctrl+C to stop"
 PYTHONPATH="$APP_ROOT" \
 LIGHT_RID_APP_ROOT="$APP_ROOT" \
 LIGHT_RID_CAPTURE_HELPER="$CAPTURE" \
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONUNBUFFERED=1 \
+TMPDIR=/tmp/light-rid \
 "$PROG" "$APP" --config "$CONFIG" --iface ridmon --channel 6 --no-tui &
 CHILD_PID=$!
+echo "$CHILD_PID" > "$LOCK_DIR/app.pid"
 wait "$CHILD_PID"
 STATUS=$?
 CHILD_PID=""

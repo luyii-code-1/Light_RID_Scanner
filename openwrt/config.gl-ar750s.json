@@ -6,10 +6,19 @@
     "hop_5g": false,
     "scan_wifi_fast": false,
     "auto_self_heal": true,
+    "time": 5,
+    "min_gap": 0.5,
+    "lost_timeout": 15,
+    "track_points_limit": 5000,
+    "change_on_rssi": false,
+    "change_on_payload": false,
     "no_tui": true,
     "debug": false,
-    "model_map": "/usr/share/light-rid/rid_model.json",
+    "model_map": "/etc/light-rid/rid_model.json",
     "history_file": "/etc/light-rid/rid_storage.db"
+  },
+  "web": {
+    "allow_restart": false
   },
   "notify": {
     "enabled": false
@@ -17,11 +26,22 @@
   "auth": {
     "enabled": false
   },
+  "api": {
+    "enabled": false
+  },
   "ap": {
+    "list_max": 40,
     "vendor_auto_download": false,
     "vendor_db_file": "/etc/light-rid/oui.txt"
   },
+  "metrics": {
+    "enabled": false,
+    "retention_days": 7
+  },
   "model_update": {
+    "enabled": false
+  },
+  "config_update": {
     "enabled": false
   },
   "app_update": {

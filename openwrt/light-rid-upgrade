@@ -1,0 +1,46 @@
+#!/bin/sh
+
+fail() {
+    echo "light-rid-upgrade: $*" >&2
+    exit 1
+}
+
+if [ "${1:-}" != "--continue" ]; then
+    [ "$#" -eq 1 ] || fail "Usage: light-rid-upgrade PACKAGE.tar.gz"
+    archive_dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd)" || fail "archive directory not found"
+    archive="$archive_dir/$(basename "$1")"
+    temporary="/tmp/light-rid-upgrade.$$"
+    cp "$0" "$temporary" || fail "cannot stage upgrade helper"
+    chmod 0700 "$temporary"
+    exec "$temporary" --continue "$archive"
+fi
+
+[ "$#" -eq 2 ] || fail "internal argument error"
+archive="$2"
+trap 'rm -f "$0"' EXIT HUP INT TERM
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = "glinet,gl-ar750s-nor-nand" ] || fail "unsupported board '${board:-unknown}'"
+[ -f "$archive" ] || fail "archive not found: $archive"
+checksum="$archive.sha256"
+[ -f "$checksum" ] || fail "checksum file not found: $checksum"
+
+running="$(ps w | awk '/[s]tation_edition\/run.py/{print $1}' | tr '\n' ' ')"
+[ -z "$running" ] || fail "scanner is running (pid $running); run light-rid-run stop first"
+
+archive_dir="$(dirname "$archive")"
+archive_name="$(basename "$archive")"
+checksum_name="$(basename "$checksum")"
+(cd "$archive_dir" && sha256sum -c "$checksum_name") || fail "archive checksum verification failed"
+
+entries="$(tar -tzf "$archive")" || fail "cannot read archive"
+printf '%s\n' "$entries" | grep -Eq '(^/|(^|/)\.\.(/|$))' && fail "unsafe archive path detected"
+printf '%s\n' "$entries" | grep -qx './usr/bin/light-rid-install' || fail "installer missing from archive"
+printf '%s\n' "$entries" | grep -qx './usr/bin/light-rid-run' || fail "launcher missing from archive"
+printf '%s\n' "$entries" | grep -qx './usr/bin/light-rid-capture' || fail "capture helper missing from archive"
+printf '%s\n' "$entries" | grep -qx './usr/share/light-rid/package-manifest.sha256' || fail "manifest missing from archive"
+
+tar -xzf "$archive" -C / || fail "archive extraction failed"
+chmod 0755 /usr/bin/light-rid-install /usr/bin/light-rid-run /usr/bin/light-rid-upgrade
+/usr/bin/light-rid-install || fail "post-upgrade install check failed"
+echo "light-rid-upgrade: installed $archive_name"

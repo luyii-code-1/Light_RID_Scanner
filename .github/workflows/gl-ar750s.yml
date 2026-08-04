@@ -76,19 +76,36 @@ jobs:
           mkdir -p "$root/usr/bin" "$root/usr/share/light-rid" "$root/etc/light-rid"
           install -m 0755 native_capture/target/mips-unknown-linux-musl/release/light-rid-capture "$root/usr/bin/light-rid-capture"
           cp -a station_edition "$root/usr/share/light-rid/"
+          find "$root/usr/share/light-rid/station_edition" -type d -name __pycache__ -prune -exec rm -rf '{}' +
+          rm -rf "$root/usr/share/light-rid/station_edition/pytools"
+          rm -f "$root/usr/share/light-rid/station_edition/config.example.json"
           cp rid_model.json "$root/usr/share/light-rid/"
           cp EULA.md "$root/etc/light-rid/EULA.md"
           printf '{"commit":"%s","tag":"","release_tag":"","build":1,"generated_at":"%s","dirty":false}\n' \
             "$short_sha" "$(date -u '+%Y-%m-%d %H:%M:%S')" \
-            > "$root/etc/light-rid/rid_build_info.json"
-          cp "$root/etc/light-rid/rid_build_info.json" "$root/usr/share/light-rid/rid_build_info.json"
+            > "$root/usr/share/light-rid/rid_build_info.json"
+          cp "$root/usr/share/light-rid/rid_build_info.json" "$root/etc/light-rid/rid_build_info.json"
           install -m 0755 openwrt/light-rid-run "$root/usr/bin/light-rid-run"
-          install -m 0644 openwrt/config.gl-ar750s.json "$root/etc/light-rid/config.json"
+          install -m 0755 openwrt/light-rid-install "$root/usr/bin/light-rid-install"
+          install -m 0755 openwrt/light-rid-upgrade "$root/usr/bin/light-rid-upgrade"
+          install -m 0644 openwrt/config.gl-ar750s.json "$root/usr/share/light-rid/config.gl-ar750s.json"
+          (
+            cd "$root"
+            find ./usr ./etc -type f ! -name package-manifest.sha256 -print \
+              | LC_ALL=C sort \
+              | xargs sha256sum \
+              > ./usr/share/light-rid/package-manifest.sha256
+            sha256sum -c ./usr/share/light-rid/package-manifest.sha256
+          )
           test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/templates/station-settings.html"
           test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/vue/station-settings.js"
+          test -s "$root/usr/share/light-rid/package-manifest.sha256"
+          test ! -e "$root/etc/light-rid/config.json"
           test ! -e "$root/etc/init.d/light-rid"
+          test -z "$(find "$root" -type d -name __pycache__ -print -quit)"
+          test ! -e "$root/usr/share/light-rid/station_edition/pytools"
           tar -C "$root" -czf "release/${package}.tar.gz" .
-          sha256sum "release/${package}.tar.gz" > "release/${package}.tar.gz.sha256"
+          (cd release && sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256")
 
       - uses: actions/upload-artifact@v4
         with:

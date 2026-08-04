@@ -70,14 +70,17 @@ reserve_scan_radio() {
     if [ "$changed" -eq 1 ]; then
         uci commit wireless || fail "cannot commit radio1 reservation"
     fi
-    wifi down radio1 >/dev/null 2>&1 || true
-    for iface in $(iw dev 2>/dev/null | awk '
+    conflicts="$(iw dev 2>/dev/null | awk '
         /^phy#1$/ { in_phy=1; next }
         /^phy#/ { in_phy=0 }
         in_phy && $1=="Interface" && $2!="ridmon" { print $2 }
-    '); do
-        iw dev "$iface" del >/dev/null 2>&1 || true
-    done
+    ')"
+    if [ -n "$conflicts" ]; then
+        wifi down radio1 >/dev/null 2>&1 || true
+        for iface in $conflicts; do
+            iw dev "$iface" del >/dev/null 2>&1 || true
+        done
+    fi
 }
 
 acquire_lock() {
@@ -127,7 +130,6 @@ prepare_monitor() {
         [ "$retries" -ge 12 ] && return 1
         sleep 1
     done
-    wifi down radio1 >/dev/null 2>&1
     # From this point onward cleanup must remove a partial monitor interface;
     # radio1 stays reserved for RID even when startup fails halfway through.
     MONITOR_PREPARED=1

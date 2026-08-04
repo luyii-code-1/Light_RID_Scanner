@@ -7,7 +7,6 @@ USE_PROCD=1
 PROG=/usr/bin/light-rid-run
 
 start_service() {
-    "$PROG" reserve || return 1
     procd_open_instance
     procd_set_param command "$PROG" supervise
     procd_set_param env LIGHT_RID_PRODUCTION=1

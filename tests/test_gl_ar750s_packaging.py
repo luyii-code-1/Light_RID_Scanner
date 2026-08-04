@@ -96,14 +96,14 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertIn("#!/bin/sh /etc/rc.common", init_script)
         self.assertIn("USE_PROCD=1", init_script)
         self.assertIn("procd_set_param respawn", init_script)
-        self.assertIn('"$PROG" reserve', init_script)
+        self.assertIn('procd_set_param command "$PROG" supervise', init_script)
 
     def test_one_click_deployer_is_in_ci_artifact(self) -> None:
         workflow = Path(".github/workflows/gl-ar750s.yml").read_text(encoding="utf-8")
         deployer = Path("openwrt/deploy-gl-ar750s.ps1").read_text(encoding="utf-8")
         self.assertIn("openwrt/deploy-gl-ar750s.ps1", workflow)
         self.assertIn("light-rid-upgrade", deployer)
-        self.assertIn("/etc/init.d/light-rid enabled", deployer)
+        self.assertIn("/etc/rc.d/S96light-rid", deployer)
 
     def test_installer_credential_provisioner_is_valid_python(self) -> None:
         installer = Path("openwrt/light-rid-install").read_text(encoding="utf-8")

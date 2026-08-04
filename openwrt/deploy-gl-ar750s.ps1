@@ -51,18 +51,18 @@ if ($LASTEXITCODE -ne 0) { throw "Package upload failed" }
 
 $commands = @(
     "set -eu",
-    "archive=" + (Quote-Remote $remotePackage),
+    ("archive=" + (Quote-Remote $remotePackage)),
+    "if [ -x /etc/init.d/light-rid ]; then /etc/init.d/light-rid stop >/dev/null 2>&1 || true; elif command -v light-rid-run >/dev/null 2>&1; then light-rid-run stop >/dev/null 2>&1 || true; fi",
     "if command -v light-rid-upgrade >/dev/null 2>&1; then light-rid-upgrade `"`$archive`"; else tar -xzf `"`$archive`" -C /; light-rid-install; fi"
 )
 if ($FactorySsid) {
-    $commands += "LIGHT_RID_FACTORY_SSID=" + (Quote-Remote $FactorySsid) + " LIGHT_RID_FACTORY_WIFI_PASSWORD=" + (Quote-Remote $FactoryWifiPassword) + " light-rid-install --factory-provision"
+    $commands += ("LIGHT_RID_FACTORY_SSID=" + (Quote-Remote $FactorySsid) + " LIGHT_RID_FACTORY_WIFI_PASSWORD=" + (Quote-Remote $FactoryWifiPassword) + " light-rid-install --factory-provision")
 }
 $commands += @(
-    "sleep 12",
+    "ready=0; for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do if netstat -ln 2>/dev/null | grep -q ':4600[[:space:]]'; then ready=1; break; fi; sleep 5; done; [ `$ready -eq 1 ]",
     "light-rid-run check",
     "light-rid-run status",
-    "/etc/init.d/light-rid enabled",
-    "netstat -ln | grep -q ':4600[[:space:]]'",
+    "test -L /etc/rc.d/S96light-rid",
     "iw dev ridmon info | grep -q 'type monitor'",
     "iw dev ridmon info | grep -q 'channel 6 '"
 )

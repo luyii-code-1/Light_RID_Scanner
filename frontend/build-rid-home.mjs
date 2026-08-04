@@ -10,7 +10,7 @@ const outDir = path.join(rootDir, "station_edition", "light_rid", "assets", "vue
 
 await mkdir(outDir, { recursive: true });
 
-for (const entry of ["rid-home", "nodes-center", "viewer-settings", "station-settings"]) {
+for (const entry of ["rid-home", "station-settings"]) {
   await build({
     absWorkingDir: __dirname,
     entryPoints: [path.join(__dirname, "src", `${entry}.js`)],

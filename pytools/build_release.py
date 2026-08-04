@@ -26,28 +26,6 @@ EDITION_NAMES = {
     "station": "light_rid_station",
 }
 
-RUST_STATION_DIR = ROOT / "station_edition_rust"
-
-RUST_TARGETS = {
-    "x86_64": {
-        "linux": "x86_64-unknown-linux-gnu",
-        "windows": "x86_64-pc-windows-msvc",
-        "darwin": "x86_64-apple-darwin",
-    },
-    "x32": {
-        "linux": "i686-unknown-linux-gnu",
-        "windows": "i686-pc-windows-msvc",
-    },
-    "arm64": {
-        "linux": "aarch64-unknown-linux-gnu",
-        "darwin": "aarch64-apple-darwin",
-        "windows": "aarch64-pc-windows-msvc",
-    },
-    "armv7": {
-        "linux": "armv7-unknown-linux-gnueabihf",
-    },
-}
-
 TARGET_ALIASES = {
     "x86_64": "x86_64",
     "amd64": "x86_64",
@@ -71,16 +49,6 @@ TARGET_ALIASES = {
 def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
     print("+", " ".join(cmd))
     subprocess.run(cmd, cwd=str(ROOT), env=env, check=True)
-
-
-def cargo_bin() -> str:
-    cargo = shutil.which("cargo")
-    if cargo:
-        return cargo
-    cargo_home = Path.home() / ".cargo" / "bin" / ("cargo.exe" if os.name == "nt" else "cargo")
-    if cargo_home.exists():
-        return str(cargo_home)
-    raise SystemExit("cargo is required to build station edition")
 
 
 def data_arg(src: str, dst: str) -> str:
@@ -115,27 +83,6 @@ def validate_target_runtime(target: str) -> None:
                 "target x32 requires a 32-bit Python runtime. "
                 "Use the CI linux-x32 Docker job with --platform linux/386."
             )
-
-def host_os_key() -> str:
-    value = platform.system().lower()
-    if value.startswith("linux"):
-        return "linux"
-    if value.startswith("windows"):
-        return "windows"
-    if value.startswith("darwin"):
-        return "darwin"
-    return value
-
-
-def rust_target_triple(target: str) -> str:
-    explicit = str(os.environ.get("LIGHT_RID_RUST_TARGET") or "").strip()
-    if explicit:
-        return explicit
-    by_host = RUST_TARGETS.get(target, {})
-    triple = by_host.get(host_os_key())
-    if not triple:
-        raise SystemExit(f"no Rust target mapping for logical target {target!r} on {host_os_key()}")
-    return triple
 
     if target == "armv7":
         if bitness != 32:
@@ -275,14 +222,6 @@ def build_binary(
     release_tag: str = "",
     build_commit: str = "",
 ) -> Path:
-    if edition == "station":
-        return build_station_rust_binary(
-            target,
-            clean=clean,
-            release_tag=release_tag,
-            build_commit=build_commit,
-        )
-
     validate_target_runtime(target)
 
     entry = EDITION_ENTRYPOINTS[edition]
@@ -345,54 +284,6 @@ def build_binary(
     if not artifact.exists():
         raise SystemExit(f"build finished but artifact is missing: {artifact}")
 
-    return artifact
-
-
-def build_station_rust_binary(
-    target: str,
-    *,
-    clean: bool = True,
-    release_tag: str = "",
-    build_commit: str = "",
-) -> Path:
-    if not RUST_STATION_DIR.exists():
-        raise SystemExit(f"missing Rust station crate: {RUST_STATION_DIR}")
-
-    dist_dir = ROOT / "release" / "station" / target
-    name = f"{EDITION_NAMES['station']}-{target}"
-    if os.name == "nt":
-        name += ".exe"
-
-    if clean:
-        shutil.rmtree(dist_dir, ignore_errors=True)
-    dist_dir.mkdir(parents=True, exist_ok=True)
-    prepare_build_info(release_tag=release_tag, build_commit=build_commit)
-
-    triple = rust_target_triple(target)
-    env = dict(os.environ)
-    env["LIGHT_RID_EDITION"] = "station"
-    env["LIGHT_RID_TARGET"] = target
-    if release_tag:
-        env["RELEASE_TAG"] = release_tag
-
-    run([
-        cargo_bin(),
-        "build",
-        "--manifest-path",
-        str(RUST_STATION_DIR / "Cargo.toml"),
-        "--release",
-        "--target",
-        triple,
-    ], env=env)
-
-    exe_name = "light-rid-station.exe" if triple.endswith("windows-msvc") else "light-rid-station"
-    built = RUST_STATION_DIR / "target" / triple / "release" / exe_name
-    if not built.exists():
-        raise SystemExit(f"cargo finished but artifact is missing: {built}")
-    artifact = dist_dir / name
-    shutil.copy2(built, artifact)
-    if os.name != "nt":
-        artifact.chmod(0o755)
     return artifact
 
 

@@ -76,7 +76,9 @@ reserve_scan_radio() {
         in_phy && $1=="Interface" && $2!="ridmon" { print $2 }
     ')"
     if [ -n "$conflicts" ]; then
-        wifi down radio1 >/dev/null 2>&1 || true
+        # GL.iNet's boot-time `wifi down radio1` can block for several minutes
+        # while its vendor services are still converging.  UCI already keeps
+        # radio1 disabled persistently, so remove only the transient netdevs.
         for iface in $conflicts; do
             iw dev "$iface" del >/dev/null 2>&1 || true
         done

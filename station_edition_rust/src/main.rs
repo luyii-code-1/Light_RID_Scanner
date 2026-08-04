@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use light_rid_station::{server, state, state::AppStateExt};
+use light_rid_station::{capture, server, state, state::AppStateExt};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Clone, Parser)]
@@ -13,6 +13,16 @@ struct Args {
     config: String,
     #[arg(long)]
     iface: Option<String>,
+    #[arg(long, default_value = "phy1")]
+    phy: String,
+    #[arg(long = "radio-device", default_value = "radio1")]
+    radio_device: String,
+    #[arg(long = "keep-radio-ap")]
+    keep_radio_ap: bool,
+    #[arg(long = "skip-monitor-setup")]
+    skip_monitor_setup: bool,
+    #[arg(long = "no-capture")]
+    no_capture: bool,
     #[arg(long)]
     channel: Option<u16>,
     #[arg(long)]
@@ -83,6 +93,30 @@ async fn main() -> Result<()> {
     if args.tui || !args.no_tui {
         state.log_info(
             "[WARN] TUI compatibility mode is pending in Rust edition; web UI remains available",
+        );
+    }
+    if !args.no_capture {
+        let config_iface = state
+            .config
+            .read()
+            .basic
+            .get("iface")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
+        capture::spawn(
+            state.clone(),
+            capture::CaptureConfig {
+                iface: args
+                    .iface
+                    .or(config_iface)
+                    .unwrap_or_else(|| "ridmon".to_string()),
+                phy: args.phy,
+                radio_device: args.radio_device,
+                channel: args.channel.unwrap_or(6),
+                prepare_monitor: !args.skip_monitor_setup,
+                dedicate_radio: !args.keep_radio_ap,
+            },
         );
     }
     server::serve(state).await

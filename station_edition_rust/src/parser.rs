@@ -105,21 +105,33 @@ pub fn parse_rid_payload(data: &[u8], mode: Option<&str>) -> ParseResult {
 }
 
 pub fn parse_rid_payloads(data: &[u8], mode: Option<&str>) -> Value {
+    let parsed = parse_rid_packets(data, mode);
+    let packets: Vec<Value> = parsed.into_iter().map(|item| json!(item)).collect();
+    packet_collection(packets)
+}
+
+pub fn parse_rid_packets(data: &[u8], mode: Option<&str>) -> Vec<ParseResult> {
     let mut packets = Vec::new();
     if let Some(gb) = parse_gb46750_2025(data) {
-        packets.push(json!(gb));
+        packets.push(gb);
     }
-    for payload in legacy_candidates(data) {
-        if let Some(old) = parse_legacy_odid(&payload) {
-            packets.push(json!(old));
-        }
+    if let Some(old) = parse_legacy_odid(data)
+        && !packets
+            .iter()
+            .any(|item| item.format == old.format && item.sn == old.sn)
+    {
+        packets.push(old);
     }
     if packets.is_empty() {
         let single = parse_rid_payload(data, mode);
         if single.ok {
-            packets.push(json!(single));
+            packets.push(single);
         }
     }
+    packets
+}
+
+fn packet_collection(packets: Vec<Value>) -> Value {
     let mut tracks = serde_json::Map::new();
     let mut samples = Vec::new();
     for packet in &packets {

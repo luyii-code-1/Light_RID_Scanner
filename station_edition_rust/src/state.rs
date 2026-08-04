@@ -91,6 +91,20 @@ pub struct Notification {
     pub source: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptureStatus {
+    pub running: bool,
+    pub iface: String,
+    pub channel: Option<u16>,
+    pub frames: u64,
+    pub management_frames: u64,
+    pub rid_packets: u64,
+    pub parse_errors: u64,
+    pub last_packet_ts: Option<f64>,
+    pub last_rid_ts: Option<f64>,
+    pub last_error: String,
+}
+
 #[derive(Debug)]
 pub struct AppInner {
     pub config_path: PathBuf,
@@ -101,6 +115,7 @@ pub struct AppInner {
     pub runtime_logs: RwLock<Vec<String>>,
     pub scan_logs: RwLock<Vec<String>>,
     pub notifications: RwLock<Vec<Notification>>,
+    pub capture: RwLock<CaptureStatus>,
 }
 
 pub type AppState = Arc<AppInner>;
@@ -121,6 +136,7 @@ pub fn load(config_path: &str, history_path: &str) -> Result<AppState> {
         runtime_logs: RwLock::new(Vec::new()),
         scan_logs: RwLock::new(Vec::new()),
         notifications: RwLock::new(Vec::new()),
+        capture: RwLock::new(CaptureStatus::default()),
     }))
 }
 
@@ -166,6 +182,7 @@ impl AppStateExt for AppState {
             "drones": drones,
             "count": drones.len(),
             "history_count": self.history.read().len(),
+            "capture": self.capture.read().clone(),
             "lightweight": lightweight,
         })
     }

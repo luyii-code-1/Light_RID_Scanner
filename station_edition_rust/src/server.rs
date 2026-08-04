@@ -1,4 +1,5 @@
 use crate::{
+    capture::{self, FrameMeta},
     parser, simulation,
     state::{AppState, AppStateExt},
 };
@@ -187,6 +188,12 @@ fn static_file(rel: &str) -> Option<Response> {
 }
 
 fn locate_light_rid_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("LIGHT_RID_ROOT") {
+        let candidate = PathBuf::from(root);
+        if candidate.is_dir() {
+            return candidate.canonicalize().ok();
+        }
+    }
     let cwd = std::env::current_dir().ok()?;
     for candidate in [
         cwd.join("station_edition/light_rid"),
@@ -270,7 +277,7 @@ async fn api_docs() -> Json<Value> {
 }
 async fn api_health(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({"ok": true, "status": "ok", "version": crate::APP_RELEASE_VERSION, "drone_count": state.drones.read().len()}),
+        json!({"ok": true, "status": "ok", "version": crate::APP_RELEASE_VERSION, "drone_count": state.drones.read().len(), "capture": state.capture.read().clone()}),
     )
 }
 async fn snapshot(
@@ -342,7 +349,7 @@ async fn settings_view(State(state): State<AppState>) -> Json<Value> {
 }
 async fn settings_runtime(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({"ok": true, "version": crate::APP_RELEASE_VERSION, "logs": state.runtime_logs.read().clone()}),
+        json!({"ok": true, "version": crate::APP_RELEASE_VERSION, "logs": state.runtime_logs.read().clone(), "capture": state.capture.read().clone()}),
     )
 }
 async fn systemd_status() -> Json<Value> {
@@ -385,7 +392,7 @@ async fn notification_clear(State(state): State<AppState>) -> Json<Value> {
 }
 async fn diagnostics(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({"ok": true, "version": crate::APP_RELEASE_VERSION, "drones": state.drones.read().len(), "config_path": state.config_path}),
+        json!({"ok": true, "version": crate::APP_RELEASE_VERSION, "drones": state.drones.read().len(), "config_path": state.config_path, "capture": state.capture.read().clone()}),
     )
 }
 async fn interfaces() -> Json<Value> {
@@ -394,8 +401,8 @@ async fn interfaces() -> Json<Value> {
 async fn network_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"ok": true, "config": state.config.read().network_bindings}))
 }
-async fn hw_status() -> Json<Value> {
-    Json(json!({"ok": true, "busy": false, "last": null}))
+async fn hw_status(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"ok": true, "busy": false, "last": null, "capture": state.capture.read().clone()}))
 }
 async fn tracks_get(
     State(state): State<AppState>,
@@ -455,14 +462,39 @@ async fn privileged_stub() -> (StatusCode, Json<Value>) {
     )
 }
 
-pub async fn parse_api(Json(body): Json<Value>) -> Json<Value> {
+pub async fn parse_api(State(state): State<AppState>, Json(body): Json<Value>) -> Json<Value> {
     let raw = body
         .get("raw_packet")
         .or_else(|| body.get("hex"))
         .and_then(Value::as_str)
         .unwrap_or("");
     let mode = body.get("mode").and_then(Value::as_str);
-    Json(json!(parser::parse_raw_packet_string(raw, mode)))
+    let bytes = parser::raw_packet_string_to_bytes(raw);
+    let parsed = parser::parse_rid_payload(&bytes, mode);
+    let mut response = json!(parsed);
+    let packets = capture::ingest_payload(
+        &state,
+        &bytes,
+        FrameMeta {
+            source_mac: body
+                .get("source_mac")
+                .and_then(Value::as_str)
+                .unwrap_or("api")
+                .to_string(),
+            capture_type: "api",
+            rssi: body
+                .get("rssi")
+                .and_then(Value::as_i64)
+                .map(|value| value as i32),
+            channel: body
+                .get("channel")
+                .and_then(Value::as_u64)
+                .map(|value| value as u16),
+        },
+        crate::state::unix_now(),
+    );
+    response["ingested"] = json!(packets.len());
+    Json(response)
 }
 
 fn text_download(name: &str, text: String) -> Response {

@@ -58,6 +58,7 @@ tools/__pycache__/
 plugins
 frontend/node_modules/
 station_edition_rust/target/
+native_capture/target/
 # OS / editor
 .DS_Store
 Thumbs.db

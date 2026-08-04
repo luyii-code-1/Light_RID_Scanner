@@ -185,6 +185,9 @@ rm -f "$APP_ROOT/station_edition/config.example.json"
 
 /usr/bin/light-rid-run check || fail "production preflight failed"
 /etc/init.d/light-rid enable || fail "cannot enable Light RID autostart"
-/etc/init.d/light-rid restart || fail "cannot start Light RID service"
+# The installer has already stopped and drained the old instance above.  Calling
+# "restart" here makes rc.common attempt a second procd delete, which emits a
+# harmless but alarming "Command failed: Not found" on OpenWrt 19.07.
+/etc/init.d/light-rid start || fail "cannot start Light RID service"
 sync
 echo "light-rid-install: ready; Light RID is enabled and running"

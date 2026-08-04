@@ -3147,6 +3147,9 @@
     on("btn-back", "click", function() {
       location.href = "/";
     });
+    on("btn-router", "click", function() {
+      location.href = "/router";
+    });
     on("btn-logs", "click", function() {
       location.href = "/logs";
     });

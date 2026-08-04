@@ -2,7 +2,9 @@ name: Frontend Bundle Check
 
 on:
   push:
+    branches-ignore: [GL-AR750S-edition]
   pull_request:
+    branches-ignore: [GL-AR750S-edition]
 
 permissions:
   contents: read

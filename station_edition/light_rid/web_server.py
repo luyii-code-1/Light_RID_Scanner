@@ -6880,6 +6880,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       var pop = qs('main-more-pop');
       [
         {id:'btn-settings', text:'设置', href:'/settings'},
+        {id:'btn-router', text:'路由管理', href:'/router'},
         {id:'btn-simulation', text:'模拟目标'},
         {id:'btn-logs', text:'日志', href:'/logs'},
         {id:'btn-diagnostic', text:'诊断'}
@@ -8377,6 +8378,20 @@ def _station_settings_asset_url() -> str:
 def _station_settings_template_path() -> Path | None:
     return _station_asset_path("assets", "templates", "station-settings.html")
 
+def _router_template_path() -> Path | None:
+    return _station_asset_path("assets", "templates", "router.html")
+
+def _router_asset_url() -> str:
+    asset_url = "/assets/vue/router.js"
+    asset_path = _station_asset_path("assets", "vue", "router.js")
+    if asset_path is None:
+        return asset_url
+    try:
+        st = asset_path.stat()
+        return f"{asset_url}?v={int(st.st_mtime)}-{int(st.st_size)}"
+    except OSError:
+        return asset_url
+
 def _mobile_template_path() -> Path | None:
     return _station_asset_path("assets", "templates", "mobile.html")
 
@@ -8432,6 +8447,16 @@ def _build_settings_html() -> str:
     except (OSError, UnicodeError):
         return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Scanner</title></head><body>settings template missing</body></html>'
     return html_src.replace("</body>", f'<script src="{_station_settings_asset_url()}"></script></body>', 1)
+
+def _build_router_html() -> str:
+    template_path = _router_template_path()
+    if template_path is None:
+        return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Router</title></head><body>router template missing</body></html>'
+    try:
+        html_src = template_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Router</title></head><body>router template missing</body></html>'
+    return html_src.replace("__ROUTER_ASSET_URL__", _router_asset_url())
 
 def sanitize_http_header_value(value, fallback: str = "") -> str:
     raw = value if value not in (None, "") else fallback
@@ -9032,6 +9057,9 @@ def http_server_thread() -> None:
                     return
                 self._send_json(_api_token_docs_payload(), 200)
                 return
+            if path == "/api/router/status":
+                self._send_json(_router_status_payload(), 200)
+                return
             if path == "/api/docs":
                 self._send_json(_api_token_docs_payload(), 200)
                 return
@@ -9206,6 +9234,16 @@ def http_server_thread() -> None:
                 self.wfile.write(body)
             elif path in ("/settings", "/settings.html"):
                 body = _build_settings_html().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path in ("/router", "/router.html"):
+                body = _build_router_html().encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -9743,6 +9781,43 @@ def http_server_thread() -> None:
                     return
             elif body_len > HTTP_JSON_MAX_BYTES:
                 self._send_json({"ok": False, "error": f"request too large (>{HTTP_JSON_MAX_BYTES} bytes)"}, 413)
+                return
+            if path == "/api/router/validate":
+                body = self._read_json_body()
+                normalized, errors = _router_validate_config(body)
+                self._send_json({"ok": not errors, "errors": errors, "config": normalized if not errors else {}}, 200 if not errors else 400)
+                return
+            if path == "/api/router/apply":
+                body = self._read_json_body()
+                rsp, code = _router_apply_payload(body)
+                _op_log("router-apply", f"transaction={(rsp.get('transaction') or {}).get('id', '-')}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, code)
+                return
+            if path == "/api/router/confirm":
+                body = self._read_json_body()
+                rsp, code = _router_confirm_transaction(str(body.get("id") or ""))
+                _op_log("router-confirm", str(body.get("id") or "-"), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, code)
+                return
+            if path == "/api/router/rollback":
+                body = self._read_json_body()
+                rsp, code = _router_restore_transaction(str(body.get("id") or ""))
+                _op_log("router-rollback", str(body.get("id") or "-"), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, code)
+                return
+            if path == "/api/router/reset-network":
+                body = self._read_json_body()
+                if str(body.get("confirm") or "") != "RESTORE":
+                    self._send_json({"ok": False, "error": "恢复确认无效"}, 400)
+                    return
+                rsp, code = _router_reset_original()
+                _op_log("router-reset-original", "", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, code)
+                return
+            if path == "/api/router/wifi/scan":
+                self._read_json_body()
+                rsp, code = _router_wifi_scan_payload()
+                self._send_json(rsp, code)
                 return
             if path == "/api/notifications":
                 body = self._read_json_body()

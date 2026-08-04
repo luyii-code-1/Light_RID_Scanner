@@ -16,6 +16,23 @@ light-rid-run check
 light-rid-run
 ```
 
+The first install stores a read-only baseline of OpenWrt's `network`,
+`wireless`, `dhcp`, `firewall`, and `uhttpd` configurations under
+`/etc/light-rid/openwrt-original`. The router page can restore this exact
+pre-install state. Upgrades never replace that baseline.
+
+For a production-line install with one shared 5 GHz SSID/password, provision
+the values interactively so the secret never enters the public repository or
+CI artifact:
+
+```sh
+light-rid-install --factory-provision
+```
+
+For non-interactive provisioning, pass `LIGHT_RID_FACTORY_SSID` and
+`LIGHT_RID_FACTORY_WIFI_PASSWORD` in the installer process environment and
+unset them immediately afterwards.
+
 On first install, record the one-time `admin_password` printed by
 `light-rid-install`. Each router receives a unique random credential; only
 scrypt hashes are stored in `config.json`. Normal upgrades preserve the
@@ -48,6 +65,10 @@ checksum, archive paths, required executables, and package manifest.
 to stop it. It dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
 `ridmon` on channel 6 and restores `radio1` when it exits. The 5 GHz access
 point remains available. No init script or boot-time service is installed.
+The dedicated `/router` page controls OpenWrt through UCI/ubus and provides a
+separate LuCI link. Network changes use a 90-second confirmation window and an
+independent rollback process. The 2.4 GHz radio is never exposed as a router
+setting because it is reserved for RID capture.
 Only one scanner instance can run at a time. `light-rid-run status` reports the
 device ID, installed build, free RAM/storage, process IDs, monitor channel,
 5GHz management AP, and web listener. Every package

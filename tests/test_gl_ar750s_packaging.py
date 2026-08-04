@@ -52,6 +52,9 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertIn("test ! -e \"$root/etc/light-rid/config.json\"", workflow)
         self.assertIn('"$root/etc/light-rid/EULA.md"', workflow)
         self.assertIn('"$root/etc/light-rid/rid_build_info.json"', workflow)
+        self.assertIn("assets/templates/router.html", workflow)
+        self.assertIn("assets/vue/router.js", workflow)
+        self.assertIn("router_core.py", workflow)
         self.assertFalse(Path("openwrt/light-rid.init").exists())
 
     def test_router_defaults_are_bounded_and_offline(self) -> None:

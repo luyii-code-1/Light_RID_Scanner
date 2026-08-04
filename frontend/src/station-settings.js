@@ -3052,6 +3052,7 @@ async function saveRawLegacyUnused(){
 }
 function bindShellActions(){
   on('btn-back', 'click', function(){ location.href='/'; });
+  on('btn-router', 'click', function(){ location.href='/router'; });
   on('btn-logs', 'click', function(){ location.href='/logs'; });
   on('btn-logout', 'click', function(){ location.href='/logout'; });
   on('btn-theme', 'click', function(){ applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light'); });

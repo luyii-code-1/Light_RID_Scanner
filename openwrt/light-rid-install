@@ -7,10 +7,62 @@ DEFAULT_CONFIG="$APP_ROOT/config.gl-ar750s.json"
 MODEL_MAP="$CONFIG_DIR/rid_model.json"
 DEFAULT_MODEL_MAP="$APP_ROOT/rid_model.json"
 PROG=/usr/bin/python3
+ORIGINAL_NETWORK="$CONFIG_DIR/openwrt-original"
 
 fail() {
     echo "light-rid-install: $*" >&2
     exit 1
+}
+
+backup_original_network() {
+    if [ -s "$ORIGINAL_NETWORK/manifest.sha256" ]; then
+        echo "light-rid-install: original OpenWrt network backup preserved"
+        return
+    fi
+    temporary="$CONFIG_DIR/openwrt-original.new.$$"
+    rm -rf "$temporary"
+    mkdir -m 0700 "$temporary" || fail "cannot create original network backup"
+    for name in network wireless dhcp firewall uhttpd; do
+        [ -s "/etc/config/$name" ] || fail "OpenWrt configuration is missing: $name"
+        cp -p "/etc/config/$name" "$temporary/$name" || fail "cannot back up OpenWrt $name configuration"
+        chmod 0600 "$temporary/$name"
+    done
+    (cd "$temporary" && sha256sum network wireless dhcp firewall uhttpd > manifest.sha256) || \
+        fail "cannot checksum original network backup"
+    chmod 0600 "$temporary/manifest.sha256"
+    mv "$temporary" "$ORIGINAL_NETWORK" || fail "cannot install original network backup"
+    echo "light-rid-install: original OpenWrt network configuration backed up"
+}
+
+factory_provision_wifi() {
+    ssid="${LIGHT_RID_FACTORY_SSID:-}"
+    wifi_password="${LIGHT_RID_FACTORY_WIFI_PASSWORD:-}"
+    if [ -z "$ssid" ] || [ -z "$wifi_password" ]; then
+        [ -t 0 ] || fail "factory provisioning requires LIGHT_RID_FACTORY_SSID and LIGHT_RID_FACTORY_WIFI_PASSWORD when stdin is not interactive"
+        printf 'Factory 5GHz SSID: '
+        IFS= read -r ssid
+        printf 'Factory 5GHz password: '
+        stty -echo
+        IFS= read -r wifi_password
+        stty echo
+        printf '\n'
+    fi
+    ssid_bytes="$(printf '%s' "$ssid" | wc -c | tr -d ' ')"
+    password_bytes="$(printf '%s' "$wifi_password" | wc -c | tr -d ' ')"
+    [ "$ssid_bytes" -ge 1 ] && [ "$ssid_bytes" -le 32 ] || fail "factory SSID must be 1-32 bytes"
+    [ "$password_bytes" -ge 8 ] && [ "$password_bytes" -le 63 ] || fail "factory WiFi password must be 8-63 bytes"
+    command -v uci >/dev/null 2>&1 || fail "uci is required for factory WiFi provisioning"
+    uci set wireless.default_radio0.device='radio0' || fail "cannot select 5GHz radio"
+    uci set wireless.default_radio0.network='lan' || fail "cannot bind factory AP to LAN"
+    uci set wireless.default_radio0.mode='ap' || fail "cannot set factory AP mode"
+    uci set wireless.default_radio0.encryption='psk2' || fail "cannot set factory AP encryption"
+    uci set "wireless.default_radio0.ssid=$ssid" || fail "cannot set factory SSID"
+    uci set "wireless.default_radio0.key=$wifi_password" || fail "cannot set factory WiFi password"
+    uci set wireless.default_radio0.disabled='0' || fail "cannot enable factory AP"
+    uci commit wireless || fail "cannot commit factory WiFi configuration"
+    wifi reload radio0 >/dev/null 2>&1 || fail "cannot reload factory 5GHz AP"
+    unset wifi_password LIGHT_RID_FACTORY_WIFI_PASSWORD
+    echo "light-rid-install: shared factory 5GHz credentials provisioned (password not printed)"
 }
 
 provision_auth() {
@@ -66,6 +118,11 @@ print("light-rid-install: record this one-time password now; only its scrypt has
 PY
 }
 
+case "${1:-}" in
+    ""|--factory-reset|--factory-provision) ;;
+    *) fail "Usage: light-rid-install [--factory-reset|--factory-provision]" ;;
+esac
+
 board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
 [ "$board" = "glinet,gl-ar750s-nor-nand" ] || \
     fail "unsupported board '${board:-unknown}'"
@@ -79,6 +136,7 @@ running="$(ps w | awk '/[s]tation_edition\/run.py/{print $1}' | tr '\n' ' ')"
 
 umask 077
 mkdir -p "$CONFIG_DIR" /tmp/light-rid || fail "cannot create runtime directories"
+backup_original_network
 
 if [ "${1:-}" = "--factory-reset" ]; then
     if [ -f "$CONFIG" ]; then
@@ -105,6 +163,10 @@ if [ ! -e "$MODEL_MAP" ]; then
 fi
 chmod 0600 "$MODEL_MAP"
 chmod 0755 /usr/bin/light-rid-run /usr/bin/light-rid-install /usr/bin/light-rid-upgrade /usr/bin/light-rid-capture
+
+if [ "${1:-}" = "--factory-provision" ]; then
+    factory_provision_wifi
+fi
 
 if [ -x /etc/init.d/light-rid ]; then
     /etc/init.d/light-rid stop >/dev/null 2>&1 || true

@@ -18,6 +18,7 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m compileall -q station_edition
+          python -m py_compile openwrt/router-smoke.py
           python -m unittest discover -s tests
 
       - uses: dtolnay/rust-toolchain@nightly
@@ -102,6 +103,9 @@ jobs:
           )
           test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/templates/station-settings.html"
           test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/vue/station-settings.js"
+          test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/templates/router.html"
+          test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/vue/router.js"
+          test -s "$root/usr/share/light-rid/station_edition/light_rid/router_core.py"
           test -s "$root/usr/share/light-rid/package-manifest.sha256"
           test ! -e "$root/etc/light-rid/config.json"
           test ! -e "$root/etc/init.d/light-rid"

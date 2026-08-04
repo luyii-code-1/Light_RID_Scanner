@@ -40,6 +40,10 @@ check_runtime() {
         fail "settings template is missing"
     [ -s "$APP_ROOT/station_edition/light_rid/assets/vue/station-settings.js" ] || \
         fail "settings JavaScript is missing"
+    [ -s "$APP_ROOT/station_edition/light_rid/assets/templates/router.html" ] || \
+        fail "router template is missing"
+    [ -s "$APP_ROOT/station_edition/light_rid/assets/vue/router.js" ] || \
+        fail "router JavaScript is missing"
     "$PROG" -c 'import json, sqlite3, urllib.request' >/dev/null 2>&1 || \
         fail "Python json/sqlite3/urllib modules are incomplete"
     "$CAPTURE" --help >/dev/null 2>&1 || fail "capture helper cannot execute on this router"

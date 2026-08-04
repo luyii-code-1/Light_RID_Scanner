@@ -26,7 +26,7 @@ jobs:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: station_edition_rust
 
@@ -63,7 +63,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: station_edition_rust
 
@@ -83,7 +83,7 @@ jobs:
 
       - uses: taiki-e/install-action@cross
 
-      - uses: Swatinem/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: station_edition_rust
 

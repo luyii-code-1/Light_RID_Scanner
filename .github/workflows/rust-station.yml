@@ -103,13 +103,20 @@ jobs:
           tar -xJf "$sdk_archive" -C .openwrt-sdk
           linker="$(find "$PWD/.openwrt-sdk" -name mips-openwrt-linux-musl-gcc -print -quit)"
           test -x "$linker"
+          staging_dir="$(dirname "$(dirname "$(dirname "$linker")")")"
+          test -d "$staging_dir"
           "$linker" --version
+          STAGING_DIR="$staging_dir" "$linker" -print-sysroot
+          test "$(STAGING_DIR="$staging_dir" "$linker" -print-file-name=crt1.o)" != crt1.o
           echo "OPENWRT_MIPS_LINKER=$linker" >> "$GITHUB_ENV"
+          echo "OPENWRT_STAGING_DIR=$staging_dir" >> "$GITHUB_ENV"
+          echo "$(dirname "$linker")" >> "$GITHUB_PATH"
 
       - name: Build static MIPS release
         env:
           CARGO_TARGET_MIPS_UNKNOWN_LINUX_MUSL_LINKER: ${{ env.OPENWRT_MIPS_LINKER }}
-          RUSTFLAGS: -C target-feature=+crt-static
+          STAGING_DIR: ${{ env.OPENWRT_STAGING_DIR }}
+          RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=no
         run: cargo +nightly build -Z build-std=std,panic_abort --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl --release
 
       - name: Verify target ELF

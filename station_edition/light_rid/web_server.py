@@ -8328,6 +8328,14 @@ def _station_asset_roots() -> list[Path]:
     roots: list[Path] = []
     base_dir = Path(__file__).resolve().parent
     roots.append(base_dir)
+    configured_root = str(os.environ.get("LIGHT_RID_APP_ROOT") or "").strip()
+    if configured_root:
+        configured_path = Path(configured_root)
+        roots.append(configured_path / "station_edition" / "light_rid")
+        roots.append(configured_path / "light_rid")
+    # The router package has a fixed layout and may be launched from any SSH
+    # working directory. Keep that location explicit instead of relying on cwd.
+    roots.append(Path("/usr/share/light-rid/station_edition/light_rid"))
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
         roots.append(Path(frozen_root) / "station_edition" / "light_rid")
@@ -8421,7 +8429,7 @@ def _build_settings_html() -> str:
         return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Scanner</title></head><body>settings template missing</body></html>'
     try:
         html_src = template_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Scanner</title></head><body>settings template missing</body></html>'
     return html_src.replace("</body>", f'<script src="{_station_settings_asset_url()}"></script></body>', 1)
 

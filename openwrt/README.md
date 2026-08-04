@@ -6,13 +6,14 @@ The station UI, RID parser, storage, and APIs remain Python. The
 `AF_PACKET` implementation written in Rust.
 
 The router needs OpenWrt's `python3`, `python3-light`, and `python3-sqlite3`
-packages. Install the CI tarball at `/`, then enable and start the service:
+packages. Install the CI tarball at `/`, then start it manually from SSH:
 
 ```sh
 tar -xzf light-rid-gl-ar750s-*.tar.gz -C /
-/etc/init.d/light-rid enable
-/etc/init.d/light-rid start
+light-rid-run
 ```
 
-The service dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
-`ridmon` on channel 6. The 5 GHz access point remains available.
+`light-rid-run` stays in the foreground. Press Ctrl+C or close the SSH session
+to stop it. It dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
+`ridmon` on channel 6 and restores `radio1` when it exits. The 5 GHz access
+point remains available. No init script or boot-time service is installed.

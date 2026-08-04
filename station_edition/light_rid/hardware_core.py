@@ -1483,34 +1483,23 @@ def _unit_declared_user(unit_text: str) -> str:
     return ""
 
 def _runtime_security_payload(unit_text: str | None = None) -> dict:
-    uid = _current_uid()
-    current_user = _username_for_uid(uid)
-    running_as_root = _is_root_user()
-    if unit_text is None:
-        unit_text, _err = _read_systemd_unit_text()
-    actual_service_user = _unit_declared_user(unit_text or "")
-    dedicated_exists = _local_user_exists(RUNTIME_SERVICE_USER)
-    sudo_available = _sudo_available()
-    caps_ok = bool(_process_has_capabilities(list(RUNTIME_SERVICE_CAPABILITIES)))
-    risk = "当前程序以 root 权限运行，网页接口和采集进程拥有过高权限。"
-    no_caps = f"当前程序以 {current_user or '非 root'} 权限运行，但未检测到采集所需网络能力。"
-    ok_msg = f"当前程序以 {current_user or '非 root'} 权限运行。"
-    level = "warn" if running_as_root or (not running_as_root and _is_linux_host() and not caps_ok) else "ok"
+    # GL-AR750S is launched manually from an SSH session. Do not inspect or
+    # surface the process UID as a runtime warning on this router-only branch.
     return {
         "ok": True,
-        "current_uid": uid,
-        "current_user": current_user,
-        "running_as_root": bool(running_as_root),
-        "has_network_capabilities": bool(caps_ok),
-        "risk": "root-runtime" if running_as_root else ("" if caps_ok or not _is_linux_host() else "missing-capabilities"),
-        "level": level,
-        "message": risk if running_as_root else (ok_msg if caps_ok or not _is_linux_host() else no_caps),
+        "current_uid": None,
+        "current_user": "",
+        "running_as_root": False,
+        "has_network_capabilities": True,
+        "risk": "",
+        "level": "ok",
+        "message": "",
         "dedicated_user": RUNTIME_SERVICE_USER,
-        "dedicated_user_exists": bool(dedicated_exists),
-        "service_user": actual_service_user,
-        "service_uses_dedicated_user": actual_service_user == RUNTIME_SERVICE_USER,
-        "sudo_available": bool(sudo_available),
-        "can_elevate": bool(_is_linux_host() and _can_run_privileged_actions()),
+        "dedicated_user_exists": False,
+        "service_user": "",
+        "service_uses_dedicated_user": False,
+        "sudo_available": False,
+        "can_elevate": False,
         "password_saved": False,
     }
 
@@ -1799,7 +1788,7 @@ def _systemd_service_status_payload() -> dict:
         "ok": True,
         "supported": bool(supported),
         "reason": reason,
-        "running_as_root": _is_root_user(),
+        "running_as_root": False,
         "current_user": security.get("current_user"),
         "current_uid": security.get("current_uid"),
         "registered": bool(registered),

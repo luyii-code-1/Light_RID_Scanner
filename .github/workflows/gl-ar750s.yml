@@ -73,7 +73,7 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           package="light-rid-gl-ar750s-${short_sha}"
           root="release/${package}/root"
-          mkdir -p "$root/usr/bin" "$root/usr/share/light-rid" "$root/etc/init.d" "$root/etc/light-rid"
+          mkdir -p "$root/usr/bin" "$root/usr/share/light-rid" "$root/etc/light-rid"
           install -m 0755 native_capture/target/mips-unknown-linux-musl/release/light-rid-capture "$root/usr/bin/light-rid-capture"
           cp -a station_edition "$root/usr/share/light-rid/"
           cp rid_model.json "$root/usr/share/light-rid/"
@@ -82,8 +82,11 @@ jobs:
             "$short_sha" "$(date -u '+%Y-%m-%d %H:%M:%S')" \
             > "$root/etc/light-rid/rid_build_info.json"
           cp "$root/etc/light-rid/rid_build_info.json" "$root/usr/share/light-rid/rid_build_info.json"
-          install -m 0755 openwrt/light-rid.init "$root/etc/init.d/light-rid"
+          install -m 0755 openwrt/light-rid-run "$root/usr/bin/light-rid-run"
           install -m 0644 openwrt/config.gl-ar750s.json "$root/etc/light-rid/config.json"
+          test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/templates/station-settings.html"
+          test -s "$root/usr/share/light-rid/station_edition/light_rid/assets/vue/station-settings.js"
+          test ! -e "$root/etc/init.d/light-rid"
           tar -C "$root" -czf "release/${package}.tar.gz" .
           sha256sum "release/${package}.tar.gz" > "release/${package}.tar.gz.sha256"
 

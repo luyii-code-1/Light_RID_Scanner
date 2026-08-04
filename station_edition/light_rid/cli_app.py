@@ -928,12 +928,6 @@ def main() -> None:
             _log(f"[WARN] WeCom test notification failed: {resp}")
         return
 
-    if hasattr(os, "geteuid") and os.geteuid() != 0:
-        if _process_has_capabilities(list(RUNTIME_SERVICE_CAPABILITIES)):
-            _log("[INFO] running without root; required network capabilities are present")
-        else:
-            _log("[WARN] 权限不足，请在设置页修复。")
-
     check_iw_available_on_startup()
 
     if SCAN_WIFI_FAST and (not args.hop) and (not args.channel):

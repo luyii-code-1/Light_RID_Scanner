@@ -131,6 +131,13 @@ grep -q "DISTRIB_ARCH='mips_24kc'" /etc/openwrt_release 2>/dev/null || \
 [ -s "$DEFAULT_CONFIG" ] || fail "default configuration is missing"
 [ -s "$DEFAULT_MODEL_MAP" ] || fail "default model map is missing"
 command -v "$PROG" >/dev/null 2>&1 || fail "python3 is required"
+[ ! -x /etc/init.d/light-rid ] || /etc/init.d/light-rid stop >/dev/null 2>&1 || true
+stop_wait=0
+while ps w | grep -q '[s]tation_edition/run.py'; do
+    stop_wait=$((stop_wait + 1))
+    [ "$stop_wait" -ge 15 ] && break
+    sleep 1
+done
 running="$(ps w | awk '/[s]tation_edition\/run.py/{print $1}' | tr '\n' ' ')"
 [ -z "$running" ] || fail "scanner is running (pid $running); stop it before install"
 
@@ -162,17 +169,13 @@ if [ ! -e "$MODEL_MAP" ]; then
     echo "light-rid-install: initial model map installed"
 fi
 chmod 0600 "$MODEL_MAP"
-chmod 0755 /usr/bin/light-rid-run /usr/bin/light-rid-install /usr/bin/light-rid-upgrade /usr/bin/light-rid-capture
+chmod 0755 /usr/bin/light-rid-run /usr/bin/light-rid-install /usr/bin/light-rid-upgrade /usr/bin/light-rid-capture /etc/init.d/light-rid
 
 if [ "${1:-}" = "--factory-provision" ]; then
     factory_provision_wifi
 fi
 
-if [ -x /etc/init.d/light-rid ]; then
-    /etc/init.d/light-rid stop >/dev/null 2>&1 || true
-    /etc/init.d/light-rid disable >/dev/null 2>&1 || true
-fi
-rm -f /etc/rc.d/S95light-rid /etc/rc.d/K10light-rid /etc/init.d/light-rid
+/usr/bin/light-rid-run reserve || fail "cannot reserve radio1 for RID capture"
 
 # Remove host-Python bytecode and build-only files left by older tarballs.
 rm -rf "$APP_ROOT/station_edition/__pycache__"
@@ -181,5 +184,7 @@ rm -rf "$APP_ROOT/station_edition/pytools"
 rm -f "$APP_ROOT/station_edition/config.example.json"
 
 /usr/bin/light-rid-run check || fail "production preflight failed"
+/etc/init.d/light-rid enable || fail "cannot enable Light RID autostart"
+/etc/init.d/light-rid restart || fail "cannot start Light RID service"
 sync
-echo "light-rid-install: ready; start from SSH with: light-rid-run"
+echo "light-rid-install: ready; Light RID is enabled and running"

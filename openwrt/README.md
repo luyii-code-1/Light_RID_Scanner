@@ -6,14 +6,26 @@ The station UI, RID parser, storage, and APIs remain Python. The
 `AF_PACKET` implementation written in Rust.
 
 The router needs OpenWrt's `python3`, `python3-light`, and `python3-sqlite3`
-packages. Install or upgrade from the CI tarball, run the production preflight,
-then start it manually from SSH:
+packages. For production, download the CI tarball, adjacent checksum, and
+`deploy-gl-ar750s.ps1`, then run one command from Windows:
+
+```powershell
+.\deploy-gl-ar750s.ps1 -Package .\light-rid-gl-ar750s-34b0294.tar.gz `
+  -RouterHost 192.168.8.1 -HostKey "SHA256:device-host-key"
+```
+
+The script uploads, verifies, installs, enables, starts, and checks the service.
+It can also take `-FactorySsid` and `-FactoryWifiPassword` for production-line
+provisioning. Use SSH keys/Pageant or pass `-Password`; never commit production
+credentials. Without `-HostKey`, PuTTY asks the operator to verify and cache the
+device key on first connection.
+
+The equivalent router-side installation is:
 
 ```sh
 tar -xzf light-rid-gl-ar750s-*.tar.gz -C /
 light-rid-install
 light-rid-run check
-light-rid-run
 ```
 
 The first install stores a read-only baseline of OpenWrt's `network`,
@@ -48,23 +60,23 @@ light-rid-install --factory-reset
 
 Factory reset generates and prints a new one-time administrator password.
 
-For later offline upgrades, copy both CI files to the router, stop the manual
-scanner session, and use the guarded upgrader instead of extracting over a
-running process:
+For later offline upgrades, copy both CI files to the router and use the
+guarded upgrader. It stops and restarts the procd service automatically:
 
 ```sh
-light-rid-run stop
 light-rid-upgrade light-rid-gl-ar750s-*.tar.gz
-light-rid-run
 ```
 
 The upgrader requires the adjacent `.tar.gz.sha256` file and validates the
 checksum, archive paths, required executables, and package manifest.
 
-`light-rid-run` stays in the foreground. Press Ctrl+C or close the SSH session
-to stop it. It dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
-`ridmon` on channel 6 and restores `radio1` when it exits. The 5 GHz access
-point remains available. No init script or boot-time service is installed.
+Installation enables `/etc/init.d/light-rid`. OpenWrt procd starts it at boot,
+captures logs, and respawns it after failures. The launcher permanently marks
+all radio1 AP definitions disabled in UCI, removes any vendor-created phy1
+interfaces, and dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
+`ridmon` on channel 6. A runtime watchdog restarts the supervised scanner if a
+vendor process changes the monitor interface, channel, or radio ownership. The
+5 GHz AP and wired WAN remain available for ordinary router service.
 The dedicated `/router` page controls OpenWrt through UCI/ubus and provides a
 separate LuCI link. Network changes use a 90-second confirmation window and an
 independent rollback process. The 2.4 GHz radio is never exposed as a router
@@ -78,11 +90,10 @@ package checksum during installation and then lives in `/etc/light-rid`; it is
 intentionally excluded from post-install code integrity checks for compatibility
 with older configurations that updated the bundled seed in place.
 
-Stop the current manual session before upgrading. If an SSH connection was
-interrupted and left an old process behind, recover without rebooting:
+Service management and recovery commands are:
 
 ```sh
-light-rid-run stop
 light-rid-run check
-light-rid-run
+/etc/init.d/light-rid restart
+light-rid-run status
 ```

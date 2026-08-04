@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+
+START=96
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/bin/light-rid-run
+
+start_service() {
+    "$PROG" reserve || return 1
+    procd_open_instance
+    procd_set_param command "$PROG" supervise
+    procd_set_param env LIGHT_RID_PRODUCTION=1
+    procd_set_param respawn 5 10 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param limits nofile="4096 4096"
+    procd_set_param term_timeout 15
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger light-rid
+}
+
+reload_service() {
+    stop
+    start
+}

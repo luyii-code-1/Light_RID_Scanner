@@ -41,9 +41,9 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertFalse(payload["running_as_root"])
         self.assertEqual(payload["risk"], "")
 
-    def test_router_package_has_no_init_service(self) -> None:
+    def test_router_package_has_procd_service(self) -> None:
         workflow = Path(".github/workflows/gl-ar750s.yml").read_text(encoding="utf-8")
-        self.assertNotIn("install -m 0755 openwrt/light-rid.init", workflow)
+        self.assertIn("openwrt/light-rid.init", workflow)
         self.assertIn("openwrt/light-rid-run", workflow)
         self.assertIn("openwrt/light-rid-install", workflow)
         self.assertIn("openwrt/light-rid-upgrade", workflow)
@@ -55,7 +55,7 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertIn("assets/templates/router.html", workflow)
         self.assertIn("assets/vue/router.js", workflow)
         self.assertIn("router_core.py", workflow)
-        self.assertFalse(Path("openwrt/light-rid.init").exists())
+        self.assertTrue(Path("openwrt/light-rid.init").exists())
 
     def test_router_defaults_are_bounded_and_offline(self) -> None:
         config = json.loads(Path("openwrt/config.gl-ar750s.json").read_text(encoding="utf-8"))
@@ -67,7 +67,7 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertFalse(config["model_update"]["enabled"])
         self.assertFalse(config["app_update"]["enabled"])
 
-    def test_router_scripts_do_not_register_autostart(self) -> None:
+    def test_router_scripts_register_supervised_autostart(self) -> None:
         scripts = "\n".join(
             Path(path).read_text(encoding="utf-8")
             for path in (
@@ -76,12 +76,10 @@ class GlAr750sPackagingTests(unittest.TestCase):
                 "openwrt/light-rid-upgrade",
             )
         )
-        self.assertNotIn("procd_set_param", scripts)
-        self.assertNotIn("/etc/rc.common", scripts)
         self.assertIn("already running", scripts)
         self.assertIn("station process already exists outside this launcher", scripts)
         self.assertIn("stop_runtime", scripts)
-        self.assertIn("cleanup must restore radio1", scripts)
+        self.assertIn("radio1 stays reserved for RID", scripts)
         self.assertIn("stop it before install", scripts)
         self.assertIn("existing configuration preserved", scripts)
         self.assertIn("initial model map installed", scripts)
@@ -91,6 +89,21 @@ class GlAr750sPackagingTests(unittest.TestCase):
         self.assertIn("only its scrypt hash was stored", scripts)
         self.assertIn("unsafe archive path detected", scripts)
         self.assertIn("archive checksum verification failed", scripts)
+        self.assertIn("/etc/init.d/light-rid enable", scripts)
+        self.assertIn("light-rid-run reserve", scripts)
+
+        init_script = Path("openwrt/light-rid.init").read_text(encoding="utf-8")
+        self.assertIn("#!/bin/sh /etc/rc.common", init_script)
+        self.assertIn("USE_PROCD=1", init_script)
+        self.assertIn("procd_set_param respawn", init_script)
+        self.assertIn('"$PROG" reserve', init_script)
+
+    def test_one_click_deployer_is_in_ci_artifact(self) -> None:
+        workflow = Path(".github/workflows/gl-ar750s.yml").read_text(encoding="utf-8")
+        deployer = Path("openwrt/deploy-gl-ar750s.ps1").read_text(encoding="utf-8")
+        self.assertIn("openwrt/deploy-gl-ar750s.ps1", workflow)
+        self.assertIn("light-rid-upgrade", deployer)
+        self.assertIn("/etc/init.d/light-rid enabled", deployer)
 
     def test_installer_credential_provisioner_is_valid_python(self) -> None:
         installer = Path("openwrt/light-rid-install").read_text(encoding="utf-8")

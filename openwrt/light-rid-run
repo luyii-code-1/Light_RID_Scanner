@@ -56,6 +56,30 @@ check_runtime() {
     fi
 }
 
+reserve_scan_radio() {
+    check_board
+    command -v uci >/dev/null 2>&1 || fail "required command is missing: uci"
+    changed=0
+    for option in wireless.radio1.disabled wireless.default_radio1.disabled wireless.guest2g.disabled; do
+        current="$(uci -q get "$option" 2>/dev/null)"
+        if [ "$current" != "1" ]; then
+            uci set "$option=1" || fail "cannot reserve radio1: $option"
+            changed=1
+        fi
+    done
+    if [ "$changed" -eq 1 ]; then
+        uci commit wireless || fail "cannot commit radio1 reservation"
+    fi
+    wifi down radio1 >/dev/null 2>&1 || true
+    for iface in $(iw dev 2>/dev/null | awk '
+        /^phy#1$/ { in_phy=1; next }
+        /^phy#/ { in_phy=0 }
+        in_phy && $1=="Interface" && $2!="ridmon" { print $2 }
+    '); do
+        iw dev "$iface" del >/dev/null 2>&1 || true
+    done
+}
+
 acquire_lock() {
     if mkdir "$LOCK_DIR" 2>/dev/null; then
         LOCK_HELD=1
@@ -89,7 +113,6 @@ cleanup() {
     fi
     if [ "$MONITOR_PREPARED" -eq 1 ]; then
         iw dev ridmon del >/dev/null 2>&1
-        wifi up radio1 >/dev/null 2>&1
     fi
     if [ "$LOCK_HELD" -eq 1 ]; then
         rm -rf "$LOCK_DIR"
@@ -97,23 +120,29 @@ cleanup() {
 }
 
 prepare_monitor() {
-    wifi up radio1 >/dev/null 2>&1
+    reserve_scan_radio
     retries=0
     while ! iw phy phy1 info >/dev/null 2>&1; do
         retries=$((retries + 1))
         [ "$retries" -ge 12 ] && return 1
         sleep 1
     done
-    sleep 3
     wifi down radio1 >/dev/null 2>&1
-    # From this point onward cleanup must restore radio1, even if monitor
-    # creation fails halfway through.
+    # From this point onward cleanup must remove a partial monitor interface;
+    # radio1 stays reserved for RID even when startup fails halfway through.
     MONITOR_PREPARED=1
     retries=0
     stable=0
     while [ "$stable" -lt 2 ]; do
-        if iw dev wlan1 info >/dev/null 2>&1; then
-            iw dev wlan1 del >/dev/null 2>&1
+        conflicts="$(iw dev 2>/dev/null | awk '
+            /^phy#1$/ { in_phy=1; next }
+            /^phy#/ { in_phy=0 }
+            in_phy && $1=="Interface" && $2!="ridmon" { print $2 }
+        ')"
+        if [ -n "$conflicts" ]; then
+            for iface in $conflicts; do
+                iw dev "$iface" del >/dev/null 2>&1 || true
+            done
             stable=0
         else
             stable=$((stable + 1))
@@ -126,6 +155,18 @@ prepare_monitor() {
     iw phy phy1 interface add ridmon type monitor || return 1
     ip link set ridmon up || return 1
     iw dev ridmon set channel 6 HT20 || return 1
+}
+
+monitor_healthy() {
+    iw dev ridmon info 2>/dev/null | grep -q 'type monitor' || return 1
+    iw dev ridmon info 2>/dev/null | grep -q 'channel 6 ' || return 1
+    ip link show dev ridmon 2>/dev/null | grep -q 'UP' || return 1
+    conflicts="$(iw dev 2>/dev/null | awk '
+        /^phy#1$/ { in_phy=1; next }
+        /^phy#/ { in_phy=0 }
+        in_phy && $1=="Interface" && $2!="ridmon" { print $2 }
+    ')"
+    [ -z "$conflicts" ]
 }
 
 show_status() {
@@ -168,9 +209,17 @@ show_status() {
     else
         echo "web=stopped port=4600"
     fi
+    if [ -x /etc/init.d/light-rid ] && /etc/init.d/light-rid enabled >/dev/null 2>&1; then
+        echo "autostart=enabled"
+    else
+        echo "autostart=disabled"
+    fi
 }
 
 stop_runtime() {
+    if [ -x /etc/init.d/light-rid ] && [ "${LIGHT_RID_PROCD_STOP:-0}" != "1" ]; then
+        LIGHT_RID_PROCD_STOP=1 /etc/init.d/light-rid stop >/dev/null 2>&1 || true
+    fi
     launcher="$(cat "$LOCK_DIR/launcher.pid" 2>/dev/null)"
     if [ -n "$launcher" ] && kill -0 "$launcher" 2>/dev/null; then
         kill "$launcher" >/dev/null 2>&1
@@ -195,7 +244,7 @@ stop_runtime() {
     done
     rm -rf "$LOCK_DIR"
     iw dev ridmon del >/dev/null 2>&1
-    wifi up radio1 >/dev/null 2>&1
+    reserve_scan_radio >/dev/null 2>&1 || true
     echo "light-rid: stopped"
 }
 
@@ -213,10 +262,17 @@ case "${1:-run}" in
         stop_runtime
         exit 0
         ;;
+    reserve)
+        reserve_scan_radio
+        echo "light-rid: radio1 reserved for RID capture"
+        exit 0
+        ;;
+    supervise)
+        ;;
     run)
         ;;
     *)
-        echo "Usage: light-rid-run [run|check|status|stop]" >&2
+        echo "Usage: light-rid-run [run|supervise|check|status|stop|reserve]" >&2
         exit 2
         ;;
 esac
@@ -239,6 +295,16 @@ TMPDIR=/tmp/light-rid \
 "$PROG" "$APP" --config "$CONFIG" --iface ridmon --channel 6 --no-tui &
 CHILD_PID=$!
 echo "$CHILD_PID" > "$LOCK_DIR/app.pid"
+while kill -0 "$CHILD_PID" >/dev/null 2>&1; do
+    sleep 5
+    if ! monitor_healthy; then
+        echo "light-rid: radio1 ownership lost; restarting supervised runtime" >&2
+        kill "$CHILD_PID" >/dev/null 2>&1 || true
+        wait "$CHILD_PID" >/dev/null 2>&1 || true
+        CHILD_PID=""
+        exit 75
+    fi
+done
 wait "$CHILD_PID"
 STATUS=$?
 CHILD_PID=""

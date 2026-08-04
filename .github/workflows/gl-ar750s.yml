@@ -89,6 +89,7 @@ jobs:
           install -m 0755 openwrt/light-rid-run "$root/usr/bin/light-rid-run"
           install -m 0755 openwrt/light-rid-install "$root/usr/bin/light-rid-install"
           install -m 0755 openwrt/light-rid-upgrade "$root/usr/bin/light-rid-upgrade"
+          install -Dm0755 openwrt/light-rid.init "$root/etc/init.d/light-rid"
           install -m 0644 openwrt/config.gl-ar750s.json "$root/usr/share/light-rid/config.gl-ar750s.json"
           (
             cd "$root"
@@ -108,7 +109,7 @@ jobs:
           test -s "$root/usr/share/light-rid/station_edition/light_rid/router_core.py"
           test -s "$root/usr/share/light-rid/package-manifest.sha256"
           test ! -e "$root/etc/light-rid/config.json"
-          test ! -e "$root/etc/init.d/light-rid"
+          test -x "$root/etc/init.d/light-rid"
           test -z "$(find "$root" -type d -name __pycache__ -print -quit)"
           test ! -e "$root/usr/share/light-rid/station_edition/pytools"
           tar -C "$root" -czf "release/${package}.tar.gz" .
@@ -120,4 +121,5 @@ jobs:
           path: |
             release/light-rid-gl-ar750s-*.tar.gz
             release/light-rid-gl-ar750s-*.tar.gz.sha256
+            openwrt/deploy-gl-ar750s.ps1
           if-no-files-found: error

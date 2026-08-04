@@ -21,6 +21,13 @@ trap 'rm -f "$0"' EXIT HUP INT TERM
 
 board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
 [ "$board" = "glinet,gl-ar750s-nor-nand" ] || fail "unsupported board '${board:-unknown}'"
+[ ! -x /etc/init.d/light-rid ] || /etc/init.d/light-rid stop >/dev/null 2>&1 || true
+stop_wait=0
+while ps w | grep -q '[s]tation_edition/run.py'; do
+    stop_wait=$((stop_wait + 1))
+    [ "$stop_wait" -ge 15 ] && break
+    sleep 1
+done
 [ -f "$archive" ] || fail "archive not found: $archive"
 checksum="$archive.sha256"
 [ -f "$checksum" ] || fail "checksum file not found: $checksum"

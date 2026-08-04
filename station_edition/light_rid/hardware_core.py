@@ -1983,10 +1983,39 @@ def _sniff_close_socket(sock) -> None:
         pass
 
 def _sniff_open_socket(iface: str):
+    if not SCAPY_AVAILABLE:
+        raise RuntimeError("scapy capture fallback is unavailable")
     try:
         return conf.L2listen(iface=iface, monitor=True)
     except TypeError:
         return conf.L2listen(iface=iface)
+
+def _native_capture_helper_path() -> str:
+    configured = str(os.environ.get("LIGHT_RID_CAPTURE_HELPER") or NATIVE_CAPTURE_HELPER or "").strip()
+    if configured and os.path.isfile(configured):
+        return configured
+    found = shutil.which("light-rid-capture")
+    return str(found or "")
+
+def _sniff_run_native(iface: str, timeout_sec: float) -> None:
+    helper = _native_capture_helper_path()
+    if not helper:
+        raise RuntimeError("native capture helper not found")
+    proc = subprocess.Popen(
+        [helper, "--interface", iface, "--timeout-ms", str(int(timeout_sec * 1000))],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        if line.startswith("RIDCAP1\t"):
+            _parse_native_capture_line(line.rstrip("\r\n"))
+    _out, err = proc.communicate()
+    if proc.returncode:
+        raise RuntimeError((err or f"capture helper exited {proc.returncode}").strip())
 
 def _sniff_run_once(iface: str, timeout_sec: float = SNIFF_POLL_TIMEOUT) -> tuple[str, str]:
     iface = str(iface or "").strip()
@@ -2000,9 +2029,13 @@ def _sniff_run_once(iface: str, timeout_sec: float = SNIFF_POLL_TIMEOUT) -> tupl
     def _worker() -> None:
         sock = None
         try:
-            sock = _sniff_open_socket(iface)
-            sock_ref["sock"] = sock
-            sniff(opened_socket=sock, prn=parse_frame, store=False, timeout=timeout_sec)
+            helper = _native_capture_helper_path()
+            if helper:
+                _sniff_run_native(iface, timeout_sec)
+            else:
+                sock = _sniff_open_socket(iface)
+                sock_ref["sock"] = sock
+                sniff(opened_socket=sock, prn=parse_frame, store=False, timeout=timeout_sec)
         except Exception as ex:
             result["error"] = str(ex or "")
         finally:

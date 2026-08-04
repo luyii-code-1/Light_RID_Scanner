@@ -42,13 +42,20 @@ try:
 except ImportError:
     curses = None
 
+NATIVE_CAPTURE_HELPER = str(
+    os.environ.get("LIGHT_RID_CAPTURE_HELPER") or "/usr/bin/light-rid-capture"
+).strip()
+SCAPY_AVAILABLE = False
 try:
     from scapy.config import conf
     from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
     from scapy.sendrecv import sniff
     conf.verb = 0
+    SCAPY_AVAILABLE = True
 except ImportError:
-    sys.exit("[FATAL] scapy not installed. Run: pip3 install scapy")
+    conf = Dot11 = Dot11Beacon = Dot11Elt = RadioTap = sniff = None
+    if not (os.name == "posix" and os.path.isfile(NATIVE_CAPTURE_HELPER)):
+        sys.exit("[FATAL] neither native capture helper nor scapy is available")
 
 # -----------------------------------------------------------------------------
 # 常量

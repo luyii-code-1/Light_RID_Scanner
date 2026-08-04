@@ -111,6 +111,104 @@ def start_packet_parse_worker() -> None:
 def parse_frame(pkt) -> None:
     _enqueue_packet_for_parse(pkt)
 
+def _parse_native_capture_line(line: str) -> None:
+    """Ingest one tab-delimited frame emitted by light-rid-capture."""
+    try:
+        fields = str(line or "").split("\t")
+        if len(fields) != 7 or fields[0] != "RIDCAP1":
+            return
+        subtype = int(fields[1])
+        src_mac = fields[2] or "unknown"
+        rssi = int(fields[3]) if fields[3] else None
+        rt_ch = int(fields[4]) if fields[4] else None
+        ssid = bytes.fromhex(fields[5]).decode("utf-8", errors="replace") if fields[5] else None
+        raw = bytes.fromhex(fields[6])
+    except (TypeError, ValueError):
+        return
+    _parse_native_frame_impl(subtype, src_mac, rssi, rt_ch, ssid, raw)
+
+def _parse_native_frame_impl(
+    subtype: int,
+    src_mac: str,
+    rssi: int | None,
+    rt_ch: int | None,
+    ssid: str | None,
+    raw: bytes,
+) -> None:
+    """Keep Python RID parsing/state behavior while Rust owns packet capture."""
+    global ap_seq
+    try:
+        _sniff_note_packet()
+        subtype_name = {8: "Beacon", 5: "ProbeResp", 13: "Action"}.get(subtype, "Mgmt")
+        ch = rt_ch or current_channel
+        ch_assumed = rt_ch is None
+        now = time.monotonic()
+        if ssid:
+            sn_s = _ssid_to_sn(ssid)
+            if sn_s:
+                mac_to_ssid_sn[src_mac] = {"sn": sn_s, "ts": now}
+        if subtype == 8:
+            ts = time.strftime("%H:%M:%S")
+            rssi_s = f"{rssi}dBm" if rssi is not None else "N/A"
+            ch_s = f"ch{ch}" if ch else "ch?"
+            with log_lock:
+                ap_buf.append(f"[{ts}] {src_mac}  {rssi_s:>8}  {ch_s:<5}  {ssid or '(hidden)'}")
+                ap_seq += 1
+            try:
+                _ap_touch(src_mac, ssid, rssi, ch, "Beacon")
+            except Exception:
+                pass
+
+        ssid_rid = _ssid_to_sn(ssid or "")
+        parsed_batch = parse_rid_payloads(raw, mode="auto", ssid_sn=(ssid_rid or None), model_hint=None)
+        parsed_packets = list(parsed_batch.get("packets") or []) if parsed_batch.get("ok") else []
+        frame_hex = _hex_preview(raw, max_bytes=220)
+        is_wifi_fast = bool(SCAN_WIFI_FAST) and _is_wifi_fast_mac(src_mac)
+        if not parsed_packets:
+            if is_wifi_fast:
+                state_update(
+                    src_mac,
+                    {"basic_id": {"uas_id": _wifi_fast_sn(src_mac), "id_type": "SSID"}, "location": None, "system": None},
+                    rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0,
+                    scan_type="phone", ssid=(ssid or ""), capture_type=subtype_name,
+                    raw_pkt_hex=frame_hex, firmware_type="old",
+                )
+            elif ssid and src_mac in mac_to_ssid_sn:
+                state_update(
+                    src_mac, {"basic_id": None, "location": None, "system": None},
+                    rssi=rssi, ch=ch, ch_assumed=ch_assumed, pl_sig=0,
+                    scan_type="rid", ssid=ssid, capture_type=subtype_name,
+                    raw_pkt_hex=frame_hex, firmware_type="old",
+                )
+            return
+
+        _notify_hit(ch if not ch_assumed or ch == current_channel else 0)
+        for parsed in parsed_packets:
+            if not isinstance(parsed, dict):
+                continue
+            decoded = parsed.get("decoded") if isinstance(parsed.get("decoded"), dict) else rid_parse_result_to_decoded(parsed)
+            if not isinstance(decoded, dict):
+                continue
+            fmt = str(parsed.get("format") or "")
+            sn = str(parsed.get("sn") or ((decoded.get("basic_id") or {}).get("uas_id") or "")).strip()
+            if fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(sn) or not _rid_parser_has_coord(decoded):
+                continue
+            body_hex = str(parsed.get("body_hex") or "")
+            try:
+                body = bytes.fromhex(body_hex) if body_hex else raw
+            except ValueError:
+                body = raw
+            state_update(
+                src_mac, decoded, rssi=rssi, ch=ch, ch_assumed=ch_assumed,
+                pl_sig=zlib.crc32(body) & 0xFFFFFFFF,
+                scan_type=("phone" if is_wifi_fast else "rid"), ssid=ssid,
+                capture_type=subtype_name, raw_pkt_hex=(body_hex or frame_hex),
+                firmware_type=("new" if fmt == "GB46750_2025" else "old"),
+            )
+    except Exception as ex:
+        if DEBUG_MODE:
+            _scan(f"[ERR] native capture frame: {ex}")
+
 
 def _parse_frame_impl(pkt) -> None:
     global ap_seq

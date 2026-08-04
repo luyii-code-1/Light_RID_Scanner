@@ -1,0 +1,91 @@
+name: GL-AR750S package
+
+on:
+  push:
+    branches: [GL-AR750S-edition]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gl-ar750s:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate Python station sources
+        run: |
+          python -m pip install -r requirements.txt
+          python -m compileall -q station_edition
+          python -m unittest discover -s tests
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Test native capture helper
+        run: cargo test --manifest-path native_capture/Cargo.toml
+
+      - name: Install matching OpenWrt 19.07.7 SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sdk_name=openwrt-sdk-19.07.7-ath79-generic_gcc-7.5.0_musl.Linux-x86_64
+          sdk_archive="${sdk_name}.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "$sdk_archive" \
+            "https://downloads.openwrt.org/releases/19.07.7/targets/ath79/generic/${sdk_archive}"
+          echo "ca38e014e5432e307a52c28f2226a2d1aa30411caa72a1c40763152deea87c9f  $sdk_archive" | sha256sum --check
+          mkdir .openwrt-sdk
+          tar -xJf "$sdk_archive" -C .openwrt-sdk
+          linker="$(find "$PWD/.openwrt-sdk" -name mips-openwrt-linux-musl-gcc -print -quit)"
+          test -x "$linker"
+          staging_dir="$(dirname "$(dirname "$(dirname "$linker")")")"
+          test "$(STAGING_DIR="$staging_dir" "$linker" -print-file-name=crt1.o)" != crt1.o
+          echo "OPENWRT_MIPS_LINKER=$linker" >> "$GITHUB_ENV"
+          echo "OPENWRT_STAGING_DIR=$staging_dir" >> "$GITHUB_ENV"
+
+      - name: Cross-compile capture helper for GL-AR750S
+        env:
+          CARGO_TARGET_MIPS_UNKNOWN_LINUX_MUSL_LINKER: ${{ env.OPENWRT_MIPS_LINKER }}
+          STAGING_DIR: ${{ env.OPENWRT_STAGING_DIR }}
+          RUSTFLAGS: -C target-feature=-crt-static -C link-self-contained=no
+        run: |
+          cargo +nightly build -Z build-std=std,panic_abort \
+            --manifest-path native_capture/Cargo.toml \
+            --target mips-unknown-linux-musl \
+            --release
+
+      - name: Verify target ELF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          binary=native_capture/target/mips-unknown-linux-musl/release/light-rid-capture
+          file "$binary" | tee /tmp/file.txt
+          grep -E 'ELF 32-bit MSB.*MIPS.*MIPS32 rel2' /tmp/file.txt
+          readelf -l "$binary" | grep '/lib/ld-musl-mips-sf.so.1'
+
+      - name: Assemble router package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          package="light-rid-gl-ar750s-${short_sha}"
+          root="release/${package}/root"
+          mkdir -p "$root/usr/bin" "$root/usr/share/light-rid" "$root/etc/init.d" "$root/etc/light-rid"
+          install -m 0755 native_capture/target/mips-unknown-linux-musl/release/light-rid-capture "$root/usr/bin/light-rid-capture"
+          cp -a station_edition "$root/usr/share/light-rid/"
+          cp rid_model.json oui.txt rid_build_info.json "$root/usr/share/light-rid/"
+          install -m 0755 openwrt/light-rid.init "$root/etc/init.d/light-rid"
+          install -m 0644 openwrt/config.gl-ar750s.json "$root/etc/light-rid/config.json"
+          tar -C "$root" -czf "release/${package}.tar.gz" .
+          sha256sum "release/${package}.tar.gz" > "release/${package}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: light-rid-gl-ar750s-${{ github.sha }}
+          path: |
+            release/light-rid-gl-ar750s-*.tar.gz
+            release/light-rid-gl-ar750s-*.tar.gz.sha256
+          if-no-files-found: error

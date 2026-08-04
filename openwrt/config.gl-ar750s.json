@@ -1,0 +1,26 @@
+{
+  "basic": {
+    "iface": "ridmon",
+    "channel": 6,
+    "hop": false,
+    "hop_5g": false,
+    "scan_wifi_fast": false,
+    "auto_self_heal": true,
+    "no_tui": true,
+    "debug": false,
+    "model_map": "/usr/share/light-rid/rid_model.json",
+    "history_file": "/etc/light-rid/rid_storage.db"
+  },
+  "notify": {
+    "enabled": false
+  },
+  "auth": {
+    "enabled": false
+  },
+  "model_update": {
+    "enabled": false
+  },
+  "app_update": {
+    "enabled": false
+  }
+}

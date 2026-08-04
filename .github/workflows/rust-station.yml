@@ -77,9 +77,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rustfmt, clippy
+          components: rust-src
 
       - uses: taiki-e/install-action@cross
 
@@ -88,10 +88,10 @@ jobs:
           workspaces: station_edition_rust
 
       - name: Test under MIPS QEMU
-        run: cross test --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl
+        run: cross +nightly test -Z build-std --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl
 
       - name: Build static MIPS release
-        run: cross build --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl --release
+        run: cross +nightly build -Z build-std --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl --release
 
       - name: Verify target ELF
         shell: bash

@@ -91,6 +91,8 @@ jobs:
         run: cross +nightly test -Z build-std --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl
 
       - name: Build static MIPS release
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cross +nightly build -Z build-std=std,panic_abort --manifest-path station_edition_rust/Cargo.toml --target mips-unknown-linux-musl --release
 
       - name: Verify target ELF
@@ -99,8 +101,9 @@ jobs:
           set -euxo pipefail
           binary=station_edition_rust/target/mips-unknown-linux-musl/release/light-rid-station
           file "$binary" | tee /tmp/file.txt
-          grep -E 'ELF 32-bit MSB.*MIPS.*statically linked' /tmp/file.txt
+          grep -E 'ELF 32-bit MSB.*MIPS' /tmp/file.txt
           ! readelf -l "$binary" | grep -q 'Requesting program interpreter'
+          ! readelf -d "$binary" | grep -q 'NEEDED'
           readelf -h "$binary" | grep -E 'Class:.*ELF32|Data:.*big endian|Machine:.*MIPS'
 
       - name: Assemble OpenWrt package

@@ -80,7 +80,8 @@ jobs:
           cp EULA.md "$root/etc/light-rid/EULA.md"
           printf '{"commit":"%s","tag":"","release_tag":"","build":1,"generated_at":"%s","dirty":false}\n' \
             "$short_sha" "$(date -u '+%Y-%m-%d %H:%M:%S')" \
-            > "$root/usr/share/light-rid/rid_build_info.json"
+            > "$root/etc/light-rid/rid_build_info.json"
+          cp "$root/etc/light-rid/rid_build_info.json" "$root/usr/share/light-rid/rid_build_info.json"
           install -m 0755 openwrt/light-rid.init "$root/etc/init.d/light-rid"
           install -m 0644 openwrt/config.gl-ar750s.json "$root/etc/light-rid/config.json"
           tar -C "$root" -czf "release/${package}.tar.gz" .

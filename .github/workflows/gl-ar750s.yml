@@ -168,3 +168,17 @@ jobs:
           gh auth setup-git
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin HEAD:gl-ar750s-download
+
+      - name: Purge jsDelivr branch cache
+        shell: bash
+        run: |
+          set -u
+          urls=(
+            "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@GL-AR750S-edition/openwrt/install-gl-ar750s.sh"
+            "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@gl-ar750s-download/light-rid-gl-ar750s.tar.gz"
+            "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@gl-ar750s-download/light-rid-gl-ar750s.tar.gz.sha256"
+            "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@gl-ar750s-download/build-info.txt"
+          )
+          for url in "${urls[@]}"; do
+            curl -fsS --retry 3 "$url" >/dev/null || echo "warning: could not purge $url"
+          done

@@ -13,6 +13,15 @@ verifies its SHA-256 checksum, preserves existing settings, enables procd, and
 waits for the service to start:
 
 ```sh
+curl -fsSL https://cdn.jsdelivr.net/gh/luyii-code-1/Light_RID_Scanner@GL-AR750S-edition/openwrt/install-gl-ar750s.sh | sh
+```
+
+The bootstrap uses jsDelivr first, then falls back to GitHub Raw and GitHub
+Release. Every downloaded package is checked against its SHA-256 file before
+extraction. If jsDelivr itself is unavailable, the bootstrap can also be read
+directly from GitHub Raw:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/GL-AR750S-edition/openwrt/install-gl-ar750s.sh | sh
 ```
 
@@ -21,7 +30,7 @@ environment variables can be supplied to `sh` without placing credentials in
 the public repository:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/GL-AR750S-edition/openwrt/install-gl-ar750s.sh | \
+curl -fsSL https://cdn.jsdelivr.net/gh/luyii-code-1/Light_RID_Scanner@GL-AR750S-edition/openwrt/install-gl-ar750s.sh | \
   LIGHT_RID_FACTORY_SSID='Light-RID' LIGHT_RID_FACTORY_WIFI_PASSWORD='replace-me' sh
 ```
 

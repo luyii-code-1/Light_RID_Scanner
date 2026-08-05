@@ -3154,8 +3154,10 @@
         timezone_offset_min: (/* @__PURE__ */ new Date()).getTimezoneOffset()
       });
       var display = String(data.local_time || "已同步");
-      setStatus("status-system-time", "设备时间：" + display, false);
-      showNotice("系统时间已同步。", "ok", 2600);
+      var timezone = String(data.browser_timezone || data.system_timezone || "");
+      var timezoneDetail = data.system_timezone && data.system_timezone !== timezone ? " (" + String(data.system_timezone) + ")" : "";
+      setStatus("status-system-time", "设备时间：" + display + (timezone ? " | 时区：" + timezone + timezoneDetail : ""), false);
+      showNotice("系统时间和时区已同步。", "ok", 2600);
     } catch (e) {
       setStatus("status-system-time", "同步失败：" + (e.message || e), true);
       showNotice(e.message || e, "warn", 4200);

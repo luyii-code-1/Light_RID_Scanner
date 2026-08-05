@@ -8448,6 +8448,26 @@ def _build_settings_html() -> str:
         return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Scanner</title></head><body>settings template missing</body></html>'
     return html_src.replace("</body>", f'<script src="{_station_settings_asset_url()}"></script></body>', 1)
 
+def _browser_timezone_config(payload: dict) -> tuple[str, str]:
+    timezone_name = str(payload.get("timezone") or "UTC").strip()[:80]
+    if not re.fullmatch(r"[A-Za-z0-9_+./-]+", timezone_name):
+        raise ValueError("invalid timezone")
+    try:
+        offset_min = int(payload.get("timezone_offset_min"))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("invalid timezone_offset_min")
+    if offset_min < -840 or offset_min > 840:
+        raise ValueError("timezone_offset_min out of range")
+    if timezone_name in {"Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin"} and offset_min == -480:
+        return timezone_name, "CST-8"
+    if offset_min == 0:
+        return timezone_name, "UTC0"
+    sign = "+" if offset_min > 0 else "-"
+    absolute = abs(offset_min)
+    hours, minutes = divmod(absolute, 60)
+    suffix = f":{minutes:02d}" if minutes else ""
+    return timezone_name, f"UTC{sign}{hours}{suffix}"
+
 def _sync_system_time_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return {"ok": False, "error": "payload must be object"}
@@ -8458,29 +8478,47 @@ def _sync_system_time_payload(payload: dict) -> dict:
     epoch_sec = int(round(epoch_ms / 1000.0))
     if epoch_sec < 1577836800 or epoch_sec > 4102444800:
         return {"ok": False, "error": "time must be between 2020 and 2100"}
+    try:
+        timezone_name, posix_timezone = _browser_timezone_config(payload)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if not sys.platform.startswith("linux"):
         return {"ok": False, "error": "system time sync is only available on the router"}
     date_bin = shutil.which("date")
-    if not date_bin:
-        return {"ok": False, "error": "date command not found"}
+    uci_bin = shutil.which("uci")
+    system_init = "/etc/init.d/system"
+    if not date_bin or not uci_bin or not os.path.exists(system_init):
+        return {"ok": False, "error": "router time configuration commands not found"}
     try:
-        proc = subprocess.run(
+        commands = (
             [date_bin, "-s", f"@{epoch_sec}"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
+            [uci_bin, "set", f"system.@system[0].zonename={timezone_name}"],
+            [uci_bin, "set", f"system.@system[0].timezone={posix_timezone}"],
+            [uci_bin, "commit", "system"],
+            [system_init, "reload"],
         )
+        for command in commands:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            if proc.returncode != 0:
+                error = str(proc.stderr or proc.stdout or f"{command[0]} failed").strip()
+                return {"ok": False, "error": error}
     except Exception as exc:
-        return {"ok": False, "error": f"cannot set system time: {exc}"}
-    if proc.returncode != 0:
-        error = str(proc.stderr or proc.stdout or "date command failed").strip()
-        return {"ok": False, "error": error}
+        return {"ok": False, "error": f"cannot set system time or timezone: {exc}"}
+    os.environ["TZ"] = posix_timezone
+    if hasattr(time, "tzset"):
+        time.tzset()
     return {
         "ok": True,
         "epoch_ms": int(time.time() * 1000),
         "local_time": time.strftime("%Y-%m-%d %H:%M:%S %z"),
-        "browser_timezone": str(payload.get("timezone") or "")[:80],
+        "browser_timezone": timezone_name,
+        "system_timezone": posix_timezone,
     }
 
 def _build_router_html() -> str:

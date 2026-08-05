@@ -40,19 +40,31 @@ class GlAr750sPackagingTests(unittest.TestCase):
         function = self.runtime["_sync_system_time_payload"]
         globals_map = function.__globals__
         completed = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(globals_map["sys"], "platform", "linux"), \
-             mock.patch.object(globals_map["shutil"], "which", return_value="/bin/date"), \
+        with mock.patch.dict(globals_map["os"].environ, {}, clear=False), \
+             mock.patch.object(globals_map["sys"], "platform", "linux"), \
+             mock.patch.object(globals_map["shutil"], "which", side_effect=lambda name: f"/sbin/{name}"), \
+             mock.patch.object(globals_map["os"].path, "exists", return_value=True), \
              mock.patch.object(globals_map["subprocess"], "run", return_value=completed) as run:
-            payload = function({"epoch_ms": 1_800_000_000_250, "timezone": "Asia/Shanghai"})
+            payload = function({"epoch_ms": 1_800_000_000_250, "timezone": "Asia/Shanghai", "timezone_offset_min": -480})
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["browser_timezone"], "Asia/Shanghai")
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], ["/bin/date", "-s", "@1800000000"])
+        self.assertEqual(payload["system_timezone"], "CST-8")
+        self.assertEqual(run.call_count, 5)
+        self.assertEqual(run.call_args_list[0].args[0], ["/sbin/date", "-s", "@1800000000"])
+        self.assertEqual(run.call_args_list[1].args[0], ["/sbin/uci", "set", "system.@system[0].zonename=Asia/Shanghai"])
+        self.assertEqual(run.call_args_list[2].args[0], ["/sbin/uci", "set", "system.@system[0].timezone=CST-8"])
+        self.assertEqual(run.call_args_list[3].args[0], ["/sbin/uci", "commit", "system"])
+        self.assertEqual(run.call_args_list[4].args[0], ["/etc/init.d/system", "reload"])
 
     def test_system_time_sync_rejects_invalid_epoch(self) -> None:
         payload = self.runtime["_sync_system_time_payload"]({"epoch_ms": "not-a-time"})
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "invalid epoch_ms")
+
+    def test_browser_timezone_supports_fractional_offsets(self) -> None:
+        function = self.runtime["_browser_timezone_config"]
+        self.assertEqual(function({"timezone": "Asia/Kolkata", "timezone_offset_min": -330}), ("Asia/Kolkata", "UTC-5:30"))
+        self.assertEqual(function({"timezone": "America/New_York", "timezone_offset_min": 240}), ("America/New_York", "UTC+4"))
 
     def test_bootstrap_prefers_gh_proxy_with_verified_fallbacks(self) -> None:
         installer = Path("openwrt/install-gl-ar750s.sh").read_text(encoding="utf-8")

@@ -27,7 +27,7 @@ fetch() {
     source_url="$1"
     destination="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 --connect-timeout 15 -o "$destination" "$source_url"
+        curl -fsSL --retry 3 --connect-timeout 15 --max-time 90 -o "$destination" "$source_url"
     elif command -v wget >/dev/null 2>&1; then
         wget -O "$destination" "$source_url"
     else

@@ -59,8 +59,9 @@ light-rid-run check
 
 The first install stores a read-only baseline of OpenWrt's `network`,
 `wireless`, `dhcp`, `firewall`, and `uhttpd` configurations under
-`/etc/light-rid/openwrt-original`. The router page can restore this exact
-pre-install state. Upgrades never replace that baseline.
+`/etc/light-rid/openwrt-original`. This exact pre-install state remains
+available to SSH maintenance tools but is not exposed as a page button.
+Upgrades never replace that baseline.
 
 For a production-line install with one shared 5 GHz SSID/password, provision
 the values interactively so the secret never enters the public repository or
@@ -107,9 +108,12 @@ interfaces, and dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
 vendor process changes the monitor interface, channel, or radio ownership. The
 5 GHz AP and wired WAN remain available for ordinary router service.
 The dedicated `/router` page controls OpenWrt through UCI/ubus and provides a
-separate LuCI link. Network changes use a 60-second confirmation window and an
-independent rollback process. The 2.4 GHz radio is never exposed as a router
-setting because it is reserved for RID capture.
+LuCI link based on the browser's current WAN address. Network changes save
+directly without a confirmation transaction. The page exposes one 5 GHz AP;
+guest AP and IPv6 status controls are intentionally omitted. IP SSID mode is
+the default and refreshes the AP name to `RID-<upstream IPv4>` at every Light
+RID start. Normal mode keeps an operator-defined SSID. The 2.4 GHz radio is
+never exposed as a router setting because it is reserved for RID capture.
 Only one scanner instance can run at a time. `light-rid-run status` reports the
 device ID, installed build, free RAM/storage, process IDs, monitor channel,
 5GHz management AP, and web listener. Every package

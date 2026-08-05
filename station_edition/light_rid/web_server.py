@@ -9790,28 +9790,7 @@ def http_server_thread() -> None:
             if path == "/api/router/apply":
                 body = self._read_json_body()
                 rsp, code = _router_apply_payload(body)
-                _op_log("router-apply", f"transaction={(rsp.get('transaction') or {}).get('id', '-')}", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
-                self._send_json(rsp, code)
-                return
-            if path == "/api/router/confirm":
-                body = self._read_json_body()
-                rsp, code = _router_confirm_transaction(str(body.get("id") or ""))
-                _op_log("router-confirm", str(body.get("id") or "-"), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
-                self._send_json(rsp, code)
-                return
-            if path == "/api/router/rollback":
-                body = self._read_json_body()
-                rsp, code = _router_restore_transaction(str(body.get("id") or ""))
-                _op_log("router-rollback", str(body.get("id") or "-"), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
-                self._send_json(rsp, code)
-                return
-            if path == "/api/router/reset-network":
-                body = self._read_json_body()
-                if str(body.get("confirm") or "") != "RESTORE":
-                    self._send_json({"ok": False, "error": "恢复确认无效"}, 400)
-                    return
-                rsp, code = _router_reset_original()
-                _op_log("router-reset-original", "", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                _op_log("router-apply", "direct-save", ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
                 self._send_json(rsp, code)
                 return
             if path == "/api/router/wifi/scan":

@@ -30,7 +30,7 @@ check_board() {
 
 check_runtime() {
     check_board
-    for command in "$PROG" iw ip wifi awk sha256sum; do
+    for command in "$PROG" iw ip wifi awk sha256sum uci ubus jsonfilter; do
         command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
     done
     [ -x "$CAPTURE" ] || fail "capture helper is missing"
@@ -85,6 +85,64 @@ reserve_scan_radio() {
     fi
 }
 
+interface_ipv4() {
+    ubus call "network.interface.$1" status 2>/dev/null | \
+        jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null
+}
+
+refresh_management_ssid() {
+    wireless_changed=0
+    if uci -q get wireless.guest5g >/dev/null 2>&1; then
+        uci -q delete wireless.guest5g >/dev/null 2>&1 || true
+        wireless_changed=1
+    fi
+    ssid_mode="$(uci -q get wireless.default_radio0.light_rid_ssid_mode 2>/dev/null)"
+    case "$ssid_mode" in
+        normal)
+            if [ "$wireless_changed" -eq 1 ]; then
+                uci commit wireless || return 1
+                wifi reload radio0 >/dev/null 2>&1 || true
+            fi
+            return 0
+            ;;
+        ip) ;;
+        *)
+            uci set wireless.default_radio0.light_rid_ssid_mode='ip' || return 1
+            wireless_changed=1
+            ;;
+    esac
+
+    # The upstream WAN/WWAN address is the address operators use from their
+    # existing private network. Wait briefly for DHCP, then fall back to LAN.
+    management_ip=""
+    retries=0
+    while [ -z "$management_ip" ] && [ "$retries" -lt 20 ]; do
+        management_ip="$(interface_ipv4 wwan)"
+        [ -n "$management_ip" ] || management_ip="$(interface_ipv4 wan)"
+        [ -n "$management_ip" ] && break
+        retries=$((retries + 1))
+        sleep 1
+    done
+    [ -n "$management_ip" ] || management_ip="$(interface_ipv4 lan)"
+    [ -n "$management_ip" ] || management_ip="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+    if [ -z "$management_ip" ]; then
+        [ "$wireless_changed" -eq 0 ] || uci commit wireless || return 1
+        return 0
+    fi
+
+    desired_ssid="RID-$management_ip"
+    current_ssid="$(uci -q get wireless.default_radio0.ssid 2>/dev/null)"
+    if [ "$current_ssid" != "$desired_ssid" ]; then
+        uci set "wireless.default_radio0.ssid=$desired_ssid" || return 1
+        wireless_changed=1
+    fi
+    if [ "$wireless_changed" -eq 1 ]; then
+        uci commit wireless || return 1
+        wifi reload radio0 >/dev/null 2>&1 || true
+        echo "light-rid: 5GHz management SSID refreshed to $desired_ssid"
+    fi
+}
+
 acquire_lock() {
     if mkdir "$LOCK_DIR" 2>/dev/null; then
         LOCK_HELD=1
@@ -126,6 +184,7 @@ cleanup() {
 
 prepare_monitor() {
     reserve_scan_radio
+    refresh_management_ssid || fail "cannot refresh 5GHz management SSID"
     retries=0
     while ! iw phy phy1 info >/dev/null 2>&1; do
         retries=$((retries + 1))

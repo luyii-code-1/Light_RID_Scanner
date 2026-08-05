@@ -11,6 +11,8 @@ ROUTER_BOARD = "glinet,gl-ar750s-nor-nand"
 ROUTER_CONFIG_FILES = ("network", "wireless", "dhcp", "firewall", "uhttpd")
 ROUTER_TX_ROOT = "/tmp/light-rid-router"
 ROUTER_ORIGINAL_ROOT = "/etc/light-rid/openwrt-original"
+# Legacy helpers remain loadable for upgrades, but direct save does not expose
+# confirmation or rollback transactions.
 ROUTER_ROLLBACK_SECONDS = 60
 ROUTER_SAFE_CHANNELS = {36, 40, 44, 48, 149, 153, 157, 161, 165}
 ROUTER_HTMODES = {"VHT20", "VHT40", "VHT80"}
@@ -39,7 +41,6 @@ def _router_capabilities() -> dict:
         "openwrt": "DISTRIB_ID='OpenWrt'" in release or "OpenWrt" in release,
         "commands": commands,
         "radio1_reserved": True,
-        "rollback_seconds": ROUTER_ROLLBACK_SECONDS,
     }
 
 
@@ -129,6 +130,21 @@ def _router_interface_status(name: str) -> dict:
     }
 
 
+def _router_management_ipv4() -> str:
+    """Return the address used to reach this router from the upstream LAN."""
+    for name in ("wwan", "wan", "lan"):
+        status = _router_interface_status(name)
+        if not status.get("up") and name != "lan":
+            continue
+        for value in status.get("addresses") or []:
+            address = str(value).split("/", 1)[0]
+            try:
+                return str(ipaddress.IPv4Address(address))
+            except Exception:
+                continue
+    return _router_uci_get("network.lan.ipaddr", "192.168.8.1")
+
+
 def _router_parse_port_forwards(firewall: dict[str, str]) -> list[dict]:
     sections: dict[str, dict] = {}
     for key, value in firewall.items():
@@ -186,7 +202,9 @@ def _router_config_payload() -> dict:
         },
         "ap": {
             "enabled": _router_uci_get("wireless.default_radio0.disabled", "0") != "1",
+            "ssid_mode": _router_uci_get("wireless.default_radio0.light_rid_ssid_mode", "ip"),
             "ssid": wireless.get("wireless.default_radio0.ssid", ""),
+            "management_ip": _router_management_ipv4(),
             "password": _router_secret_placeholder(wireless.get("wireless.default_radio0.key", "")),
             "channel": _router_uci_get("wireless.radio0.channel", "36"),
             "htmode": _router_uci_get("wireless.radio0.htmode", "VHT80"),
@@ -197,16 +215,6 @@ def _router_config_payload() -> dict:
             "bssid": wireless.get("wireless.light_rid_repeater.bssid", ""),
             "encryption": wireless.get("wireless.light_rid_repeater.encryption", "psk2"),
             "password": _router_secret_placeholder(wireless.get("wireless.light_rid_repeater.key", "")),
-        },
-        "guest": {
-            "enabled": _router_uci_get("wireless.guest5g.disabled", "1") != "1",
-            "ssid": wireless.get("wireless.guest5g.ssid", ""),
-            "password": _router_secret_placeholder(wireless.get("wireless.guest5g.key", "")),
-            "ipaddr": _router_uci_get("network.guest.ipaddr", "192.168.9.1"),
-            "netmask": _router_uci_get("network.guest.netmask", "255.255.255.0"),
-            "dhcp_start": _router_int(_router_uci_get("dhcp.guest.start", "100"), 100, 1, 253),
-            "dhcp_limit": _router_int(_router_uci_get("dhcp.guest.limit", "150"), 150, 1, 253),
-            "lease_time": _router_uci_get("dhcp.guest.leasetime", "12h"),
         },
         "port_forwards": _router_parse_port_forwards(firewall),
         "remote_management": {
@@ -241,8 +249,6 @@ def _router_status_payload() -> dict:
     payload = {
         "ok": True,
         "capabilities": capabilities,
-        "transaction": _router_tx_status(),
-        "luci_url": "http://{}/cgi-bin/luci".format(_router_uci_get("network.lan.ipaddr", "192.168.8.1")),
     }
     if not capabilities["supported"]:
         payload["config"] = {}
@@ -253,7 +259,7 @@ def _router_status_payload() -> dict:
         "lan": _router_interface_status("lan"),
         "wan": _router_interface_status("wan"),
         "wwan": _router_interface_status("wwan"),
-        "wan6": _router_interface_status("wan6"),
+        "management_ip": _router_management_ipv4(),
         "radio1": {"reserved": True, "interface": "ridmon", "channel": int(globals().get("current_channel", 0) or 0)},
     }
     return payload
@@ -321,15 +327,20 @@ def _router_validate_config(payload: dict | None) -> tuple[dict, list[str]]:
     ap_raw = body.get("ap") if isinstance(body.get("ap"), dict) else {}
     channel = _router_int(ap_raw.get("channel"), 36, 1, 196)
     htmode = str(ap_raw.get("htmode") or "VHT80").upper()
+    ssid_mode = str(ap_raw.get("ssid_mode") or "ip").strip().lower()
+    if ssid_mode not in {"ip", "normal"}:
+        errors.append("5GHz AP SSID 模式必须是 ip 或 normal")
+        ssid_mode = "ip"
     ap = {
         "enabled": _router_bool(ap_raw.get("enabled"), True),
+        "ssid_mode": ssid_mode,
         "ssid": str(ap_raw.get("ssid") or "").strip(),
         "password": str(ap_raw.get("password") or ""),
         "channel": channel,
         "htmode": htmode,
         "txpower": _router_int(ap_raw.get("txpower"), 20, 1, 20),
     }
-    if ap["enabled"] and not (1 <= len(ap["ssid"].encode("utf-8")) <= 32):
+    if ap["enabled"] and ssid_mode == "normal" and not (1 <= len(ap["ssid"].encode("utf-8")) <= 32):
         errors.append("主 AP SSID 必须为 1 到 32 字节")
     if ap["password"] and not (8 <= len(ap["password"]) <= 63):
         errors.append("主 AP 密码必须为 8 到 63 个字符")
@@ -357,38 +368,16 @@ def _router_validate_config(payload: dict | None) -> tuple[dict, list[str]]:
     if repeater["bssid"] and not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", repeater["bssid"]):
         errors.append("中继 BSSID 格式无效")
 
-    guest_raw = body.get("guest") if isinstance(body.get("guest"), dict) else {}
-    guest = {
-        "enabled": _router_bool(guest_raw.get("enabled"), False),
-        "ssid": str(guest_raw.get("ssid") or "").strip(),
-        "password": str(guest_raw.get("password") or ""),
-        "ipaddr": _router_valid_ipv4(guest_raw.get("ipaddr") or "192.168.9.1", "访客网地址", errors),
-        "netmask": _router_valid_ipv4(guest_raw.get("netmask") or "255.255.255.0", "访客网掩码", errors),
-        "dhcp_start": _router_int(guest_raw.get("dhcp_start"), 100, 1, 253),
-        "dhcp_limit": _router_int(guest_raw.get("dhcp_limit"), 150, 1, 253),
-        "lease_time": str(guest_raw.get("lease_time") or "12h").strip(),
-    }
-    if guest["enabled"] and not (1 <= len(guest["ssid"].encode("utf-8")) <= 32):
-        errors.append("访客 SSID 必须为 1 到 32 字节")
-    if guest["password"] and not (8 <= len(guest["password"]) <= 63):
-        errors.append("访客密码必须为 8 到 63 个字符")
-    if not re.fullmatch(r"[1-9][0-9]*[mhd]", guest["lease_time"]):
-        errors.append("访客租期格式应类似 30m、12h 或 2d")
     try:
         lan_network = ipaddress.IPv4Network((lan["ipaddr"], lan["netmask"]), strict=False)
-        guest_network = ipaddress.IPv4Network((guest["ipaddr"], guest["netmask"]), strict=False)
         if lan["dhcp_start"] + lan["dhcp_limit"] > max(1, lan_network.num_addresses - 1):
             errors.append("LAN DHCP 地址池超出当前子网")
-        if guest["dhcp_start"] + guest["dhcp_limit"] > max(1, guest_network.num_addresses - 1):
-            errors.append("访客 DHCP 地址池超出当前子网")
-        if lan_network.overlaps(guest_network):
-            errors.append("LAN 与访客网段不能重叠")
         if protocol == "static":
             wan_network = ipaddress.IPv4Network((wan["ipaddr"], wan["netmask"]), strict=False)
             if ipaddress.IPv4Address(wan["gateway"]) not in wan_network:
                 errors.append("静态 WAN 网关必须位于 WAN 子网内")
-            if wan_network.overlaps(lan_network) or wan_network.overlaps(guest_network):
-                errors.append("静态 WAN 网段不能与 LAN 或访客网重叠")
+            if wan_network.overlaps(lan_network):
+                errors.append("静态 WAN 网段不能与 LAN 重叠")
     except Exception:
         pass
 
@@ -441,7 +430,6 @@ def _router_validate_config(payload: dict | None) -> tuple[dict, list[str]]:
         "lan": lan,
         "ap": ap,
         "repeater": repeater,
-        "guest": guest,
         "port_forwards": forwards,
         "remote_management": {"enabled": _router_bool(remote_raw.get("enabled"), False)},
     }
@@ -472,7 +460,6 @@ def _router_apply_uci(config: dict) -> tuple[bool, str]:
     lan = config["lan"]
     ap = config["ap"]
     repeater = config["repeater"]
-    guest = config["guest"]
 
     setv("network.wan.disabled", "1" if mode == "repeater" else "0")
     setv("network.wan.proto", wan["protocol"])
@@ -510,7 +497,10 @@ def _router_apply_uci(config: dict) -> tuple[bool, str]:
     setv("wireless.default_radio0.network", "lan")
     setv("wireless.default_radio0.mode", "ap")
     setv("wireless.default_radio0.encryption", "psk2")
-    setv("wireless.default_radio0.ssid", ap["ssid"])
+    setv("wireless.default_radio0.light_rid_ssid_mode", ap["ssid_mode"])
+    management_ip = _router_management_ipv4()
+    ap_ssid = f"RID-{management_ip}" if ap["ssid_mode"] == "ip" else ap["ssid"]
+    setv("wireless.default_radio0.ssid", ap_ssid)
     setv("wireless.default_radio0.disabled", "0" if ap["enabled"] else "1")
     ok, msg = _router_set_secret("wireless.default_radio0.key", ap["password"])
     if not ok:
@@ -534,44 +524,14 @@ def _router_apply_uci(config: dict) -> tuple[bool, str]:
     if not ok:
         return False, msg
 
-    setv("network.guest", "interface")
-    setv("network.guest.type", "bridge")
-    setv("network.guest.proto", "static")
-    setv("network.guest.ipaddr", guest["ipaddr"])
-    setv("network.guest.netmask", guest["netmask"])
-    setv("dhcp.guest", "dhcp")
-    setv("dhcp.guest.interface", "guest")
-    setv("dhcp.guest.start", guest["dhcp_start"])
-    setv("dhcp.guest.limit", guest["dhcp_limit"])
-    setv("dhcp.guest.leasetime", guest["lease_time"])
-    setv("dhcp.guest.ignore", "0" if guest["enabled"] else "1")
-    setv("wireless.guest5g.device", "radio0")
-    setv("wireless.guest5g.network", "guest")
-    setv("wireless.guest5g.mode", "ap")
-    setv("wireless.guest5g.encryption", "psk2")
-    setv("wireless.guest5g.ssid", guest["ssid"])
-    setv("wireless.guest5g.disabled", "0" if guest["enabled"] else "1")
-    ok, msg = _router_set_secret("wireless.guest5g.key", guest["password"])
-    if not ok:
-        return False, msg
-
-    setv("firewall.guestzone", "zone")
-    setv("firewall.guestzone.name", "guestzone")
-    setv("firewall.guestzone.network", "guest")
-    setv("firewall.guestzone.input", "REJECT")
-    setv("firewall.guestzone.output", "ACCEPT")
-    setv("firewall.guestzone.forward", "REJECT")
-    setv("firewall.guestzone_fwd", "forwarding")
-    setv("firewall.guestzone_fwd.src", "guestzone")
-    setv("firewall.guestzone_fwd.dest", "wan")
-    for suffix, port in (("dhcp", "67-68"), ("dns", "53")):
-        section = f"firewall.guestzone_{suffix}"
-        setv(section, "rule")
-        setv(f"{section}.src", "guestzone")
-        setv(f"{section}.proto", "udp" if suffix == "dhcp" else "tcp udp")
-        setv(f"{section}.dest_port", port)
-        setv(f"{section}.target", "ACCEPT")
-        setv(f"{section}.enabled", "1" if guest["enabled"] else "0")
+    # This edition has one management AP only. Remove sections previously
+    # created by the retired guest 5GHz feature.
+    for section in (
+        "wireless.guest5g", "network.guest", "dhcp.guest",
+        "firewall.guestzone", "firewall.guestzone_fwd",
+        "firewall.guestzone_dhcp", "firewall.guestzone_dns",
+    ):
+        _router_uci_delete(section)
 
     firewall = _router_uci_show("firewall")
     for key in list(firewall):
@@ -655,6 +615,20 @@ def _router_reload_services(mode: str = "wired") -> list[dict]:
     return results
 
 
+def _router_delayed_reload(mode: str) -> None:
+    time.sleep(0.8)
+    _router_reload_services(mode)
+    if _router_uci_get("wireless.default_radio0.light_rid_ssid_mode", "ip") != "ip":
+        return
+    time.sleep(2.0)
+    management_ip = _router_management_ipv4()
+    desired = f"RID-{management_ip}"
+    if _router_uci_get("wireless.default_radio0.ssid") != desired:
+        _router_uci_set("wireless.default_radio0.ssid", desired)
+        _router_run(["uci", "commit", "wireless"], timeout=10)
+        _router_run(["wifi", "reload", "radio0"], timeout=30)
+
+
 def _router_write_rollback_script(tx_dir: Path, tx_id: str, mode: str) -> Path:
     script = tx_dir / "rollback.sh"
     files = " ".join(ROUTER_CONFIG_FILES)
@@ -717,53 +691,25 @@ def _router_apply_payload(payload: dict | None) -> tuple[dict, int]:
     normalized, errors = _router_validate_config(payload)
     if normalized["ap"]["enabled"] and not normalized["ap"]["password"] and not _router_uci_get("wireless.default_radio0.key"):
         errors.append("主 AP 尚未配置密码")
-    if normalized["guest"]["enabled"] and not normalized["guest"]["password"] and not _router_uci_get("wireless.guest5g.key"):
-        errors.append("访客 AP 尚未配置密码")
     if normalized["mode"] == "repeater" and normalized["repeater"]["encryption"] != "none" and not normalized["repeater"]["password"] and not _router_uci_get("wireless.light_rid_repeater.key"):
         errors.append("无线中继尚未配置密码")
     if normalized["wan"]["protocol"] == "pppoe" and not normalized["wan"]["password"] and not _router_uci_get("network.wan.password"):
         errors.append("PPPoE 尚未配置密码")
     if errors:
         return {"ok": False, "error": "配置校验失败", "errors": errors}, 400
-    with router_tx_lock:
-        current = dict(router_active_tx)
-        if current and float(current.get("deadline", 0)) > time.time():
-            remaining = max(0, int(float(current.get("deadline", 0)) - time.time()))
-            transaction = {"pending": True, "id": current.get("id"), "deadline": current.get("deadline"), "remaining_seconds": remaining, "new_url": current.get("new_url", "")}
-            return {"ok": False, "error": "已有等待确认的网络事务", "transaction": transaction}, 409
-    tx_id = secrets.token_hex(8)
-    tx_dir = Path(ROUTER_TX_ROOT) / tx_id
-    ok, message = _router_backup_config(tx_dir)
+    ok, message = _router_apply_uci(normalized)
     if not ok:
-        return {"ok": False, "error": f"无法备份 OpenWrt 配置: {message}"}, 500
-    script = _router_write_rollback_script(tx_dir, tx_id, normalized["mode"])
-    deadline = time.time() + ROUTER_ROLLBACK_SECONDS
-    # The backend cannot know whether the browser reached this page through a
-    # WAN address, reverse proxy, or forwarded port.  The browser preserves its
-    # own current page URL instead of being redirected to the LAN address.
-    new_url = ""
-    try:
-        subprocess.Popen(
-            ["/bin/sh", str(script)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception as exc:
-        shutil.rmtree(tx_dir, ignore_errors=True)
-        return {"ok": False, "error": f"无法启动回滚守护进程: {exc}"}, 500
-    with router_tx_lock:
-        router_active_tx.clear()
-        router_active_tx.update({"id": tx_id, "dir": str(tx_dir), "deadline": deadline, "new_url": new_url, "phase": "scheduled"})
-    worker = Thread(target=_router_apply_worker, args=(tx_id, normalized), daemon=True, name=f"router-apply-{tx_id}")
-    worker.start()
-    return {
-        "ok": True,
-        "transaction": _router_tx_status(),
-        "scheduled": True,
-        "warning": "必须在 60 秒内从当前页面确认，否则配置会自动恢复。",
-    }, 202
+        return {"ok": False, "error": f"保存 OpenWrt 配置失败: {message}"}, 500
+
+    # Commit first so the HTTP response can reach WAN clients. Service reloads
+    # run after the response and no confirmation/rollback transaction is used.
+    Thread(
+        target=_router_delayed_reload,
+        args=(normalized["mode"],),
+        daemon=True,
+        name="router-reload",
+    ).start()
+    return {"ok": True, "saved": True, "reload_scheduled": True}, 200
 
 
 def _router_confirm_transaction(tx_id: str) -> tuple[dict, int]:

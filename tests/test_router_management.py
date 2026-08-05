@@ -29,6 +29,7 @@ class RouterManagementTests(unittest.TestCase):
             },
             "ap": {
                 "enabled": True,
+                "ssid_mode": "normal",
                 "ssid": "Light-RID",
                 "password": "factory-password",
                 "channel": 36,
@@ -36,16 +37,6 @@ class RouterManagementTests(unittest.TestCase):
                 "txpower": 20,
             },
             "repeater": {"ssid": "", "bssid": "", "encryption": "psk2", "password": ""},
-            "guest": {
-                "enabled": False,
-                "ssid": "Light-RID-Guest",
-                "password": "",
-                "ipaddr": "192.168.9.1",
-                "netmask": "255.255.255.0",
-                "dhcp_start": 100,
-                "dhcp_limit": 150,
-                "lease_time": "12h",
-            },
             "port_forwards": [],
             "remote_management": {"enabled": False},
         }
@@ -54,7 +45,11 @@ class RouterManagementTests(unittest.TestCase):
         rendered = self.runtime["_build_router_html"]()
         self.assertNotIn("router template missing", rendered)
         self.assertIn("/assets/vue/router.js", rendered)
-        self.assertIn("60 秒", rendered)
+        self.assertIn("IP 模式", rendered)
+        self.assertIn("保存设置", rendered)
+        self.assertNotIn("恢复安装前网络", rendered)
+        self.assertNotIn("访客 5GHz AP", rendered)
+        self.assertNotIn("IPv6 状态", rendered)
         self.assertIn("LuCI", rendered)
 
     def test_router_page_resolves_from_installed_app_root(self) -> None:
@@ -78,13 +73,30 @@ class RouterManagementTests(unittest.TestCase):
         self.assertIn("new URL(location.href)", source)
         self.assertIn("location.assign(url)", source)
         self.assertNotIn("data.transaction && data.transaction.new_url", source)
-        self.assertNotIn("90 秒", source)
+        self.assertIn('url.pathname = "/cgi-bin/luci"', source)
+        self.assertNotIn("/api/router/confirm", source)
+        self.assertNotIn("/api/router/rollback", source)
 
-    def test_overlapping_guest_and_lan_are_rejected(self) -> None:
+    def test_ip_ssid_mode_does_not_require_custom_ssid(self) -> None:
         payload = self.valid_payload()
-        payload["guest"]["ipaddr"] = "192.168.8.2"
-        _normalized, errors = self.runtime["_router_validate_config"](payload)
-        self.assertTrue(any("不能重叠" in error for error in errors))
+        payload["ap"]["ssid_mode"] = "ip"
+        payload["ap"]["ssid"] = ""
+        normalized, errors = self.runtime["_router_validate_config"](payload)
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["ap"]["ssid_mode"], "ip")
+
+    def test_management_ip_prefers_upstream_interface(self) -> None:
+        function = self.runtime["_router_management_ipv4"]
+        globals_map = function.__globals__
+        original_status = globals_map["_router_interface_status"]
+        try:
+            globals_map["_router_interface_status"] = lambda name: {
+                "up": name in {"wan", "lan"},
+                "addresses": {"wan": ["192.168.1.164/24"], "lan": ["192.168.8.1/24"]}.get(name, []),
+            }
+            self.assertEqual(function(), "192.168.1.164")
+        finally:
+            globals_map["_router_interface_status"] = original_status
 
     def test_static_wan_and_forward_validation(self) -> None:
         payload = self.valid_payload()
@@ -133,18 +145,19 @@ class RouterManagementTests(unittest.TestCase):
         self.assertTrue(ok, message)
         rendered = repr(commands)
         self.assertIn("wireless.radio0.channel=36", rendered)
+        self.assertIn("wireless.default_radio0.light_rid_ssid_mode=normal", rendered)
         self.assertIn("network.wwan=interface", rendered)
         self.assertIn("firewall.light_rid_wan_admin=rule", rendered)
         self.assertIn("firewall.@zone[1].network=wwan", rendered)
         self.assertNotIn("radio1", rendered)
         self.assertNotIn("phy1", rendered)
         self.assertNotIn("vendor_rule", rendered)
+        self.assertIn("wireless.guest5g", rendered)
 
     def test_status_redacts_openwrt_secrets(self) -> None:
         values = {
             "wireless.default_radio0.key": "main-secret",
             "wireless.light_rid_repeater.key": "repeater-secret",
-            "wireless.guest5g.key": "guest-secret",
             "network.wan.password": "pppoe-secret",
         }
         globals_map = self.runtime["_router_config_payload"].__globals__
@@ -163,6 +176,45 @@ class RouterManagementTests(unittest.TestCase):
         for secret in values.values():
             self.assertNotIn(secret, rendered)
         self.assertTrue(payload["ap"]["password"]["configured"])
+
+    def test_startup_refreshes_ip_mode_ssid(self) -> None:
+        launcher = Path("openwrt/light-rid-run").read_text(encoding="utf-8")
+        self.assertIn("refresh_management_ssid", launcher)
+        self.assertIn('desired_ssid="RID-$management_ip"', launcher)
+        self.assertIn("wireless.default_radio0.light_rid_ssid_mode", launcher)
+
+    def test_router_routes_use_direct_save_only(self) -> None:
+        server = Path("station_edition/light_rid/web_server.py").read_text(encoding="utf-8")
+        self.assertIn('path == "/api/router/apply"', server)
+        self.assertNotIn('path == "/api/router/confirm"', server)
+        self.assertNotIn('path == "/api/router/rollback"', server)
+        self.assertNotIn('path == "/api/router/reset-network"', server)
+
+    def test_apply_payload_saves_without_transaction(self) -> None:
+        function = self.runtime["_router_apply_payload"]
+        globals_map = function.__globals__
+        originals = {name: globals_map[name] for name in ("_router_capabilities", "_router_validate_config", "_router_uci_get", "_router_apply_uci", "Thread")}
+
+        class DummyThread:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+            def start(self):
+                return None
+
+        normalized, errors = self.runtime["_router_validate_config"](self.valid_payload())
+        self.assertEqual(errors, [])
+        try:
+            globals_map["_router_capabilities"] = lambda: {"supported": True}
+            globals_map["_router_validate_config"] = lambda payload: (normalized, [])
+            globals_map["_router_uci_get"] = lambda key, default="": "configured-secret"
+            globals_map["_router_apply_uci"] = lambda config: (True, "")
+            globals_map["Thread"] = DummyThread
+            response, code = function(self.valid_payload())
+        finally:
+            globals_map.update(originals)
+        self.assertEqual(code, 200)
+        self.assertTrue(response["saved"])
+        self.assertNotIn("transaction", response)
 
     def test_installer_preserves_original_network_baseline(self) -> None:
         installer = Path("openwrt/light-rid-install").read_text(encoding="utf-8")

@@ -10,7 +10,7 @@
     .shell{width:min(1180px,calc(100% - 24px));margin:auto;padding:18px 0 48px}.top{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;margin-bottom:14px;border:1px solid rgba(220,229,239,.9);border-radius:16px;background:rgba(255,255,255,.92);box-shadow:var(--shadow);backdrop-filter:blur(16px)}
     h1{font-size:24px;margin:0}.sub{color:var(--muted);font-size:13px}.nav,.actions,.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.btn{border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);padding:9px 13px;cursor:pointer;text-decoration:none;font-weight:650}.btn:hover{border-color:#8eb5ec}.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}.btn.danger{color:var(--red);border-color:#efb7b7}.btn:disabled{opacity:.5;cursor:not-allowed}
     .banner{display:none;padding:13px 16px;margin-bottom:14px;border:1px solid #e7ca87;border-radius:13px;background:#fff7df;color:#6d4806}.banner.show{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.banner.error{border-color:#e8a6a6;background:#fff0f0;color:#7b2020}
-    .status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}.stat,.card{background:var(--card);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow)}.stat{padding:15px}.stat-label{color:var(--muted);font-size:12px}.stat-value{font-weight:750;font-size:16px;margin-top:4px;word-break:break-word}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#9aa7b7;margin-right:7px}.dot.up{background:var(--green)}
+    .status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}.stat,.card{background:var(--card);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow)}.stat{padding:15px}.stat-label{color:var(--muted);font-size:12px}.stat-value{font-weight:750;font-size:16px;margin-top:4px;word-break:break-word}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#9aa7b7;margin-right:7px}.dot.up{background:var(--green)}
     .layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.card{padding:17px}.card.full{grid-column:1/-1}.head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.head h2{font-size:17px;margin:0}.hint{color:var(--muted);font-size:12px;margin-top:3px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.field{display:grid;gap:5px}.field.full{grid-column:1/-1}.field label{font-size:12px;color:var(--muted);font-weight:650}.field input,.field select{width:100%;height:40px;border:1px solid var(--line);border-radius:9px;background:#fbfdff;padding:8px 10px;color:var(--ink)}.field input:focus,.field select:focus{outline:3px solid rgba(23,105,224,.13);border-color:var(--blue)}.check{display:flex;align-items:center;gap:8px;font-weight:650}.check input{width:17px;height:17px}.conditional.hidden{display:none}
     .scan-list{display:grid;gap:7px;margin-top:10px;max-height:240px;overflow:auto}.scan-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;padding:9px;border:1px solid var(--line);border-radius:9px;background:#f9fbfe}.scan-main{font-weight:700}.scan-meta{font-size:11px;color:var(--muted)}
     .forward-list{display:grid;gap:9px}.forward{display:grid;grid-template-columns:1.1fr .75fr .65fr 1fr .65fr .85fr auto;gap:8px;align-items:end;padding:10px;border:1px solid var(--line);border-radius:11px;background:#fafcff}.forward .field label{font-size:10px}.empty{padding:18px;text-align:center;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
@@ -28,13 +28,10 @@
   </header>
 
   <section id="unsupported" class="banner error"><span id="unsupported-text">当前环境不受支持。</span></section>
-  <section id="transaction" class="banner"><div><strong>网络配置等待确认</strong><div id="transaction-copy">请在 60 秒内确认。</div></div><div class="actions"><button class="btn danger" id="rollback">立即回滚</button><button class="btn primary" id="confirm">保留设置</button></div></section>
-
   <section class="status-grid">
     <div class="stat"><div class="stat-label">当前模式</div><div class="stat-value" id="status-mode">—</div></div>
     <div class="stat"><div class="stat-label">互联网</div><div class="stat-value" id="status-wan"><span class="dot"></span>—</div></div>
-    <div class="stat"><div class="stat-label">LAN 地址</div><div class="stat-value" id="status-lan">—</div></div>
-    <div class="stat"><div class="stat-label">IPv6</div><div class="stat-value" id="status-ipv6">—</div></div>
+    <div class="stat"><div class="stat-label">内网 IP</div><div class="stat-value" id="status-private-ip">—</div></div>
   </section>
 
   <div class="layout" id="router-form">
@@ -55,24 +52,18 @@
       <div class="field"><label>路由器地址</label><input id="lan-ip"></div><div class="field"><label>子网掩码</label><input id="lan-mask"></div><div class="field"><label>DHCP 起始主机号</label><input id="lan-start" type="number" min="1" max="253"></div><div class="field"><label>地址数量</label><input id="lan-limit" type="number" min="1" max="253"></div><div class="field"><label>租期</label><input id="lan-lease" placeholder="12h"></div><div class="field"><label>上游 DNS（空格分隔）</label><input id="lan-dns"></div><label class="check full"><input id="lan-dhcp" type="checkbox"> 启用 LAN DHCP</label>
     </div></section>
 
-    <section class="card"><div class="head"><div><h2>主 5GHz AP</h2><div class="hint">仅管理 radio0；加密固定为 WPA2-PSK/AES。</div></div></div><div class="grid">
-      <div class="field full"><label>SSID</label><input id="ap-ssid"></div><div class="field full"><label>密码</label><input id="ap-pass" type="password" autocomplete="new-password" placeholder="留空保持原密码"></div><div class="field"><label>信道</label><select id="ap-channel"><option>36</option><option>40</option><option>44</option><option>48</option><option>149</option><option>153</option><option>157</option><option>161</option><option>165</option></select></div><div class="field"><label>带宽</label><select id="ap-htmode"><option>VHT20</option><option>VHT40</option><option>VHT80</option></select></div><div class="field"><label>发射功率（dBm）</label><input id="ap-power" type="number" min="1" max="20"></div><label class="check"><input id="ap-enabled" type="checkbox"> 启用主 AP</label>
-    </div></section>
-
-    <section class="card"><div class="head"><div><h2>访客 5GHz AP</h2><div class="hint">独立网段，只允许 DHCP、DNS 和互联网访问。</div></div></div><div class="grid">
-      <div class="field full"><label>SSID</label><input id="guest-ssid"></div><div class="field full"><label>密码</label><input id="guest-pass" type="password" autocomplete="new-password" placeholder="留空保持原密码"></div><div class="field"><label>访客网关</label><input id="guest-ip"></div><div class="field"><label>子网掩码</label><input id="guest-mask"></div><div class="field"><label>DHCP 起始主机号</label><input id="guest-start" type="number" min="1" max="253"></div><div class="field"><label>地址数量</label><input id="guest-limit" type="number" min="1" max="253"></div><div class="field"><label>租期</label><input id="guest-lease"></div><label class="check"><input id="guest-enabled" type="checkbox"> 启用访客网络</label>
+    <section class="card"><div class="head"><div><h2>主 5GHz AP</h2><div class="hint">IP 模式会在每次启动时把 SSID 自动更新为 RID-内网IP。</div></div></div><div class="grid">
+      <div class="field full"><label>SSID 模式</label><select id="ap-ssid-mode"><option value="ip">IP 模式（自动 RID-内网IP）</option><option value="normal">常规模式（自定义 SSID）</option></select></div><div class="field full"><label>当前内网 IP</label><input id="ap-ip-preview" readonly></div><div class="field full" id="ap-ssid-field"><label>自定义 SSID</label><input id="ap-ssid"></div><div class="field full"><label>密码</label><input id="ap-pass" type="password" autocomplete="new-password" placeholder="留空保持原密码"></div><div class="field"><label>信道</label><select id="ap-channel"><option>36</option><option>40</option><option>44</option><option>48</option><option>149</option><option>153</option><option>157</option><option>161</option><option>165</option></select></div><div class="field"><label>带宽</label><select id="ap-htmode"><option>VHT20</option><option>VHT40</option><option>VHT80</option></select></div><div class="field"><label>发射功率（dBm）</label><input id="ap-power" type="number" min="1" max="20"></div><label class="check"><input id="ap-enabled" type="checkbox"> 启用主 AP</label>
     </div></section>
 
     <section class="card"><div class="head"><div><h2>管理入口</h2><div class="hint">主 LAN 始终可管理；访客网始终禁止管理。</div></div></div><label class="check"><input id="remote-enabled" type="checkbox"> 允许从 WAN 访问 Light RID :4600 和 LuCI :80</label><div class="warn-copy">远程入口使用 HTTP 且不限制来源。部署在不可信网络时请保持关闭。</div></section>
 
     <section class="card full"><div class="head"><div><h2>端口转发</h2><div class="hint">仅编辑 Light RID 创建的规则，原厂或第三方规则保持不变。</div></div><button class="btn" id="add-forward" type="button">添加规则</button></div><div class="forward-list" id="forward-list"></div></section>
 
-    <section class="card full"><div class="head"><div><h2>IPv6 状态</h2><div class="hint">此页面只读展示，不修改 OpenWrt 的 WAN6、RA 或 DHCPv6 配置。</div></div></div><div id="ipv6-detail" class="hint">—</div></section>
   </div>
 
-  <footer class="footer-actions"><div id="message">正在读取路由器配置…</div><div class="actions"><button class="btn danger" id="factory-reset" type="button">恢复安装前网络</button><button class="btn" id="validate" type="button">检查配置</button><button class="btn primary" id="apply" type="button">应用并等待确认</button></div></footer>
+  <footer class="footer-actions"><div id="message">正在读取路由器配置…</div><div class="actions"><button class="btn" id="validate" type="button">检查配置</button><button class="btn primary" id="apply" type="button">保存设置</button></div></footer>
 </main>
-<dialog id="reset-dialog"><div class="dialog-body"><h3>恢复安装前网络配置？</h3><p>这会恢复首次安装 Light RID 时保存的 OpenWrt 网络、无线、DHCP、防火墙和 uHTTPd 配置，当前连接会中断。</p><div class="actions"><button class="btn" id="reset-cancel">取消</button><button class="btn danger" id="reset-confirm">确认恢复</button></div></div></dialog>
 <script src="__ROUTER_ASSET_URL__"></script>
 </body>
 </html>

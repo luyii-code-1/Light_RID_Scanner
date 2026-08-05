@@ -57,6 +57,7 @@ factory_provision_wifi() {
     uci set wireless.default_radio0.mode='ap' || fail "cannot set factory AP mode"
     uci set wireless.default_radio0.encryption='psk2' || fail "cannot set factory AP encryption"
     uci set "wireless.default_radio0.ssid=$ssid" || fail "cannot set factory SSID"
+    uci set wireless.default_radio0.light_rid_ssid_mode='normal' || fail "cannot select normal SSID mode"
     uci set "wireless.default_radio0.key=$wifi_password" || fail "cannot set factory WiFi password"
     uci set wireless.default_radio0.disabled='0' || fail "cannot enable factory AP"
     uci commit wireless || fail "cannot commit factory WiFi configuration"

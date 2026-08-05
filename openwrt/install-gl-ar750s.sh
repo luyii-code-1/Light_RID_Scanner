@@ -25,7 +25,7 @@ fetch() {
     source_url="$1"
     destination="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 3 --connect-timeout 15 -o "$destination" "$source_url"
+        curl -fsSL --retry 3 --connect-timeout 15 -o "$destination" "$source_url"
     elif command -v wget >/dev/null 2>&1; then
         wget -O "$destination" "$source_url"
     else
@@ -79,5 +79,21 @@ fi
 
 unset factory_password LIGHT_RID_FACTORY_WIFI_PASSWORD
 light-rid-run check || fail "post-install preflight failed"
+
+ready=0
+attempt=0
+while [ "$attempt" -lt 24 ]; do
+    if light-rid-run status | grep -q '^station=running' && \
+       light-rid-run status | grep -q '^monitor=ridmon' && \
+       light-rid-run status | grep -q '^web=listen' && \
+       light-rid-run status | grep -q '^autostart=enabled'; then
+        ready=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 5
+done
+[ "$ready" -eq 1 ] || fail "service did not become ready within 120 seconds"
+
 light-rid-run status
 echo "light-rid-bootstrap: installation complete; open http://$(uci -q get network.lan.ipaddr):4600/"

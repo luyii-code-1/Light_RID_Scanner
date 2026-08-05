@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   gl-ar750s:
@@ -20,6 +20,7 @@ jobs:
           python -m compileall -q station_edition
           python -m py_compile openwrt/router-smoke.py
           python -m unittest discover -s tests
+          sh -n openwrt/light-rid-run openwrt/light-rid-install openwrt/light-rid-upgrade openwrt/light-rid.init openwrt/install-gl-ar750s.sh
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -114,6 +115,8 @@ jobs:
           test ! -e "$root/usr/share/light-rid/station_edition/pytools"
           tar -C "$root" -czf "release/${package}.tar.gz" .
           (cd release && sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256")
+          cp "release/${package}.tar.gz" release/light-rid-gl-ar750s.tar.gz
+          (cd release && sha256sum light-rid-gl-ar750s.tar.gz > light-rid-gl-ar750s.tar.gz.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -122,4 +125,25 @@ jobs:
             release/light-rid-gl-ar750s-*.tar.gz
             release/light-rid-gl-ar750s-*.tar.gz.sha256
             openwrt/deploy-gl-ar750s.ps1
+            openwrt/install-gl-ar750s.sh
           if-no-files-found: error
+
+      - name: Publish public router bootstrap assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tag=gl-ar750s-latest
+          title="GL-AR750S latest (${GITHUB_SHA::7})"
+          notes="Automated GL-AR750S production package from commit ${GITHUB_SHA}. This mutable release channel is consumed by openwrt/install-gl-ar750s.sh."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes "$notes"
+          else
+            gh release create "$tag" --target "$GITHUB_REF_NAME" --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release upload "$tag" \
+            release/light-rid-gl-ar750s.tar.gz \
+            release/light-rid-gl-ar750s.tar.gz.sha256 \
+            openwrt/install-gl-ar750s.sh \
+            --clobber

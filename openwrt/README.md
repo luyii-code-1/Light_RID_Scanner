@@ -6,8 +6,26 @@ The station UI, RID parser, storage, and APIs remain Python. The
 `AF_PACKET` implementation written in Rust.
 
 The router needs OpenWrt's `python3`, `python3-light`, and `python3-sqlite3`
-packages. For production, download the CI tarball, adjacent checksum, and
-`deploy-gl-ar750s.ps1`, then run one command from Windows:
+packages. After SSH connects to the router, the normal online install or
+upgrade is one command. It downloads the public GL-AR750S release asset,
+verifies its SHA-256 checksum, preserves existing settings, enables procd, and
+waits for the service to start:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/GL-AR750S-edition/openwrt/install-gl-ar750s.sh | sh
+```
+
+`wget -qO- URL | sh` is also supported. For production-line provisioning,
+environment variables can be supplied to `sh` without placing credentials in
+the public repository:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/GL-AR750S-edition/openwrt/install-gl-ar750s.sh | \
+  LIGHT_RID_FACTORY_SSID='Light-RID' LIGHT_RID_FACTORY_WIFI_PASSWORD='replace-me' sh
+```
+
+For an offline production workstation, download the CI tarball, adjacent
+checksum, and `deploy-gl-ar750s.ps1`, then run one command from Windows:
 
 ```powershell
 .\deploy-gl-ar750s.ps1 -Package .\light-rid-gl-ar750s-34b0294.tar.gz `

@@ -16,14 +16,14 @@ waits for the service to start:
 curl -fsSL https://cdn.jsdelivr.net/gh/luyii-code-1/Light_RID_Scanner@GL-AR750S-edition/openwrt/install-gl-ar750s.sh | sh
 ```
 
-The bootstrap uses jsDelivr for the large package, verifies it with the tiny
-checksum file from GitHub Raw, then falls back to GitHub Raw and GitHub
-Release. Every downloaded package is checked against its SHA-256 file before
-extraction. If jsDelivr itself is unavailable, the bootstrap can also be read
-directly from GitHub Raw:
+The bootstrap first downloads the release package and checksum through
+[GH Proxy](https://gh-proxy.com/), then falls back to jsDelivr, GitHub Raw and
+GitHub Release. Every downloaded package is checked against its SHA-256 file
+before extraction. If jsDelivr itself is unavailable, the bootstrap can also
+be read through GH Proxy:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/GL-AR750S-edition/openwrt/install-gl-ar750s.sh | sh
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/luyii-code-1/Light_RID_Scanner/GL-AR750S-edition/openwrt/install-gl-ar750s.sh | sh
 ```
 
 `wget -qO- URL | sh` is also supported. For production-line provisioning,

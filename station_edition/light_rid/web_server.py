@@ -8448,6 +8448,41 @@ def _build_settings_html() -> str:
         return '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Light RID Scanner</title></head><body>settings template missing</body></html>'
     return html_src.replace("</body>", f'<script src="{_station_settings_asset_url()}"></script></body>', 1)
 
+def _sync_system_time_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "payload must be object"}
+    try:
+        epoch_ms = int(float(payload.get("epoch_ms")))
+    except (TypeError, ValueError, OverflowError):
+        return {"ok": False, "error": "invalid epoch_ms"}
+    epoch_sec = int(round(epoch_ms / 1000.0))
+    if epoch_sec < 1577836800 or epoch_sec > 4102444800:
+        return {"ok": False, "error": "time must be between 2020 and 2100"}
+    if not sys.platform.startswith("linux"):
+        return {"ok": False, "error": "system time sync is only available on the router"}
+    date_bin = shutil.which("date")
+    if not date_bin:
+        return {"ok": False, "error": "date command not found"}
+    try:
+        proc = subprocess.run(
+            [date_bin, "-s", f"@{epoch_sec}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"cannot set system time: {exc}"}
+    if proc.returncode != 0:
+        error = str(proc.stderr or proc.stdout or "date command failed").strip()
+        return {"ok": False, "error": error}
+    return {
+        "ok": True,
+        "epoch_ms": int(time.time() * 1000),
+        "local_time": time.strftime("%Y-%m-%d %H:%M:%S %z"),
+        "browser_timezone": str(payload.get("timezone") or "")[:80],
+    }
+
 def _build_router_html() -> str:
     template_path = _router_template_path()
     if template_path is None:
@@ -10306,6 +10341,11 @@ def http_server_thread() -> None:
                 if (not rsp.get("ok")) and (bool(rsp.get("need_sudo")) or "root" in str(rsp.get("error") or "") or "sudo" in str(rsp.get("error") or "") or "权限" in str(rsp.get("error") or "")):
                     code = 403
                 self._send_json(rsp, code)
+            elif path == "/api/settings/system-time/sync":
+                body = self._read_json_body()
+                rsp = _sync_system_time_payload(body)
+                _op_log("system-time-sync", str(rsp.get("local_time") or rsp.get("error") or ""), ip=_client_ip_from_handler(self), ok=bool(rsp.get("ok")))
+                self._send_json(rsp, 200 if rsp.get("ok") else 400)
             elif path == "/api/network-bindings/save":
                 body = self._read_json_body()
                 rsp = _network_bindings_save_payload(body)

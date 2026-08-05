@@ -3143,6 +3143,26 @@
     setStatus("status-visual", msg, false);
     showNotice("企业微信测试通知已发送。", "ok", 3e3);
   }
+  async function syncSystemTime() {
+    var btn = qs("btn-sync-system-time");
+    if (btn) btn.disabled = true;
+    setStatus("status-system-time", "正在使用浏览器时间校准设备...", false);
+    try {
+      const data = await postJson("/api/settings/system-time/sync", {
+        epoch_ms: Date.now(),
+        timezone: String(Intl.DateTimeFormat().resolvedOptions().timeZone || ""),
+        timezone_offset_min: (/* @__PURE__ */ new Date()).getTimezoneOffset()
+      });
+      var display = String(data.local_time || "已同步");
+      setStatus("status-system-time", "设备时间：" + display, false);
+      showNotice("系统时间已同步。", "ok", 2600);
+    } catch (e) {
+      setStatus("status-system-time", "同步失败：" + (e.message || e), true);
+      showNotice(e.message || e, "warn", 4200);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
   function bindShellActions() {
     on("btn-back", "click", function() {
       location.href = "/";
@@ -3175,6 +3195,10 @@
       } finally {
         if (btn) btn.disabled = false;
       }
+    });
+    on("btn-sync-system-time", "click", function() {
+      withSettingsAsyncTask("系统时间同步", "正在校准设备时间...", syncSystemTime).catch(function() {
+      });
     });
     on("btn-refresh-host", "click", function() {
       withSettingsAsyncTask("设置读取", "正在读取设置...", function() {

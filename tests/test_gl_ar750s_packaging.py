@@ -34,6 +34,31 @@ class GlAr750sPackagingTests(unittest.TestCase):
         rendered = self.runtime["_build_settings_html"]()
         self.assertNotIn("settings template missing", rendered)
         self.assertIn("station-settings.js", rendered)
+        self.assertIn("btn-sync-system-time", rendered)
+
+    def test_system_time_sync_uses_browser_epoch(self) -> None:
+        function = self.runtime["_sync_system_time_payload"]
+        globals_map = function.__globals__
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(globals_map["sys"], "platform", "linux"), \
+             mock.patch.object(globals_map["shutil"], "which", return_value="/bin/date"), \
+             mock.patch.object(globals_map["subprocess"], "run", return_value=completed) as run:
+            payload = function({"epoch_ms": 1_800_000_000_250, "timezone": "Asia/Shanghai"})
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["browser_timezone"], "Asia/Shanghai")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["/bin/date", "-s", "@1800000000"])
+
+    def test_system_time_sync_rejects_invalid_epoch(self) -> None:
+        payload = self.runtime["_sync_system_time_payload"]({"epoch_ms": "not-a-time"})
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "invalid epoch_ms")
+
+    def test_bootstrap_prefers_gh_proxy_with_verified_fallbacks(self) -> None:
+        installer = Path("openwrt/install-gl-ar750s.sh").read_text(encoding="utf-8")
+        self.assertIn("https://gh-proxy.com/https://github.com/", installer)
+        self.assertLess(installer.index('download_verified_package "$GH_PROXY_DOWNLOAD_BASE"'), installer.index('download_verified_package "$MIRROR_DOWNLOAD_BASE"'))
+        self.assertIn('sha256sum -c "$ASSET.sha256"', installer)
 
     def test_runtime_security_does_not_probe_uid(self) -> None:
         with mock.patch.object(os, "geteuid", side_effect=AssertionError("UID probed"), create=True):

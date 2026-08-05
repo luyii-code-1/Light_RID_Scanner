@@ -9,6 +9,7 @@ set -eu
 REPOSITORY="luyii-code-1/Light_RID_Scanner"
 RELEASE_TAG="${LIGHT_RID_RELEASE_TAG:-gl-ar750s-latest}"
 ASSET="light-rid-gl-ar750s.tar.gz"
+GH_PROXY_DOWNLOAD_BASE="https://gh-proxy.com/https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
 MIRROR_DOWNLOAD_BASE="https://cdn.jsdelivr.net/gh/$REPOSITORY@gl-ar750s-download"
 RAW_DOWNLOAD_BASE="https://raw.githubusercontent.com/$REPOSITORY/gl-ar750s-download"
 RELEASE_DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
@@ -74,12 +75,15 @@ echo "light-rid-bootstrap: downloading $RELEASE_TAG for GL-AR750S"
 if [ -n "${LIGHT_RID_DOWNLOAD_BASE:-}" ]; then
     download_verified_package "$LIGHT_RID_DOWNLOAD_BASE" || \
         fail "package download or checksum verification failed"
-elif ! download_verified_package "$MIRROR_DOWNLOAD_BASE" "$RAW_DOWNLOAD_BASE"; then
-    echo "light-rid-bootstrap: mirror download failed; trying GitHub Raw" >&2
-    if ! download_verified_package "$RAW_DOWNLOAD_BASE"; then
-        echo "light-rid-bootstrap: Raw download failed; trying GitHub Release" >&2
-        download_verified_package "$RELEASE_DOWNLOAD_BASE" || \
-            fail "all package download sources failed"
+elif ! download_verified_package "$GH_PROXY_DOWNLOAD_BASE"; then
+    echo "light-rid-bootstrap: GH Proxy download failed; trying jsDelivr" >&2
+    if ! download_verified_package "$MIRROR_DOWNLOAD_BASE" "$RAW_DOWNLOAD_BASE"; then
+        echo "light-rid-bootstrap: jsDelivr download failed; trying GitHub Raw" >&2
+        if ! download_verified_package "$RAW_DOWNLOAD_BASE"; then
+            echo "light-rid-bootstrap: Raw download failed; trying GitHub Release" >&2
+            download_verified_package "$RELEASE_DOWNLOAD_BASE" || \
+                fail "all package download sources failed"
+        fi
     fi
 fi
 

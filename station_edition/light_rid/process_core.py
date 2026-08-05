@@ -2494,7 +2494,7 @@ def _ws_push_loop() -> None:
                     if settings_frame is None:
                         settings_payload = _json.dumps(_ws_settings_runtime_payload(), ensure_ascii=False)
                         settings_frame = _ws_frame(settings_payload.encode())
-                    sock.sendall(settings_frame)
+                    _ws_send_client(client, settings_frame)
                     client["next_send_at"] = now + 5.0
                 else:
                     if home_frame is None:
@@ -2509,7 +2509,7 @@ def _ws_push_loop() -> None:
                         home_frame = _ws_frame(home_payload.encode())
                         last_home_logs_seq = logs_seq
                         last_home_aps_seq = aps_seq
-                    sock.sendall(home_frame)
+                    _ws_send_client(client, home_frame)
             except Exception:
                 dead.append(client)
         if dead:
@@ -2531,6 +2531,44 @@ def _ws_frame(data: bytes) -> bytes:
     if n <= 65535:
         return bytes([0x81, 126, (n>>8)&0xFF, n&0xFF]) + data
     return bytes([0x81, 127]) + n.to_bytes(8,"big") + data
+
+def _ws_recv_exact(sock, size: int) -> bytes:
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise ConnectionError("websocket disconnected")
+        data.extend(chunk)
+    return bytes(data)
+
+def _ws_recv_client_frame(sock) -> tuple[int, bytes]:
+    header = _ws_recv_exact(sock, 2)
+    opcode = header[0] & 0x0F
+    masked = bool(header[1] & 0x80)
+    length = header[1] & 0x7F
+    if length == 126:
+        length = int.from_bytes(_ws_recv_exact(sock, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(_ws_recv_exact(sock, 8), "big")
+    if length > 1_048_576:
+        raise ValueError("websocket frame too large")
+    mask = _ws_recv_exact(sock, 4) if masked else b""
+    payload = bytearray(_ws_recv_exact(sock, length))
+    if mask:
+        for index in range(len(payload)):
+            payload[index] ^= mask[index % 4]
+    return opcode, bytes(payload)
+
+def _ws_send_client(client: dict, frame: bytes) -> None:
+    sock = client.get("sock")
+    if sock is None:
+        raise ConnectionError("websocket disconnected")
+    send_lock = client.get("send_lock")
+    if send_lock is None:
+        sock.sendall(frame)
+        return
+    with send_lock:
+        sock.sendall(frame)
 
 
 def _fmt_wall_ts(ts: float | None) -> str:

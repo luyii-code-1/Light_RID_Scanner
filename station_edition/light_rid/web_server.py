@@ -898,6 +898,9 @@ var replaySyncPaused = false;
 var suppressNextDroneNotifications = false;
 var wsOnline = false;
 var wsLatencyMs = null;
+var wsPingTimer = null;
+var wsPingSeq = 0;
+var wsPingPending = {};
 var diagnosticSummary = null;
 var diagnosticPollTimer = null;
 var workflowPopupBound = false;
@@ -2221,24 +2224,44 @@ function setRootSecurityIgnored(on){
   }catch(_e){}
 }
 function noteWsSample(data){
-  var serverMs = Number((data && data.server_wall_ms) || 0);
-  if(serverMs > 0){
-    var sample = Date.now() - serverMs;
-    if(isFinite(sample) && sample >= 0 && sample <= 600000){
-      wsLatencyMs = Math.round(sample);
-    }
+  if(!data || data.kind !== 'pong') return false;
+  var id = String(data.id || '');
+  var started = Number(wsPingPending[id]);
+  if(isFinite(started) && started > 0){
+    var sample = performance.now() - started;
+    if(isFinite(sample) && sample >= 0 && sample <= 600000) wsLatencyMs = Math.round(sample * 10) / 10;
+    delete wsPingPending[id];
   }
   updateWsStatusLabel();
   updateWorkflowIndicator();
   if(qs('main-more-menu') && qs('main-more-menu').classList.contains('diagnostic-open')){
     renderDiagnosticPopup();
   }
+  return true;
+}
+function stopWsPing(){
+  if(wsPingTimer){ clearInterval(wsPingTimer); wsPingTimer = null; }
+  wsPingPending = {};
+}
+function sendWsPing(){
+  if(!ws || ws.readyState !== WebSocket.OPEN) return;
+  var id = String(++wsPingSeq);
+  wsPingPending[id] = performance.now();
+  try{ ws.send(JSON.stringify({kind:'ping', id:id})); }catch(_e){ delete wsPingPending[id]; }
+  Object.keys(wsPingPending).forEach(function(key){
+    if(performance.now() - Number(wsPingPending[key] || 0) > 10000) delete wsPingPending[key];
+  });
+}
+function startWsPing(){
+  stopWsPing();
+  sendWsPing();
+  wsPingTimer = setInterval(sendWsPing, 2000);
 }
 function wsStatusText(ok){
   if(replaySyncPaused) return '\u91cd\u6f14\u4e2d';
   if(!ok) return '\u91cd\u8fde\u4e2d';
   var latency = Number(wsLatencyMs);
-  return '\u5b9e\u65f6' + (isFinite(latency) && latency >= 0 ? (' ' + Math.round(latency) + 'ms') : '');
+  return '\u5b9e\u65f6' + (isFinite(latency) && latency >= 0 ? (' ' + (latency < 10 ? latency.toFixed(1) : latency.toFixed(0)) + 'ms') : '');
 }
 function updateWsStatusLabel(){
   var el = qs('ws-status');
@@ -2362,7 +2385,7 @@ function renderDiagnosticPopup(){
   var host = (diagnosticSummary && diagnosticSummary.host) || {};
   var parser = (diagnosticSummary && diagnosticSummary.parser) || {};
   var workflow = (diagnosticSummary && diagnosticSummary.workflow) || {};
-  var wsText = wsOnline ? fmtDiagNum(wsLatencyMs, 0, ' ms') : '断开';
+  var wsText = wsOnline ? fmtDiagNum(wsLatencyMs, 1, ' ms') : '断开';
   var queueText = fmtDiagNum(parser.live_queue_size, 0, '') + ' / ' + fmtDiagNum(parser.live_queue_max, 0, '');
   if(parser.queue_usage_pct != null && isFinite(Number(parser.queue_usage_pct))){
     queueText += ' (' + fmtDiagNum(parser.queue_usage_pct, 1, '%') + ')';
@@ -4262,12 +4285,12 @@ function renderDroneTable(list){
 function connect(){
   var wsProto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
   ws = new WebSocket(wsProto + location.host + '/ws');
-  ws.onopen  = function(){ setWsState(true); };
-  ws.onclose = function(){ setWsState(false); reconnTimer=setTimeout(connect,2000); };
+  ws.onopen  = function(){ setWsState(true); startWsPing(); };
+  ws.onclose = function(){ stopWsPing(); setWsState(false); reconnTimer=setTimeout(connect,2000); };
   ws.onerror = function(){ ws.close(); };
   ws.onmessage = function(ev){
     var d = JSON.parse(ev.data);
-    noteWsSample(d);
+    if(noteWsSample(d)) return;
     if(uiFrozen || replaySyncPaused){
       frozenPendingData = d;
       renderReplayCard();
@@ -8151,6 +8174,9 @@ var wsReconnectTimer = null;
 var pollTimer = null;
 var wsOnline = false;
 var wsLatencyMs = null;
+var wsPingTimer = null;
+var wsPingSeq = 0;
+var wsPingPending = {};
 function qs(id){ return document.getElementById(id); }
 function pageHeaders(extra){ var h={'X-LightRID-Page':'1'}; if(extra) Object.keys(extra).forEach(function(k){ h[k]=extra[k]; }); return h; }
 function apiUrl(url){ try{ return new URL(String(url || ''), window.location.origin).toString(); }catch(_e){ return String(url || ''); } }
@@ -8183,13 +8209,39 @@ function setText(id, text){
   if(el) el.textContent = text || '-';
 }
 function noteWsSample(data){
-  var serverMs = Number((data && data.server_wall_ms) || 0);
-  if(serverMs > 0){
-    var sample = Date.now() - serverMs;
-    if(isFinite(sample) && sample >= 0 && sample <= 600000) wsLatencyMs = Math.round(sample);
+  if(!data || data.kind !== 'pong'){
+    setText('diag-ws', wsOnline ? fmt(wsLatencyMs, 1, ' ms') : '断开');
+    setText('diag-ws-sub', wsOnline ? '等待 WebSocket ping/pong' : 'WebSocket 未连接');
+    return false;
   }
-  setText('diag-ws', wsOnline ? fmt(wsLatencyMs, 0, ' ms') : '断开');
-  setText('diag-ws-sub', wsOnline ? '最近一次主页 WS 推送' : 'WebSocket 未连接');
+  var id = String(data.id || '');
+  var started = Number(wsPingPending[id]);
+  if(isFinite(started) && started > 0){
+    var sample = performance.now() - started;
+    if(isFinite(sample) && sample >= 0 && sample <= 600000) wsLatencyMs = Math.round(sample * 10) / 10;
+    delete wsPingPending[id];
+  }
+  setText('diag-ws', wsOnline ? fmt(wsLatencyMs, 1, ' ms') : '断开');
+  setText('diag-ws-sub', wsOnline ? 'WebSocket ping/pong 往返时间' : 'WebSocket 未连接');
+  return true;
+}
+function stopWsPing(){
+  if(wsPingTimer){ clearInterval(wsPingTimer); wsPingTimer = null; }
+  wsPingPending = {};
+}
+function sendWsPing(){
+  if(!ws || ws.readyState !== WebSocket.OPEN) return;
+  var id = String(++wsPingSeq);
+  wsPingPending[id] = performance.now();
+  try{ ws.send(JSON.stringify({kind:'ping', id:id})); }catch(_e){ delete wsPingPending[id]; }
+  Object.keys(wsPingPending).forEach(function(key){
+    if(performance.now() - Number(wsPingPending[key] || 0) > 10000) delete wsPingPending[key];
+  });
+}
+function startWsPing(){
+  stopWsPing();
+  sendWsPing();
+  wsPingTimer = setInterval(sendWsPing, 2000);
 }
 async function getJson(url){
   var resp = await fetch(apiUrl(url), {cache:'no-store', headers:pageHeaders()});
@@ -8265,10 +8317,11 @@ function connectWs(){
   if(ws){ try{ ws.close(); }catch(_e){} ws = null; }
   var wsProto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
   ws = new WebSocket(wsProto + location.host + '/ws');
-  ws.onopen = function(){ wsOnline = true; noteWsSample({}); };
+  ws.onopen = function(){ wsOnline = true; startWsPing(); };
   ws.onmessage = function(ev){ try{ noteWsSample(JSON.parse(String((ev && ev.data) || '{}'))); }catch(_e){} };
   ws.onerror = function(){ try{ ws.close(); }catch(_e){} };
   ws.onclose = function(){
+    stopWsPing();
     wsOnline = false;
     noteWsSample({});
     wsReconnectTimer = setTimeout(connectWs, 2000);
@@ -8277,6 +8330,7 @@ function connectWs(){
 qs('btn-refresh').addEventListener('click', refreshSummary);
 qs('btn-close').addEventListener('click', function(){ window.close(); });
 window.addEventListener('beforeunload', function(){
+  stopWsPing();
   if(pollTimer) clearTimeout(pollTimer);
   if(wsReconnectTimer) clearTimeout(wsReconnectTimer);
   if(ws){ try{ ws.close(); }catch(_e){} }
@@ -9579,6 +9633,7 @@ def http_server_thread() -> None:
                 client_entry = {
                     "sock": sock,
                     "mode": ws_mode,
+                    "send_lock": Lock(),
                     "next_send_at": (time.monotonic() + 5.0) if ws_mode == "settings" else 0.0,
                 }
                 with _ws_lock:
@@ -9586,7 +9641,7 @@ def http_server_thread() -> None:
                 import json as _json
                 try:
                     initial_payload = _ws_settings_runtime_payload() if ws_mode == "settings" else _state_snapshot(lightweight=True)
-                    sock.sendall(_ws_frame(
+                    _ws_send_client(client_entry, _ws_frame(
                         _json.dumps(initial_payload, ensure_ascii=False).encode()))
                 except Exception:
                     pass
@@ -9594,21 +9649,20 @@ def http_server_thread() -> None:
                 try:
                     sock.settimeout(120)
                     while True:
-                        hdr = sock.recv(2)
-                        if not hdr or len(hdr) < 2: break
-                        b1, b2 = hdr[0], hdr[1]
-                        masked = bool(b2 & 0x80)
-                        pl = b2 & 0x7F
-                        if pl == 126:
-                            pl = int.from_bytes(sock.recv(2), "big")
-                        elif pl == 127:
-                            pl = int.from_bytes(sock.recv(8), "big")
-                        to_read = (4 if masked else 0) + pl
-                        while to_read > 0:
-                            chunk = sock.recv(min(to_read, 4096))
-                            if not chunk: break
-                            to_read -= len(chunk)
-                        if (b1 & 0x0F) == 8: break  # close frame
+                        opcode, payload = _ws_recv_client_frame(sock)
+                        if opcode == 8: break
+                        if opcode == 9:
+                            _ws_send_client(client_entry, bytes([0x8A, len(payload)]) + payload)
+                            continue
+                        if opcode != 1:
+                            continue
+                        try:
+                            message = _json.loads(payload.decode("utf-8"))
+                        except Exception:
+                            continue
+                        if isinstance(message, dict) and message.get("kind") == "ping":
+                            pong = {"kind": "pong", "id": str(message.get("id") or "")[:80]}
+                            _ws_send_client(client_entry, _ws_frame(_json.dumps(pong).encode("utf-8")))
                 except Exception:
                     pass
                 with _ws_lock:

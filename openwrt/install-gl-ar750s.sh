@@ -36,10 +36,11 @@ fetch() {
 }
 
 download_verified_package() {
-    download_base="$1"
+    package_base="$1"
+    checksum_base="${2:-$package_base}"
     rm -f "$WORK_DIR/$ASSET" "$WORK_DIR/$ASSET.sha256"
-    fetch "$download_base/$ASSET" "$WORK_DIR/$ASSET" || return 1
-    fetch "$download_base/$ASSET.sha256" "$WORK_DIR/$ASSET.sha256" || return 1
+    fetch "$package_base/$ASSET" "$WORK_DIR/$ASSET" || return 1
+    fetch "$checksum_base/$ASSET.sha256" "$WORK_DIR/$ASSET.sha256" || return 1
     (cd "$WORK_DIR" && sha256sum -c "$ASSET.sha256") || return 1
 }
 
@@ -73,7 +74,7 @@ echo "light-rid-bootstrap: downloading $RELEASE_TAG for GL-AR750S"
 if [ -n "${LIGHT_RID_DOWNLOAD_BASE:-}" ]; then
     download_verified_package "$LIGHT_RID_DOWNLOAD_BASE" || \
         fail "package download or checksum verification failed"
-elif ! download_verified_package "$MIRROR_DOWNLOAD_BASE"; then
+elif ! download_verified_package "$MIRROR_DOWNLOAD_BASE" "$RAW_DOWNLOAD_BASE"; then
     echo "light-rid-bootstrap: mirror download failed; trying GitHub Raw" >&2
     if ! download_verified_package "$RAW_DOWNLOAD_BASE"; then
         echo "light-rid-bootstrap: Raw download failed; trying GitHub Release" >&2

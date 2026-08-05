@@ -106,7 +106,7 @@ interfaces, and dedicates the 2.4 GHz radio (`radio1`/`phy1`) to monitor mode as
 vendor process changes the monitor interface, channel, or radio ownership. The
 5 GHz AP and wired WAN remain available for ordinary router service.
 The dedicated `/router` page controls OpenWrt through UCI/ubus and provides a
-separate LuCI link. Network changes use a 90-second confirmation window and an
+separate LuCI link. Network changes use a 60-second confirmation window and an
 independent rollback process. The 2.4 GHz radio is never exposed as a router
 setting because it is reserved for RID capture.
 Only one scanner instance can run at a time. `light-rid-run status` reports the

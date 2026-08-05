@@ -54,7 +54,7 @@ class RouterManagementTests(unittest.TestCase):
         rendered = self.runtime["_build_router_html"]()
         self.assertNotIn("router template missing", rendered)
         self.assertIn("/assets/vue/router.js", rendered)
-        self.assertIn("90 秒", rendered)
+        self.assertIn("60 秒", rendered)
         self.assertIn("LuCI", rendered)
 
     def test_router_page_resolves_from_installed_app_root(self) -> None:
@@ -72,6 +72,13 @@ class RouterManagementTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(normalized["mode"], "wired")
         self.assertEqual(normalized["wan"]["protocol"], "dhcp")
+
+    def test_router_redirect_preserves_browser_address(self) -> None:
+        source = Path("station_edition/light_rid/assets/vue/router.js").read_text(encoding="utf-8")
+        self.assertIn("new URL(location.href)", source)
+        self.assertIn("location.assign(url)", source)
+        self.assertNotIn("data.transaction && data.transaction.new_url", source)
+        self.assertNotIn("90 秒", source)
 
     def test_overlapping_guest_and_lan_are_rejected(self) -> None:
         payload = self.valid_payload()

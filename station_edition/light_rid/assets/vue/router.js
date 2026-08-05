@@ -4,6 +4,13 @@
   let state = null;
   let transactionTimer = null;
 
+  function currentPageUrl() {
+    const url = new URL(location.href);
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  }
+
   function setMessage(text, error) {
     $("message").textContent = text || "";
     $("message").style.color = error ? "var(--red)" : "var(--muted)";
@@ -101,7 +108,7 @@
     clearInterval(transactionTimer); transactionTimer = null;
     if (!tx || !tx.pending) { $("transaction").classList.remove("show"); return; }
     $("transaction").classList.add("show"); $("confirm").disabled = tx.phase !== "applied";
-    const render = () => { const remaining = Math.max(0, Math.ceil(Number(tx.deadline || 0) - Date.now()/1000)); const phase = tx.phase === "applied" ? "已应用" : "正在应用"; $("transaction-copy").textContent = `${phase} · 剩余 ${remaining} 秒。新入口：${tx.new_url || location.href}`; if (!remaining) clearInterval(transactionTimer); };
+    const render = () => { const remaining = Math.max(0, Math.ceil(Number(tx.deadline || 0) - Date.now()/1000)); const phase = tx.phase === "applied" ? "已应用" : "正在应用"; $("transaction-copy").textContent = `${phase} · 剩余 ${remaining} 秒。确认页面：${currentPageUrl()}`; if (!remaining) clearInterval(transactionTimer); };
     render(); transactionTimer = setInterval(render, 1000); $("confirm").dataset.id = tx.id; $("rollback").dataset.id = tx.id;
   }
   async function load() {
@@ -115,8 +122,8 @@
   }
   async function validate() { try { setMessage("正在检查配置…"); await post("/api/router/validate", collect()); setMessage("配置检查通过。尚未写入设备。"); } catch (error) { setMessage(error.message, true); } }
   async function apply() {
-    if (!confirm("应用网络配置后，必须在 90 秒内确认。继续吗？")) return;
-    try { setMessage("正在备份并应用 OpenWrt 配置，请勿断电…"); const data = await post("/api/router/apply", collect()); showTransaction(data.transaction); setMessage("配置正在应用，请从可用地址点击“保留设置”。"); const url = data.transaction && data.transaction.new_url; if (url && url !== location.href) setTimeout(() => { window.open(url, "_self"); }, 5000); else setTimeout(load, 3000); } catch (error) { setMessage(error.message, true); }
+    if (!confirm("应用网络配置后，必须在 60 秒内确认。继续吗？")) return;
+    try { setMessage("正在备份并应用 OpenWrt 配置，请勿断电…"); const data = await post("/api/router/apply", collect()); showTransaction(data.transaction); setMessage("配置正在应用，请在当前访问地址点击“保留设置”。"); const url = currentPageUrl(); setTimeout(() => { location.assign(url); }, 5000); } catch (error) { setMessage(error.message, true); }
   }
   async function confirmTx() { try { const data = await post("/api/router/confirm", {id:$("confirm").dataset.id}); showTransaction(null); setMessage("网络配置已确认保留。"); await load(); } catch (error) { setMessage(error.message, true); } }
   async function rollbackTx() { try { await post("/api/router/rollback", {id:$("rollback").dataset.id}); showTransaction(null); setMessage("已恢复变更前配置，正在重新连接…"); setTimeout(load, 4000); } catch (error) { setMessage(error.message, true); } }

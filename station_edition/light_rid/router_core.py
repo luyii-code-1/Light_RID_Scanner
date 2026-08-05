@@ -11,7 +11,7 @@ ROUTER_BOARD = "glinet,gl-ar750s-nor-nand"
 ROUTER_CONFIG_FILES = ("network", "wireless", "dhcp", "firewall", "uhttpd")
 ROUTER_TX_ROOT = "/tmp/light-rid-router"
 ROUTER_ORIGINAL_ROOT = "/etc/light-rid/openwrt-original"
-ROUTER_ROLLBACK_SECONDS = 90
+ROUTER_ROLLBACK_SECONDS = 60
 ROUTER_SAFE_CHANNELS = {36, 40, 44, 48, 149, 153, 157, 161, 165}
 ROUTER_HTMODES = {"VHT20", "VHT40", "VHT80"}
 ROUTER_UPLINK_ENCRYPTIONS = {"none", "psk2", "psk-mixed", "sae", "sae-mixed"}
@@ -738,7 +738,10 @@ def _router_apply_payload(payload: dict | None) -> tuple[dict, int]:
         return {"ok": False, "error": f"无法备份 OpenWrt 配置: {message}"}, 500
     script = _router_write_rollback_script(tx_dir, tx_id, normalized["mode"])
     deadline = time.time() + ROUTER_ROLLBACK_SECONDS
-    new_url = f"http://{normalized['lan']['ipaddr']}:{int(globals().get('HTTP_PORT', 4600) or 4600)}/router"
+    # The backend cannot know whether the browser reached this page through a
+    # WAN address, reverse proxy, or forwarded port.  The browser preserves its
+    # own current page URL instead of being redirected to the LAN address.
+    new_url = ""
     try:
         subprocess.Popen(
             ["/bin/sh", str(script)],
@@ -759,7 +762,7 @@ def _router_apply_payload(payload: dict | None) -> tuple[dict, int]:
         "ok": True,
         "transaction": _router_tx_status(),
         "scheduled": True,
-        "warning": "必须在 90 秒内从新地址确认，否则配置会自动恢复。",
+        "warning": "必须在 60 秒内从当前页面确认，否则配置会自动恢复。",
     }, 202
 
 

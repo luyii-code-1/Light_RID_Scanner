@@ -9,7 +9,8 @@ set -eu
 REPOSITORY="luyii-code-1/Light_RID_Scanner"
 RELEASE_TAG="${LIGHT_RID_RELEASE_TAG:-gl-ar750s-latest}"
 ASSET="light-rid-gl-ar750s.tar.gz"
-DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
+RAW_DOWNLOAD_BASE="https://raw.githubusercontent.com/$REPOSITORY/gl-ar750s-download"
+RELEASE_DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG"
 WORK_DIR="/tmp/light-rid-bootstrap.$$"
 
 fail() {
@@ -31,6 +32,14 @@ fetch() {
     else
         fail "curl or wget is required"
     fi
+}
+
+download_verified_package() {
+    download_base="$1"
+    rm -f "$WORK_DIR/$ASSET" "$WORK_DIR/$ASSET.sha256"
+    fetch "$download_base/$ASSET" "$WORK_DIR/$ASSET" || return 1
+    fetch "$download_base/$ASSET.sha256" "$WORK_DIR/$ASSET.sha256" || return 1
+    (cd "$WORK_DIR" && sha256sum -c "$ASSET.sha256") || return 1
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -60,9 +69,14 @@ fi
 
 mkdir -m 0700 "$WORK_DIR" || fail "cannot create temporary directory"
 echo "light-rid-bootstrap: downloading $RELEASE_TAG for GL-AR750S"
-fetch "$DOWNLOAD_BASE/$ASSET" "$WORK_DIR/$ASSET" || fail "package download failed"
-fetch "$DOWNLOAD_BASE/$ASSET.sha256" "$WORK_DIR/$ASSET.sha256" || fail "checksum download failed"
-(cd "$WORK_DIR" && sha256sum -c "$ASSET.sha256") || fail "package checksum verification failed"
+if [ -n "${LIGHT_RID_DOWNLOAD_BASE:-}" ]; then
+    download_verified_package "$LIGHT_RID_DOWNLOAD_BASE" || \
+        fail "package download or checksum verification failed"
+elif ! download_verified_package "$RAW_DOWNLOAD_BASE"; then
+    echo "light-rid-bootstrap: Raw download failed; trying GitHub Release" >&2
+    download_verified_package "$RELEASE_DOWNLOAD_BASE" || \
+        fail "all package download sources failed"
+fi
 
 if command -v light-rid-upgrade >/dev/null 2>&1; then
     light-rid-upgrade "$WORK_DIR/$ASSET" || fail "upgrade failed"

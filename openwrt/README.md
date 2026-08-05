@@ -7,7 +7,8 @@ The station UI, RID parser, storage, and APIs remain Python. The
 
 The router needs OpenWrt's `python3`, `python3-light`, and `python3-sqlite3`
 packages. After SSH connects to the router, the normal online install or
-upgrade is one command. It downloads the public GL-AR750S release asset,
+upgrade is one command. It downloads the public GL-AR750S package from the
+repository's generated Raw download branch (with GitHub Release fallback),
 verifies its SHA-256 checksum, preserves existing settings, enables procd, and
 waits for the service to start:
 

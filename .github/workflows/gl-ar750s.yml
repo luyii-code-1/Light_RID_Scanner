@@ -147,3 +147,24 @@ jobs:
             release/light-rid-gl-ar750s.tar.gz.sha256 \
             openwrt/install-gl-ar750s.sh \
             --clobber
+
+      - name: Publish Raw download fallback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_dir="$(mktemp -d)"
+          cp release/light-rid-gl-ar750s.tar.gz "$publish_dir/"
+          cp release/light-rid-gl-ar750s.tar.gz.sha256 "$publish_dir/"
+          cp openwrt/install-gl-ar750s.sh "$publish_dir/"
+          printf 'source_commit=%s\n' "$GITHUB_SHA" > "$publish_dir/build-info.txt"
+          cd "$publish_dir"
+          git init --initial-branch=gl-ar750s-download
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .
+          git commit -m "GL-AR750S package ${GITHUB_SHA::7}"
+          gh auth setup-git
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:gl-ar750s-download

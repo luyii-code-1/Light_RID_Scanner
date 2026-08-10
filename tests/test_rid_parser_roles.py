@@ -327,6 +327,31 @@ class RidParserRoleTests(unittest.TestCase):
         self.assertEqual({}, state_table)
 
         state_update(
+            "aa:bb:cc:dd:ee:12",
+            {
+                "basic_id": {"uas_id": "RIDTEST1234", "id_type": "Serial"},
+                "location": None,
+                "system": None,
+                "metadata": {"format": "DJI_OLD_ODID", "rid_format": "DJI_OLD_ODID"},
+            },
+            rssi=-40,
+            ch=6,
+            ch_assumed=False,
+            pl_sig=125,
+            scan_type="rid",
+            ssid=None,
+            capture_type="Action",
+            raw_pkt_hex=None,
+            firmware_type="old",
+            rid_verified=True,
+        )
+
+        self.assertIn("RIDTEST1234", state_table)
+
+        state_table.clear()
+        history_table.clear()
+
+        state_update(
             "aa:bb:cc:dd:ee:22",
             {
                 "basic_id": {"uas_id": "1581F8DBW25B800B3417", "id_type": "Serial"},

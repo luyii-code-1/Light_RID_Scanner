@@ -12,6 +12,14 @@ class NativeCaptureIntegrationTests(unittest.TestCase):
         self.assertIn("return !!e;", function)
         self.assertNotIn("newFirmwareParseEnabled", function)
 
+    def test_parsed_rid_is_not_filtered_for_missing_coordinates(self):
+        source = Path("station_edition/light_rid/cli_app.py").read_text(encoding="utf-8")
+        process_source = Path("station_edition/light_rid/process_core.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("not _rid_parser_has_coord(decoded)", source)
+        self.assertIn("rid_verified=True", source)
+        self.assertIn('if scan_type_key != "phone" and not _rid_target_sn_valid(sn):', process_source)
+
     def test_exact_rid_ssid_can_create_row_before_coordinates_arrive(self):
         namespace = load_namespace(create_runtime_context())
 

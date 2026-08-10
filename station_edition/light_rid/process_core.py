@@ -77,10 +77,11 @@ def _decoded_has_valid_coord(loc: dict | None, sys_loc: dict | None, meta: dict 
 def _rid_realtime_candidate_valid(
     has_valid_coord: bool,
     *,
+    rid_verified: bool = False,
     sn: str | None = None,
     ssid: str | None = None,
 ) -> bool:
-    if has_valid_coord:
+    if rid_verified or has_valid_coord:
         return True
     sn_text = str(sn or "").strip()
     ssid_text = str(ssid or "").strip()
@@ -1890,7 +1891,8 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                  ch: int, ch_assumed: bool, pl_sig: int,
                  *, scan_type: str = "rid", ssid: str | None = None,
                  capture_type: str | None = None, raw_pkt_hex: str | None = None,
-                 firmware_type: str | None = "old") -> None:
+                 firmware_type: str | None = "old",
+                 rid_verified: bool = False) -> None:
     basic = decoded.get("basic_id")
     loc   = decoded.get("location")
     sys_loc = decoded.get("system")
@@ -1936,6 +1938,7 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
                 return
             if existing_entry is None and not _rid_realtime_candidate_valid(
                 rid_coord_ok,
+                rid_verified=rid_verified,
                 sn=sn,
                 ssid=ssid,
             ):
@@ -2612,7 +2615,7 @@ def _state_snapshot(lightweight: bool = False) -> dict:
             hist = history_table.get(sn) or cur
             scan_type_key = _scan_type_key(cur.get("scan_type", hist.get("scan_type", "rid")))
             firmware_type_key = _firmware_type_key(cur.get("firmware_type", hist.get("firmware_type", "old")))
-            if scan_type_key != "phone" and (len(sn) != 20 or (not sn.isalnum())):
+            if scan_type_key != "phone" and not _rid_target_sn_valid(sn):
                 continue
             model_name = _resolve_model_name(sn, scan_type_key, cur.get("model", hist.get("model")))
             if cur:

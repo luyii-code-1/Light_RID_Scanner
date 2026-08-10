@@ -193,7 +193,7 @@ def _parse_native_frame_impl(
                 continue
             fmt = str(parsed.get("format") or "")
             sn = str(parsed.get("sn") or ((decoded.get("basic_id") or {}).get("uas_id") or "")).strip()
-            if fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(sn) or not _rid_parser_has_coord(decoded):
+            if fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(sn):
                 continue
             body_hex = str(parsed.get("body_hex") or "")
             try:
@@ -206,6 +206,7 @@ def _parse_native_frame_impl(
                 scan_type=("phone" if is_wifi_fast else "rid"), ssid=ssid,
                 capture_type=subtype_name, raw_pkt_hex=(body_hex or frame_hex),
                 firmware_type=("new" if fmt == "GB46750_2025" else "old"),
+                rid_verified=True,
             )
     except Exception as ex:
         if DEBUG_MODE:
@@ -341,7 +342,7 @@ def _parse_frame_impl(pkt) -> None:
                     continue
                 fmt = str(parsed.get("format") or "")
                 sn = str(parsed.get("sn") or ((decoded.get("basic_id") or {}).get("uas_id") or "")).strip()
-                if fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(sn) or not _rid_parser_has_coord(decoded):
+                if fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(sn):
                     continue
                 body_hex = str(parsed.get("body_hex") or "")
                 try:
@@ -361,6 +362,7 @@ def _parse_frame_impl(pkt) -> None:
                     capture_type=subtype_name,
                     raw_pkt_hex=(body_hex or frame_hex),
                     firmware_type=("new" if fmt == "GB46750_2025" else "old"),
+                    rid_verified=True,
                 )
                 if DEBUG_MODE:
                     b = decoded.get("basic_id")
@@ -422,14 +424,14 @@ def _parse_frame_impl(pkt) -> None:
                         "dji_rid_kind": "DJI_OLD_ODID",
                     }
                     legacy_sn = str(((decoded.get("basic_id") or {}).get("uas_id")) or ssid_rid or mac_to_basic.get(src_mac, {}).get("basic", {}).get("uas_id") or "").strip()
-                    if not _rid_parser_sn_valid(legacy_sn) or not _rid_parser_has_coord(decoded):
+                    if not _rid_parser_sn_valid(legacy_sn):
                         continue
                 state_update(src_mac, decoded, rssi=rssi, ch=ch,
                              ch_assumed=ch_assumed, pl_sig=sig,
                              scan_type=("phone" if is_wifi_fast else "rid"),
                              ssid=ssid, capture_type=subtype_name,
                              raw_pkt_hex=_hex_preview(piece if piece else payload, max_bytes=160),
-                             firmware_type="old")
+                             firmware_type="old", rid_verified=(not is_wifi_fast))
                 if DEBUG_MODE:
                     b = decoded.get("basic_id")
                     l = decoded.get("location")
@@ -444,14 +446,14 @@ def _parse_frame_impl(pkt) -> None:
             meta = decoded.get("metadata") if isinstance(decoded.get("metadata"), dict) else {}
             gb_sn = str(((decoded.get("basic_id") or {}).get("uas_id")) or ssid_rid or "").strip()
             gb_fmt = str(meta.get("format") or meta.get("rid_format") or "")
-            if gb_fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(gb_sn) or not _rid_parser_has_coord(decoded):
+            if gb_fmt not in RID_PARSE_FORMATS or not _rid_parser_sn_valid(gb_sn):
                 continue
             sig = _gb_payload_sig(body)
             state_update(src_mac, decoded, rssi=rssi, ch=ch,
                          ch_assumed=ch_assumed, pl_sig=sig,
                          scan_type="rid", ssid=ssid, capture_type=subtype_name,
                          raw_pkt_hex=_hex_preview(body, max_bytes=160),
-                         firmware_type="new")
+                         firmware_type="new", rid_verified=True)
             if DEBUG_MODE:
                 b = decoded.get("basic_id")
                 l = decoded.get("location")

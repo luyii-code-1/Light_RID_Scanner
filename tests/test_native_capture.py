@@ -1,9 +1,35 @@
 import unittest
+from pathlib import Path
 
 from station_edition.light_rid.runtime import create_runtime_context, load_namespace
 
 
 class NativeCaptureIntegrationTests(unittest.TestCase):
+    def test_home_page_does_not_hide_rid_using_stale_browser_flag(self):
+        source = Path("station_edition/light_rid/web_server.py").read_text(encoding="utf-8")
+        function = source.split("function includeDroneByFirmware(e){", 1)[1].split("}", 1)[0]
+
+        self.assertIn("return !!e;", function)
+        self.assertNotIn("newFirmwareParseEnabled", function)
+
+    def test_exact_rid_ssid_can_create_row_before_coordinates_arrive(self):
+        namespace = load_namespace(create_runtime_context())
+
+        self.assertTrue(
+            namespace["_rid_realtime_candidate_valid"](
+                False,
+                sn="1581FANLC258U029RTN6",
+                ssid="RID-1581FANLC258U029RTN6",
+            )
+        )
+        self.assertFalse(
+            namespace["_rid_realtime_candidate_valid"](
+                False,
+                sn="NOT-A-REAL-RID",
+                ssid="RID-NOT-A-REAL-RID",
+            )
+        )
+
     def test_native_record_reuses_python_parser_and_state_update(self):
         namespace = load_namespace(create_runtime_context())
         updates = []

@@ -1215,8 +1215,10 @@ function parseNoteText(e){
   return s ? s : '';
 }
 function includeDroneByFirmware(e){
-  if(newFirmwareParseEnabled()) return true;
-  return String((e && e.scan_type_key) || '').toLowerCase() === 'phone';
+  // Parsing policy belongs to the capture/parser pipeline.  Hiding an already
+  // decoded RID row because of stale browser localStorage made the AP panel
+  // show RID while the home page appeared empty.
+  return !!e;
 }
 function buildInfoHtml(e){
   e = e || {};

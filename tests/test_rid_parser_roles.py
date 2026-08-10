@@ -262,7 +262,7 @@ class RidParserRoleTests(unittest.TestCase):
         self.assertIn("var hasDualTrack = Array.isArray(payload.aircraft) || Array.isArray(payload.operator);", source)
         self.assertIn("trackCache[payload.sn] = normalizeTrackCacheEntry(payload.tracks || payload);", source)
 
-    def test_state_update_requires_valid_sn_and_coord_for_new_rid_target(self):
+    def test_state_update_accepts_exact_rid_ssid_before_coordinates(self):
         state_table = self.process_ns["state_table"]
         history_table = self.process_ns["history_table"]
         mac_to_basic = self.process_ns["mac_to_basic"]
@@ -299,7 +299,11 @@ class RidParserRoleTests(unittest.TestCase):
             firmware_type="old",
         )
 
-        self.assertNotIn("1581F8DBW25B800B3417", state_table)
+        self.assertIn("1581F8DBW25B800B3417", state_table)
+        self.assertIsNone(state_table["1581F8DBW25B800B3417"]["lat"])
+
+        state_table.clear()
+        history_table.clear()
 
         state_update(
             "aa:bb:cc:dd:ee:11",

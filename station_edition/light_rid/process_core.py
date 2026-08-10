@@ -74,8 +74,24 @@ def _decoded_has_valid_coord(loc: dict | None, sys_loc: dict | None, meta: dict 
     return False
 
 
-def _rid_realtime_candidate_valid(has_valid_coord: bool) -> bool:
-    return bool(has_valid_coord)
+def _rid_realtime_candidate_valid(
+    has_valid_coord: bool,
+    *,
+    sn: str | None = None,
+    ssid: str | None = None,
+) -> bool:
+    if has_valid_coord:
+        return True
+    sn_text = str(sn or "").strip()
+    ssid_text = str(ssid or "").strip()
+    # DJI can advertise the Basic ID before a frame containing usable
+    # coordinates arrives.  An exact RID-<20 character SN> beacon is strong
+    # enough to create the live row; later packets enrich that same row.
+    return bool(
+        len(sn_text) == RID_NEW_FW_SN_LEN
+        and sn_text.isalnum()
+        and ssid_text.upper() == f"RID-{sn_text}".upper()
+    )
 
 def _scan_diff_round(value):
     try:
@@ -1918,7 +1934,11 @@ def state_update(src_mac: str, decoded: dict, rssi: int | None,
         if scan_type_key == "rid":
             if not _rid_target_sn_valid(sn):
                 return
-            if existing_entry is None and not _rid_realtime_candidate_valid(rid_coord_ok):
+            if existing_entry is None and not _rid_realtime_candidate_valid(
+                rid_coord_ok,
+                sn=sn,
+                ssid=ssid,
+            ):
                 return
         # MAC -> SN migration
         if sn != mac_key and mac_key in state_table and sn not in state_table:

@@ -1987,6 +1987,16 @@ def _native_capture_helper_path() -> str:
     return str(found or "")
 
 def _sniff_run_native(iface: str, timeout_sec: float) -> None:
+    stream_path = str(os.environ.get("LIGHT_RID_CAPTURE_STREAM") or "").strip()
+    if stream_path:
+        # Low-memory routers start one long-lived Rust capture process from
+        # their supervisor.  Reading its FIFO here avoids forking the fully
+        # loaded Python process every polling interval.
+        with open(stream_path, "r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if line.startswith("RIDCAP1\t"):
+                    _parse_native_capture_line(line.rstrip("\r\n"))
+        raise RuntimeError("native capture stream closed")
     helper = _native_capture_helper_path()
     if not helper:
         raise RuntimeError("native capture helper not found")
@@ -2011,7 +2021,8 @@ def _sniff_run_once(iface: str, timeout_sec: float = SNIFF_POLL_TIMEOUT) -> tupl
     if not iface:
         return "error", "iface empty"
     timeout_sec = max(1.0, float(timeout_sec or SNIFF_POLL_TIMEOUT))
-    hard_deadline = time.monotonic() + timeout_sec + SNIFF_WORKER_HARD_GRACE_SEC
+    persistent_stream = bool(str(os.environ.get("LIGHT_RID_CAPTURE_STREAM") or "").strip())
+    hard_deadline = None if persistent_stream else time.monotonic() + timeout_sec + SNIFF_WORKER_HARD_GRACE_SEC
     result = {"error": "", "done": False}
     sock_ref = {"sock": None}
 
@@ -2036,7 +2047,7 @@ def _sniff_run_once(iface: str, timeout_sec: float = SNIFF_POLL_TIMEOUT) -> tupl
     th = Thread(target=_worker, daemon=True)
     th.start()
     while th.is_alive():
-        if time.monotonic() >= hard_deadline:
+        if hard_deadline is not None and time.monotonic() >= hard_deadline:
             _sniff_close_socket(sock_ref.get("sock"))
             th.join(SNIFF_WORKER_JOIN_GRACE_SEC)
             if th.is_alive():

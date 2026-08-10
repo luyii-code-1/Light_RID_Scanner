@@ -1,4 +1,7 @@
 import unittest
+import os
+import tempfile
+from unittest import mock
 from pathlib import Path
 
 from station_edition.light_rid.runtime import create_runtime_context, load_namespace
@@ -57,6 +60,30 @@ class NativeCaptureIntegrationTests(unittest.TestCase):
             self.assertEqual(kwargs["rssi"], -42)
             self.assertEqual(kwargs["ch"], 6)
         self.assertTrue(any(kwargs["firmware_type"] == "new" for _args, kwargs in updates))
+
+    def test_router_capture_stream_does_not_spawn_a_child(self):
+        namespace = load_namespace(create_runtime_context())
+        updates = []
+        namespace["_parse_native_capture_line"] = updates.append
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as stream:
+            stream.write("RIDCAP1\t8\taa:bb:cc:dd:ee:ff\t-42\t6\t\t00\n")
+            stream_path = stream.name
+        try:
+            with mock.patch.dict(os.environ, {"LIGHT_RID_CAPTURE_STREAM": stream_path}):
+                with mock.patch("subprocess.Popen") as popen:
+                    with self.assertRaisesRegex(RuntimeError, "capture stream closed"):
+                        namespace["_sniff_run_native"]("ridmon", 20.0)
+            popen.assert_not_called()
+            self.assertEqual(1, len(updates))
+        finally:
+            os.unlink(stream_path)
+
+    def test_router_launcher_uses_one_persistent_capture_stream(self):
+        source = Path("openwrt/light-rid-run").read_text(encoding="utf-8")
+
+        self.assertIn('mkfifo "$CAPTURE_FIFO"', source)
+        self.assertIn('--timeout-ms 0 >"$CAPTURE_FIFO"', source)
+        self.assertIn('LIGHT_RID_CAPTURE_STREAM="$CAPTURE_FIFO"', source)
 
 
 if __name__ == "__main__":

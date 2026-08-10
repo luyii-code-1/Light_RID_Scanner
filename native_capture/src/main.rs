@@ -41,11 +41,16 @@ fn run() -> io::Result<()> {
         ));
     }
 
-    capture(&iface, Duration::from_millis(timeout_ms.max(250)))
+    let duration = if timeout_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms.max(250)))
+    };
+    capture(&iface, duration)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn capture(_iface: &str, _duration: Duration) -> io::Result<()> {
+fn capture(_iface: &str, _duration: Option<Duration>) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "AF_PACKET capture is only available on Linux",
@@ -53,7 +58,7 @@ fn capture(_iface: &str, _duration: Duration) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn capture(iface: &str, duration: Duration) -> io::Result<()> {
+fn capture(iface: &str, duration: Option<Duration>) -> io::Result<()> {
     let fd = open_packet_socket(iface)?;
     let result = receive_loop(fd, duration);
     unsafe { libc::close(fd) };
@@ -159,12 +164,12 @@ fn open_packet_socket(iface: &str) -> io::Result<i32> {
 }
 
 #[cfg(target_os = "linux")]
-fn receive_loop(fd: i32, duration: Duration) -> io::Result<()> {
-    let deadline = Instant::now() + duration;
+fn receive_loop(fd: i32, duration: Option<Duration>) -> io::Result<()> {
+    let deadline = duration.map(|value| Instant::now() + value);
     let mut buffer = vec![0_u8; 8192];
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    while Instant::now() < deadline {
+    while deadline.map(|value| Instant::now() < value).unwrap_or(true) {
         let size = unsafe {
             libc::recv(
                 fd,

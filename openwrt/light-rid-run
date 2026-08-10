@@ -8,6 +8,8 @@ CONFIG=/etc/light-rid/config.json
 MANIFEST="$APP_ROOT/package-manifest.sha256"
 LOCK_DIR=/tmp/light-rid.lock
 CHILD_PID=""
+CAPTURE_PID=""
+CAPTURE_FIFO=/tmp/light-rid/capture.fifo
 LOCK_HELD=0
 MONITOR_PREPARED=0
 
@@ -174,6 +176,11 @@ cleanup() {
         kill "$CHILD_PID" >/dev/null 2>&1
         wait "$CHILD_PID" >/dev/null 2>&1
     fi
+    if [ -n "$CAPTURE_PID" ]; then
+        kill "$CAPTURE_PID" >/dev/null 2>&1
+        wait "$CAPTURE_PID" >/dev/null 2>&1
+    fi
+    rm -f "$CAPTURE_FIFO"
     if [ "$MONITOR_PREPARED" -eq 1 ]; then
         iw dev ridmon del >/dev/null 2>&1
     fi
@@ -347,11 +354,16 @@ trap cleanup EXIT HUP INT TERM
 prepare_monitor || fail "failed to prepare phy1/ridmon"
 
 mkdir -p /tmp/light-rid
+rm -f "$CAPTURE_FIFO"
+mkfifo "$CAPTURE_FIFO" || fail "cannot create capture stream"
+"$CAPTURE" --interface ridmon --timeout-ms 0 >"$CAPTURE_FIFO" 2>&1 &
+CAPTURE_PID=$!
 cd "$APP_ROOT" || fail "cannot enter $APP_ROOT"
 echo "light-rid: starting GL-AR750S scanner; press Ctrl+C to stop"
 PYTHONPATH="$APP_ROOT" \
 LIGHT_RID_APP_ROOT="$APP_ROOT" \
 LIGHT_RID_CAPTURE_HELPER="$CAPTURE" \
+LIGHT_RID_CAPTURE_STREAM="$CAPTURE_FIFO" \
 PYTHONDONTWRITEBYTECODE=1 \
 PYTHONUNBUFFERED=1 \
 TMPDIR=/tmp/light-rid \
@@ -360,6 +372,13 @@ CHILD_PID=$!
 echo "$CHILD_PID" > "$LOCK_DIR/app.pid"
 while kill -0 "$CHILD_PID" >/dev/null 2>&1; do
     sleep 5
+    if ! kill -0 "$CAPTURE_PID" >/dev/null 2>&1; then
+        echo "light-rid: capture process exited; restarting supervised runtime" >&2
+        kill "$CHILD_PID" >/dev/null 2>&1 || true
+        wait "$CHILD_PID" >/dev/null 2>&1 || true
+        CHILD_PID=""
+        exit 75
+    fi
     if ! monitor_healthy; then
         echo "light-rid: radio1 ownership lost; restarting supervised runtime" >&2
         kill "$CHILD_PID" >/dev/null 2>&1 || true

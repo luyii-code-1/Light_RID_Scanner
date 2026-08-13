@@ -3139,11 +3139,11 @@ function buildExtraUi(){
       '    </div>'+
       '    <div class="adv-row">'+
       '      <label for="base-lat">基站纬度</label>'+
-      '      <input id="base-lat" class="adv-input" type="text" inputmode="decimal" placeholder="例如: 30.0678192">'+
+      '      <input id="base-lat" class="adv-input" type="text" inputmode="decimal" placeholder="请输入基站纬度">'+
       '    </div>'+
       '    <div class="adv-row">'+
       '      <label for="base-lon">基站经度</label>'+
-      '      <input id="base-lon" class="adv-input" type="text" inputmode="decimal" placeholder="例如: 121.1854406">'+
+      '      <input id="base-lon" class="adv-input" type="text" inputmode="decimal" placeholder="请输入基站经度">'+
       '    </div>'+
       '    <div class="adv-row">'+
       '      <label for="base-zoom">基站缩放</label>'+
@@ -6786,6 +6786,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       ' <div class="simulation-body">'+
       '  <div class="simulation-status" id="simulation-status"><span>状态</span><strong>正在读取…</strong></div>'+
       '  <div class="simulation-grid">'+
+      '   <div class="simulation-field"><label for="simulation-transport">发送方式</label><select id="simulation-transport"><option value="network">通过配置的扫描网卡发射</option><option value="memory">仅内存演示</option></select></div>'+
       '   <div class="simulation-field"><label for="simulation-count">目标数量</label><input id="simulation-count" type="number" min="1" max="100" step="1" value="3"></div>'+
       '   <div class="simulation-field"><label for="simulation-pattern">运动模式</label><select id="simulation-pattern"><option value="circle">环绕飞行</option><option value="line">直线往返</option><option value="stationary">定点悬停</option></select></div>'+
       '   <div class="simulation-field"><label for="simulation-lat">中心纬度</label><input id="simulation-lat" type="number" min="-90" max="90" step="0.000001"></div>'+
@@ -6819,6 +6820,11 @@ _MAIN_PAGE_PATCH_JS = r"""
     if(error) strong.textContent = String(error);
     else if(running) strong.textContent = String(data.count || 0) + ' 个目标 · 已运行 ' + Math.round(Number(data.elapsed_sec || 0)) + ' 秒';
     else strong.textContent = '未运行';
+    if(running){
+      var tx = data.transmit || {};
+      var mode = data.options && data.options.transport === 'memory' ? '仅内存' : ('网卡 ' + String(tx.iface || (data.options || {}).iface || '-'));
+      strong.textContent = String(data.count || 0) + ' 个目标 · ' + mode + ' · 已发 ' + String(tx.sent || 0) + ' · 失败 ' + String(tx.failed || 0) + (tx.last_error ? ' · ' + String(tx.last_error) : '');
+    }
   }
   async function refreshSimulationStatus(){
     try{
@@ -6826,6 +6832,7 @@ _MAIN_PAGE_PATCH_JS = r"""
       setSimulationStatus(data);
       var options = data && data.options;
       if(options && data.running){
+        if(qs('simulation-transport')) qs('simulation-transport').value = options.transport || 'network';
         if(qs('simulation-count')) qs('simulation-count').value = options.count;
         if(qs('simulation-pattern')) qs('simulation-pattern').value = options.pattern;
         if(qs('simulation-lat')) qs('simulation-lat').value = options.center_lat;
@@ -6840,8 +6847,8 @@ _MAIN_PAGE_PATCH_JS = r"""
   function openSimulationModal(){
     var modal = ensureSimulationModal();
     var base = baseFromMeta(metaState || {});
-    if(qs('simulation-lat') && !qs('simulation-lat').value) qs('simulation-lat').value = base.ok ? base.lat : 30.0678192;
-    if(qs('simulation-lon') && !qs('simulation-lon').value) qs('simulation-lon').value = base.ok ? base.lon : 121.1854406;
+    if(qs('simulation-lat') && !qs('simulation-lat').value && base.ok) qs('simulation-lat').value = base.lat;
+    if(qs('simulation-lon') && !qs('simulation-lon').value && base.ok) qs('simulation-lon').value = base.lon;
     modal.classList.add('show');
     modal.setAttribute('aria-hidden', 'false');
     refreshSimulationStatus();
@@ -6852,10 +6859,11 @@ _MAIN_PAGE_PATCH_JS = r"""
     setSimulationStatus(null, '正在启动…');
     try{
       var data = await postJson('/api/simulation/start', {
+        transport:String(qs('simulation-transport').value || 'network'),
         count:Number(qs('simulation-count').value || 3),
         pattern:String(qs('simulation-pattern').value || 'circle'),
-        center_lat:Number(qs('simulation-lat').value),
-        center_lon:Number(qs('simulation-lon').value),
+        center_lat:qs('simulation-lat').value === '' ? null : Number(qs('simulation-lat').value),
+        center_lon:qs('simulation-lon').value === '' ? null : Number(qs('simulation-lon').value),
         radius_m:Number(qs('simulation-radius').value || 500),
         speed_mps:Number(qs('simulation-speed').value || 0),
         altitude_m:Number(qs('simulation-altitude').value || 120),

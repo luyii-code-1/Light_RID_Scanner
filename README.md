@@ -138,7 +138,7 @@ The station runtime uses a chunk-loading architecture: `app.py` loads and execut
 
 ### Web Dashboard
 - Real-time map with Leaflet, showing aircraft markers, base station, and alarm zones
-- Ephemeral target simulation for demos and end-to-end checks (circle, line, or stationary patterns; up to 100 targets)
+- Target simulation over the configured scan interface, with an explicit memory-only demo mode (circle, line, or stationary patterns; up to 100 targets)
 - Configurable Leaflet tile/API template for licensed map providers
 - Aircraft list panel with live detail cards (SN, model, altitude, speed, heading, RSSI)
 - AP list panel with vendor identification

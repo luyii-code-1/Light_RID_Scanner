@@ -13,6 +13,7 @@ _simulation_thread = None
 _simulation_generation = 0
 _simulation_started_wall_ts = None
 _simulation_options: dict = {}
+_simulation_tx_stats: dict = {}
 
 
 def _simulation_number(value, default: float, low: float, high: float) -> float:
@@ -28,9 +29,71 @@ def _simulation_number(value, default: float, low: float, high: float) -> float:
 def _simulation_center(body: dict) -> tuple[float, float]:
     base_lat = WEB_CFG.get("base_lat") if isinstance(WEB_CFG, dict) else None
     base_lon = WEB_CFG.get("base_lon") if isinstance(WEB_CFG, dict) else None
-    lat = _simulation_number(body.get("center_lat"), base_lat or 30.0678192, -90.0, 90.0)
-    lon = _simulation_number(body.get("center_lon"), base_lon or 121.1854406, -180.0, 180.0)
+    lat_value = body.get("center_lat")
+    lon_value = body.get("center_lon")
+    if lat_value in (None, ""):
+        lat_value = base_lat
+    if lon_value in (None, ""):
+        lon_value = base_lon
+    if lat_value in (None, "") or lon_value in (None, ""):
+        raise ValueError("base station coordinates are not configured")
+    lat = _simulation_number(lat_value, 0.0, -90.0, 90.0)
+    lon = _simulation_number(lon_value, 0.0, -180.0, 180.0)
     return lat, lon
+
+
+def _simulation_iface() -> str:
+    basic = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
+    iface = str((basic or {}).get("iface") or "").strip()
+    return str(_hw_safe_iface(iface) or "") if iface else ""
+
+
+def _simulation_odid_messages(entry: dict) -> list[bytes]:
+    """Encode a target as standard 25-byte OpenDroneID messages."""
+    sn = str(entry.get("sn") or "")[:20].encode("ascii", errors="ignore").ljust(20, b"\x00")
+    basic = bytearray(ODID_MSG_SIZE)
+    basic[0], basic[1], basic[2:22] = MSG_TYPE_BASIC_ID << 4, 1, sn
+    location = bytearray(ODID_MSG_SIZE)
+    location[0] = MSG_TYPE_LOCATION << 4
+    location[3] = int(round(max(0.0, min(63.75, float(entry.get("speed") or 0.0))) / 0.25))
+    struct.pack_into("<b", location, 4, int(round(max(-62.0, min(62.0, float(entry.get("vspeed") or 0.0))) / 0.5)))
+    struct.pack_into("<i", location, 5, int(round(float(entry["lat"]) * 1e7)))
+    struct.pack_into("<i", location, 9, int(round(float(entry["lon"]) * 1e7)))
+    altitude = max(1, min(0xFFFF, int(round((float(entry.get("alt") or 0.0) + 1000.0) / 0.5))))
+    struct.pack_into("<H", location, 13, altitude)
+    struct.pack_into("<H", location, 15, altitude)
+    system = bytearray(ODID_MSG_SIZE)
+    system[0], system[1] = MSG_TYPE_SYSTEM << 4, 3
+    struct.pack_into("<i", system, 2, int(round(float(entry["pilot_lat"]) * 1e7)))
+    struct.pack_into("<i", system, 6, int(round(float(entry["pilot_lon"]) * 1e7)))
+    return [bytes(basic), bytes(location), bytes(system)]
+
+
+def _simulation_wifi_frame(entry: dict):
+    src = str(entry.get("src_mac") or "02:53:49:4d:00:01")
+    frame = RadioTap() / Dot11(type=0, subtype=8, addr1="ff:ff:ff:ff:ff:ff", addr2=src, addr3=src)
+    frame = frame / Dot11Beacon(cap="ESS") / Dot11Elt(ID="SSID", info=str(entry.get("ssid") or "RID-SIM"))
+    for message in _simulation_odid_messages(entry):
+        frame = frame / Dot11Elt(ID=221, info=ODID_OUI + b"\x00" + message)
+    return frame
+
+
+def _simulation_transmit(targets: list[dict], iface: str) -> bool:
+    try:
+        sender = conf.L2socket(iface=iface)
+        try:
+            for target in targets:
+                sender.send(_simulation_wifi_frame(target["entry"]))
+                _simulation_tx_stats["sent"] = int(_simulation_tx_stats.get("sent") or 0) + 1
+            _simulation_tx_stats["last_error"] = ""
+        finally:
+            sender.close()
+        return True
+    except Exception as exc:
+        _simulation_tx_stats["failed"] = int(_simulation_tx_stats.get("failed") or 0) + len(targets)
+        _simulation_tx_stats["last_error"] = str(exc)
+        _log(f"[WARN] simulation transmit failed on {iface}: {exc}")
+        return False
 
 
 def _simulation_offset(center_lat: float, center_lon: float, north_m: float, east_m: float) -> tuple[float, float]:
@@ -194,13 +257,16 @@ def _simulation_loop(generation: int) -> None:
             with state_lock:
                 for target in targets:
                     _simulation_update_target(target, options, elapsed, now, now_wall)
-                    state_table[target["entry"]["sn"]] = target["entry"]
+                    if options.get("transport") == "memory":
+                        state_table[target["entry"]["sn"]] = target["entry"]
+            if options.get("transport") == "network":
+                _simulation_transmit(targets, str(options.get("iface") or ""))
         time.sleep(SIMULATION_TICK_SEC)
 
 
 def simulation_start(body: dict | None = None) -> dict:
     """Start or replace the active simulation scenario."""
-    global _simulation_generation, _simulation_started_wall_ts, _simulation_options, _simulation_thread
+    global _simulation_generation, _simulation_started_wall_ts, _simulation_options, _simulation_thread, _simulation_tx_stats
     body = body if isinstance(body, dict) else {}
     try:
         count = int(body.get("count") or 3)
@@ -211,7 +277,18 @@ def simulation_start(body: dict | None = None) -> dict:
     pattern = str(body.get("pattern") or "circle").strip().lower()
     if pattern not in ("circle", "line", "stationary"):
         return {"ok": False, "error": "pattern must be circle, line or stationary"}
-    center_lat, center_lon = _simulation_center(body)
+    try:
+        center_lat, center_lon = _simulation_center(body)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    transport = str(body.get("transport") or "network").strip().lower()
+    if transport not in ("network", "memory"):
+        return {"ok": False, "error": "transport must be network or memory"}
+    iface = _simulation_iface() if transport == "network" else ""
+    if transport == "network" and not iface:
+        return {"ok": False, "error": "no configured scan interface"}
+    if transport == "network" and not SCAPY_AVAILABLE:
+        return {"ok": False, "error": "network simulation requires scapy"}
     options = {
         "count": count,
         "pattern": pattern,
@@ -221,6 +298,8 @@ def simulation_start(body: dict | None = None) -> dict:
         "speed_mps": _simulation_number(body.get("speed_mps"), 12.0, 0.0, 100.0),
         "altitude_m": _simulation_number(body.get("altitude_m"), 120.0, -500.0, 10000.0),
         "duration_sec": _simulation_number(body.get("duration_sec"), 0.0, 0.0, 86400.0),
+        "transport": transport,
+        "iface": iface,
     }
     simulation_stop()
     now, now_wall = time.monotonic(), time.time()
@@ -229,6 +308,7 @@ def simulation_start(body: dict | None = None) -> dict:
         generation = _simulation_generation
         _simulation_started_wall_ts = now_wall
         _simulation_options = options
+        _simulation_tx_stats = {"iface": iface, "sent": 0, "failed": 0, "last_error": ""}
         for index in range(count):
             sn = _simulation_sn(index + 1, generation)
             _simulation_targets[sn] = _simulation_entry(sn, index, options, now, now_wall)
@@ -236,7 +316,13 @@ def simulation_start(body: dict | None = None) -> dict:
     with state_lock:
         for target in targets:
             _simulation_update_target(target, options, 0.0, now, now_wall)
-            state_table[target["entry"]["sn"]] = target["entry"]
+            if transport == "memory":
+                state_table[target["entry"]["sn"]] = target["entry"]
+    if transport == "network":
+        if not _simulation_transmit(targets, iface):
+            error = str(_simulation_tx_stats.get("last_error") or "network transmit failed")
+            simulation_stop()
+            return {"ok": False, "error": f"failed to transmit on {iface}: {error}"}
     _simulation_thread = Thread(target=_simulation_loop, args=(generation,), daemon=True, name="rid-simulation")
     _simulation_thread.start()
     return simulation_status()
@@ -244,13 +330,14 @@ def simulation_start(body: dict | None = None) -> dict:
 
 def simulation_stop() -> dict:
     """Stop simulation and remove all ephemeral targets from the live table."""
-    global _simulation_generation, _simulation_started_wall_ts, _simulation_options
+    global _simulation_generation, _simulation_started_wall_ts, _simulation_options, _simulation_tx_stats
     with _simulation_lock:
         sn_list = list(_simulation_targets)
         _simulation_targets.clear()
         _simulation_generation += 1
         _simulation_started_wall_ts = None
         _simulation_options = {}
+        _simulation_tx_stats = {}
     with state_lock:
         for sn in sn_list:
             entry = state_table.get(sn)
@@ -275,5 +362,6 @@ def simulation_status() -> dict:
         "started_at": _fmt_wall_ts(started),
         "elapsed_sec": round(max(0.0, now_wall - started), 1) if started else 0.0,
         "options": options,
+        "transmit": dict(_simulation_tx_stats),
         "targets": [target["entry"]["sn"] for target in targets],
     }

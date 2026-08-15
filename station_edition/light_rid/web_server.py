@@ -9814,7 +9814,11 @@ def http_server_thread() -> None:
                 return
             if path == "/api/simulation/start":
                 body = self._read_json_body()
-                rsp = simulation_start(body)
+                try:
+                    rsp = simulation_start(body)
+                except Exception as exc:
+                    _log(f"[WARN] simulation start failed: {exc}")
+                    rsp = {"ok": False, "error": f"simulation start failed: {exc}"}
                 _op_log(
                     "simulation-start",
                     f"count={rsp.get('count', 0)} pattern={(rsp.get('options') or {}).get('pattern', '')}",

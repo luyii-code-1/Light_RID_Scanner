@@ -47,7 +47,9 @@ try:
     from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
     from scapy.sendrecv import sniff
     conf.verb = 0
+    SCAPY_AVAILABLE = True
 except ImportError:
+    SCAPY_AVAILABLE = False
     sys.exit("[FATAL] scapy not installed. Run: pip3 install scapy")
 
 # -----------------------------------------------------------------------------

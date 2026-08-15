@@ -87,6 +87,46 @@ class SimulationTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("scan interface", result["error"])
 
+    def test_network_transport_reports_scapy_unavailable(self):
+        original_available = self.ns["SCAPY_AVAILABLE"]
+        original_safe_iface = self.ns.get("_hw_safe_iface")
+        try:
+            self.ns["APP_CONFIG"] = {"basic": {"iface": "wlan0"}}
+            self.ns["_hw_safe_iface"] = lambda iface: iface
+            self.ns["SCAPY_AVAILABLE"] = False
+            result = self.ns["simulation_start"]({"center_lat": 30.0, "center_lon": 121.0})
+        finally:
+            self.ns["SCAPY_AVAILABLE"] = original_available
+            if original_safe_iface is None:
+                self.ns.pop("_hw_safe_iface", None)
+            else:
+                self.ns["_hw_safe_iface"] = original_safe_iface
+        self.assertFalse(result["ok"])
+        self.assertIn("requires scapy", result["error"])
+
+    def test_network_transport_reaches_transmitter(self):
+        original_transmit = self.ns["_simulation_transmit"]
+        original_safe_iface = self.ns.get("_hw_safe_iface")
+        calls = []
+        try:
+            self.ns["APP_CONFIG"] = {"basic": {"iface": "wlan0"}}
+            self.ns["_hw_safe_iface"] = lambda iface: iface
+            self.ns["_simulation_transmit"] = lambda targets, iface: calls.append((len(targets), iface)) or True
+            result = self.ns["simulation_start"]({
+                "transport": "network",
+                "count": 2,
+                "center_lat": 30.0,
+                "center_lon": 121.0,
+            })
+        finally:
+            self.ns["_simulation_transmit"] = original_transmit
+            if original_safe_iface is None:
+                self.ns.pop("_hw_safe_iface", None)
+            else:
+                self.ns["_hw_safe_iface"] = original_safe_iface
+        self.assertTrue(result["ok"])
+        self.assertIn((2, "wlan0"), calls)
+
     def test_network_payload_encodes_simulated_coordinates(self):
         entry = {
             "sn": "SIM00010000000000001",

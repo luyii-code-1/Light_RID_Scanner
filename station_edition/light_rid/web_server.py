@@ -146,6 +146,10 @@ header h1{font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.01em;t
 .sniff-banner{
   display:none;
   grid-column:1/-1;
+  width:100%;
+  min-width:0;
+  max-width:100%;
+  box-sizing:border-box;
   margin-top:6px;
   padding:8px 12px;
   border:1px solid color-mix(in srgb, var(--warn) 44%, var(--border));
@@ -154,6 +158,8 @@ header h1{font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.01em;t
   color:#ffd7cc;
   font-size:13px;
   line-height:1.35;
+  white-space:normal;
+  overflow-wrap:anywhere;
   z-index:12;
 }
 .sniff-banner.warn{
@@ -165,7 +171,9 @@ header h1{font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.01em;t
   align-items:center;
   justify-content:space-between;
   gap:10px;
+  flex-wrap:wrap;
 }
+.security-banner span{min-width:0;overflow-wrap:anywhere}
 .security-banner .btn-mini{flex:0 0 auto}
 .banner-stack{
   position:fixed;top:74px;left:50%;transform:translateX(-50%);
@@ -6097,13 +6105,12 @@ _MAIN_PAGE_PATCH_CSS = r"""
 header.app-shell-header{
   margin:12px 12px 0;
   padding:10px 12px;
-  display:flex;
+  display:grid;
+  grid-template-columns:minmax(0,1fr);
   align-items:center;
   gap:10px;
-  flex-wrap:nowrap;
-  overflow-x:visible;
-  overflow-y:visible;
-  white-space:nowrap;
+  overflow:visible;
+  white-space:normal;
   background:var(--panel);
   border:1px solid var(--border);
   border-radius:var(--radius);
@@ -6114,6 +6121,7 @@ header.app-shell-header::-webkit-scrollbar{height:6px}
   display:flex;
   align-items:center;
   gap:10px;
+  flex-wrap:wrap;
   flex:1 1 auto;
   min-width:0;
 }
@@ -6184,6 +6192,7 @@ header.app-shell-header h1{
   display:flex;
   align-items:center;
   gap:8px;
+  flex-wrap:wrap;
   justify-content:flex-end;
   min-width:0;
   flex:1 1 auto;

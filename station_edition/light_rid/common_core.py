@@ -257,6 +257,9 @@ state_table: dict[str, dict] = {}
 # Web side history cache: keep all seen drones after live-state purge.
 history_table: dict[str, dict] = {}
 state_lock = Lock()
+# A real radio simulation owns the configured scan interface while it transmits.
+# Keep packet capture alive, but pause parsing until the simulation stops.
+simulation_scan_pause_event = threading.Event()
 
 log_buf:  deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Normal logs (LOST/INFO/etc.)
 scan_buf: deque[str] = deque(maxlen=LOG_BUF_SIZE)   # Full scan logs (with debug frame info)

@@ -25,6 +25,7 @@ class SimulationTests(unittest.TestCase):
 
     def tearDown(self):
         self.ns["simulation_stop"]()
+        self.assertFalse(self.ns["simulation_scan_pause_event"].is_set())
         self.ns["state_table"].clear()
         self.ns["history_table"].clear()
 
@@ -118,6 +119,13 @@ class SimulationTests(unittest.TestCase):
                 "center_lat": 30.0,
                 "center_lon": 121.0,
             })
+            status = self.ns["simulation_status"]()
+            snapshot = self.ns["_state_snapshot"](lightweight=True)
+            rows = [
+                row for row in snapshot["drones"]
+                if row.get("capture_type") == "simulation"
+            ]
+            stopped = self.ns["simulation_stop"]()
         finally:
             self.ns["_simulation_transmit"] = original_transmit
             if original_safe_iface is None:
@@ -126,6 +134,10 @@ class SimulationTests(unittest.TestCase):
                 self.ns["_hw_safe_iface"] = original_safe_iface
         self.assertTrue(result["ok"])
         self.assertIn((2, "wlan0"), calls)
+        self.assertTrue(status["scan_paused"])
+        self.assertEqual(2, len(rows))
+        self.assertEqual("paused", snapshot["meta"]["sniff_state"])
+        self.assertTrue(stopped["ok"])
 
     def test_network_payload_encodes_simulated_coordinates(self):
         entry = {

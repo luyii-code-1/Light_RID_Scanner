@@ -1900,6 +1900,15 @@ def _sniff_note_error(msg: str) -> None:
         sniff_last_error = text
         sniff_last_error_wall = time.time()
 
+def _sniff_note_resume() -> None:
+    """Reset stall tracking after an intentional real-simulation pause."""
+    global sniff_last_pkt_mono, sniff_last_pkt_wall, sniff_last_error, sniff_last_error_wall
+    with sniff_health_lock:
+        sniff_last_pkt_mono = 0.0
+        sniff_last_pkt_wall = 0.0
+        sniff_last_error = ""
+        sniff_last_error_wall = 0.0
+
 def _sniff_health_meta(now_mono: float, now_wall: float) -> dict:
     with sniff_health_lock:
         last_pkt_mono = float(sniff_last_pkt_mono or 0.0)

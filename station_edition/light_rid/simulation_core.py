@@ -257,8 +257,7 @@ def _simulation_loop(generation: int) -> None:
             with state_lock:
                 for target in targets:
                     _simulation_update_target(target, options, elapsed, now, now_wall)
-                    if options.get("transport") == "memory":
-                        state_table[target["entry"]["sn"]] = target["entry"]
+                    state_table[target["entry"]["sn"]] = target["entry"]
             if options.get("transport") == "network":
                 _simulation_transmit(targets, str(options.get("iface") or ""))
         time.sleep(SIMULATION_TICK_SEC)
@@ -316,9 +315,9 @@ def simulation_start(body: dict | None = None) -> dict:
     with state_lock:
         for target in targets:
             _simulation_update_target(target, options, 0.0, now, now_wall)
-            if transport == "memory":
-                state_table[target["entry"]["sn"]] = target["entry"]
+            state_table[target["entry"]["sn"]] = target["entry"]
     if transport == "network":
+        simulation_scan_pause_event.set()
         if not _simulation_transmit(targets, iface):
             error = str(_simulation_tx_stats.get("last_error") or "network transmit failed")
             simulation_stop()
@@ -338,6 +337,7 @@ def simulation_stop() -> dict:
         _simulation_started_wall_ts = None
         _simulation_options = {}
         _simulation_tx_stats = {}
+        simulation_scan_pause_event.clear()
     with state_lock:
         for sn in sn_list:
             entry = state_table.get(sn)
@@ -361,6 +361,7 @@ def simulation_status() -> dict:
         "count": len(targets),
         "started_at": _fmt_wall_ts(started),
         "elapsed_sec": round(max(0.0, now_wall - started), 1) if started else 0.0,
+        "scan_paused": bool(targets) and simulation_scan_pause_event.is_set(),
         "options": options,
         "transmit": dict(_simulation_tx_stats),
         "targets": [target["entry"]["sn"] for target in targets],

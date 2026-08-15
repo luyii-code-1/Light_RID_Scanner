@@ -115,6 +115,8 @@ def parse_frame(pkt) -> None:
 def _parse_frame_impl(pkt) -> None:
     global ap_seq
     try:
+        if simulation_scan_pause_event.is_set():
+            return
         if not pkt.haslayer(Dot11): return
         d11 = pkt[Dot11]
         if d11.type != 0: return
@@ -932,6 +934,7 @@ def main() -> None:
         iface_cur = str(iface or "")
         iface_watch_since = time.monotonic() if iface_cur else 0.0
         hop_started = bool(args.hop and bool(iface))
+        simulation_was_paused = False
 
         def note_recover_failure(reason: str, allow_restart: bool = True) -> None:
             nonlocal recover_fail_count
@@ -1016,6 +1019,16 @@ def main() -> None:
                 if state != "ok":
                     raise RuntimeError(detail or "sniff worker failed")
                 fail_count = 0
+                if simulation_scan_pause_event.is_set():
+                    simulation_was_paused = True
+                    set_iface_watch(iface_cur)
+                    note_recover_success()
+                    time.sleep(0.05)
+                    continue
+                if simulation_was_paused:
+                    _sniff_note_resume()
+                    set_iface_watch(iface_cur)
+                    simulation_was_paused = False
                 now_mono = time.monotonic()
                 idle = _sniff_idle_sec(now_mono)
                 no_pkt_elapsed = None

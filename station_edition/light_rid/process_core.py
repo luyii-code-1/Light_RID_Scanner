@@ -2783,6 +2783,10 @@ def _state_snapshot(lightweight: bool = False) -> dict:
         drones.sort(key=lambda d: (d["lost"], d.get("archived", False), d["age"], d["sn"]))
         map_drones = [d for d in drones if not d.get("archived")]
     sniff_meta = _sniff_health_meta(now, now_wall)
+    if simulation_scan_pause_event.is_set():
+        sniff_meta = dict(sniff_meta)
+        sniff_meta["state"] = "paused"
+        sniff_meta["msg"] = "真实模拟发射中，扫描暂时停止；结束模拟后自动恢复"
     basic_cfg = APP_CONFIG.get("basic") if isinstance(APP_CONFIG, dict) else {}
     if not isinstance(basic_cfg, dict):
         basic_cfg = {}

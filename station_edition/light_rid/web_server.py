@@ -3590,6 +3590,9 @@ function applySniffStatus(meta){
     if(state === 'ok'){
       badge.classList.add('ok');
       badge.textContent = '正常';
+    } else if(state === 'paused'){
+      badge.classList.add('warn');
+      badge.textContent = '暂停';
     } else if(state === 'error'){
       badge.classList.add('err');
       badge.textContent = '异常';
@@ -6822,7 +6825,7 @@ _MAIN_PAGE_PATCH_JS = r"""
     else strong.textContent = '未运行';
     if(running){
       var tx = data.transmit || {};
-      var mode = data.options && data.options.transport === 'memory' ? '仅内存' : ('网卡 ' + String(tx.iface || (data.options || {}).iface || '-'));
+      var mode = data.options && data.options.transport === 'memory' ? '仅内存' : ('网卡 ' + String(tx.iface || (data.options || {}).iface || '-') + (data.scan_paused ? ' · 扫描暂时停止' : ''));
       strong.textContent = String(data.count || 0) + ' 个目标 · ' + mode + ' · 已发 ' + String(tx.sent || 0) + ' · 失败 ' + String(tx.failed || 0) + (tx.last_error ? ' · ' + String(tx.last_error) : '');
     }
   }
